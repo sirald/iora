@@ -1,0 +1,19 @@
+{
+  "name": "iora-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@creit-tech/stellar-wallets-kit": "npm:@jsr/creit-tech__stellar-wallets-kit@^2.7.1",
+    "@stellar/freighter-api": "^6.0.1",
+    "@stellar/stellar-sdk": "^17.4.0",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "vite": "^8.3.5"
+  }
+}

@@ -1,0 +1,552 @@
+/* Iora gorunumu: "emir fisi". Bu dosya en son yuklenir ve uc sayfanin (ana sayfa, uygulama, docs) ortak
+   gorunusunu belirler (secicilerdeki ":root:root" on eki, yukleme sirasi ne olursa olsun bu kurallarin
+   sayfa kurallarini gecmesi icindir): koseli kutular, ince cizgiler, golge/gradyan/parlama yok, rakamlar tek aralikli yazi tipinde.
+   Renkler base.css'teki tokenlardan gelir. Yerlesim kurallari landing.css / style.css / docs.css'te kalir. */
+
+/* 1) Duz ve koseli */
+/* Koseli gorunum ana sayfa ve docs icindir; uygulama (body.appbody) yuvarlak koseli urun gorunumunu kullanir (bolum 11). */
+:root:root body:not(.appbody) *, :root:root body:not(.appbody) *::before, :root:root body:not(.appbody) *::after { border-radius: 0 !important; backdrop-filter: none !important; }
+:root:root .live, :root:root .chain-dot, :root:root .wdot, :root:root .dot, :root:root .th-ring, :root:root .spin, :root:root .spinner, :root:root input[type="radio"] { border-radius: 999px !important; }
+:root:root input[type="range"]::-webkit-slider-thumb { border-radius: 999px !important; }
+:root:root input[type="range"]::-moz-range-thumb { border-radius: 999px !important; }
+:root:root body, :root:root body.landing { background: var(--bg) !important; font-family: var(--sans); }
+:root:root .hero::after, :root:root .glow::after, :root:root .sim::before { display: none !important; }
+:root:root .live, :root:root .chain-dot, :root:root #connect .wdot { box-shadow: none !important; }
+
+/* 2) Yazi */
+:root:root h1, :root:root h2, :root:root h3 { font-family: var(--display); font-weight: 500; }
+:root:root h1, :root:root h2 { background: none !important; color: var(--text); -webkit-text-fill-color: currentColor; }
+:root:root h1 { letter-spacing: -0.04em; }
+:root:root h1 .ini { color: inherit; -webkit-text-fill-color: currentColor; }
+:root:root .facts dd, :root:root .costs td, :root:root .calc output, :root:root .calc b, :root:root .live-grid dd, :root:root .stat b, :root:root .num, :root:root code, :root:root kbd, :root:root .addr, :root:root .mono, :root:root #c-earn, :root:root #c-amount-v, :root:root #c-days-v, :root:root #c-apy-v { font-family: var(--mono); letter-spacing: -0.02em; }
+:root:root code { font-size: 0.92em; }
+
+/* 3) Dugmeler */
+:root:root .btn { box-shadow: inset 0 0 0 1px var(--line-2); background: transparent; color: var(--text); font-weight: 500; transition: background 0.15s, color 0.15s; }
+:root:root .btn:hover { background: var(--text); color: var(--bg); box-shadow: inset 0 0 0 1px var(--text); transform: none !important; filter: none !important; }
+:root:root .btn.primary, :root:root button.primary { background: var(--primary-1) !important; color: var(--accent-ink) !important; box-shadow: none !important; filter: none !important; font-weight: 600; }
+:root:root .btn.primary:hover, :root:root button.primary:hover { background: var(--primary-2) !important; }
+:root:root .nav-app { background: var(--primary-1) !important; color: var(--accent-ink) !important; box-shadow: none !important; font-weight: 500; }
+:root:root .chain-pill { background: transparent !important; box-shadow: none !important; padding-left: 0 !important; font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+
+/* 4) Kutular: golge yerine ince cizgi */
+:root:root .glow, :root:root .lift, :root:root .steps li, :root:root .rules div, :root:root .use-grid article, :root:root .panel, :root:root .setup, :root:root .ticket, :root:root .novault, :root:root .card, :root:root [class*="card"] { box-shadow: inset 0 0 0 1px var(--line) !important; }
+:root:root .glow:hover, :root:root .lift:hover { transform: none !important; box-shadow: inset 0 0 0 1px var(--line-2) !important; }
+:root:root input, :root:root select, :root:root textarea { box-shadow: none; }
+:root:root :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 5) Ana sayfa girisi: su seviyesi ve samandira */
+:root:root .tidehero { margin: 0; min-width: 0; }
+:root:root .th-stage { position: relative; height: 520px; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent); mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent); }
+:root:root .th-meter { position: absolute; left: 12%; top: 0; display: flex; flex-direction: column; }
+:root:root .th-meter > span { font-size: 13px; color: var(--muted); }
+:root:root .th-meter b { font: 400 clamp(30px, 3.4vw, 40px)/1.15 var(--mono); letter-spacing: -0.03em; color: var(--accent); font-variant-numeric: tabular-nums; }
+:root:root .th-meter small { font-size: 12px; letter-spacing: 0.04em; }
+:root:root .th-limit { position: absolute; left: 0; top: 370px; width: 100%; border-top: 1.5px dashed var(--accent); }
+:root:root .th-limit-label { position: absolute; left: 12%; top: 380px; font: 13px var(--mono); color: var(--accent); }
+:root:root .th-tide { position: absolute; left: 0; top: 170px; width: 100%; height: 420px; border-top: 2px solid var(--text); background: linear-gradient(color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%); animation: th-tide 12s ease-in-out infinite; }
+:root:root .th-price-label { position: absolute; right: 13%; top: -30px; font: 13px var(--mono); color: var(--text-2); }
+:root:root .th-ring { position: absolute; left: 50%; border: 1.5px solid var(--accent); box-sizing: border-box; }
+:root:root .th-ring.r1 { top: -52px; width: 60px; height: 60px; margin-left: -30px; border-width: 2px; animation: th-r1 12s ease-out infinite; }
+:root:root .th-ring.r2 { top: -66px; width: 88px; height: 88px; margin-left: -44px; animation: th-r2 12s ease-out infinite; }
+:root:root .th-ring.r3 { top: -80px; width: 116px; height: 116px; margin-left: -58px; animation: th-r3 12s ease-out infinite; }
+:root:root .th-buoy { position: absolute; left: 50%; top: -40px; width: 36px; height: 44px; margin-left: -18px; transform-origin: 50% 100%; animation: th-bob 3.2s ease-in-out infinite; }
+:root:root .th-fill { position: absolute; left: 0; top: 232px; width: 100%; display: flex; justify-content: center; animation: th-fill 12s ease-out infinite; }
+:root:root .th-fill span { padding: 8px 16px; background: var(--primary-1); color: var(--accent-ink); font: 500 13.5px var(--mono); }
+:root:root .tidehero figcaption { margin: 10px 0 0 12%; font-size: 13px; color: var(--muted); }
+@keyframes th-tide { 0% { transform: translateY(0); } 12% { transform: translateY(46px); } 22% { transform: translateY(30px); } 38% { transform: translateY(96px); } 50% { transform: translateY(78px); } 64% { transform: translateY(150px); } 75%, 100% { transform: translateY(200px); } }
+@keyframes th-bob { 0%, 100% { transform: rotate(-5deg); } 50% { transform: rotate(5deg); } }
+@keyframes th-r1 { 0%, 14% { opacity: 0; transform: scale(0.7); } 20%, 96% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
+@keyframes th-r2 { 0%, 34% { opacity: 0; transform: scale(0.7); } 40%, 96% { opacity: 0.75; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
+@keyframes th-r3 { 0%, 54% { opacity: 0; transform: scale(0.7); } 60%, 96% { opacity: 0.5; transform: scale(1); } 100% { opacity: 0; transform: scale(1); } }
+@keyframes th-fill { 0%, 74% { opacity: 0; } 79%, 95% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  :root:root .th-tide, :root:root .th-buoy, :root:root .th-ring, :root:root .th-fill { animation: none !important; }
+  :root:root .th-tide { transform: translateY(200px); }
+}
+@media (max-width: 860px) { :root:root .th-stage { height: 460px; } }
+
+/* 6) Uygulama: kasa dagilim cubugu. Iki parca ayni renk ailesinden, acik/koyu tonla ayrilir. */
+:root:root .a-free { background: color-mix(in srgb, var(--accent) 35%, var(--bg-2)); }
+:root:root .a-res { background: var(--accent); }
+
+/* 7) Uygulama: sekmeler. Kutulu hap yerine sayfa genisliginde alt cizgili sekme satiri. */
+:root:root .appnav { width: 100%; gap: 28px; padding: 0; background: none; box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; scrollbar-width: none; }
+:root:root .appnav::-webkit-scrollbar { display: none; }
+:root:root .appnav a { flex: none; padding: 12px 0 13px; font-size: 15px; white-space: nowrap; color: var(--muted); box-shadow: none; background: none; }
+:root:root .appnav a:hover { color: var(--text); }
+:root:root .appnav a[aria-current="page"] { color: var(--text); background: none; box-shadow: inset 0 -2px 0 var(--accent); }
+:root:root .appnav .new { background: none; padding: 0; font: 500 11px var(--mono); color: var(--accent); }
+
+/* 8) Uygulama: havuz ozeti. Sag sutunda, emirlerin altinda; sayfanin kendi varligi icin tek satir. */
+:root:root .poolbox .count { color: var(--muted); font-weight: 400; }
+:root:root .pool-grid { display: block; border: 0; padding-top: 14px; }
+:root:root .pool-grid > p { margin: 0; font-size: 14px; }
+:root:root .pool-card { display: grid; grid-template-columns: auto auto minmax(140px, 1fr); gap: 4px 32px; align-items: center; padding: 0; min-width: 0; box-shadow: none !important; background: none; border: 0; }
+:root:root .pool-card h3 { margin: 0; font: 500 15px var(--mono); display: grid; gap: 2px; }
+:root:root .pool-card h3 span { font: 400 12px var(--sans); }
+:root:root .pool-card dl { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 28px; }
+:root:root .pool-card dt { font-size: 12px; color: var(--muted); }
+:root:root .pool-card dd { margin: 0; padding: 0; text-align: left; font: 400 17px/1.3 var(--mono); letter-spacing: -0.02em; color: var(--text); white-space: nowrap; }
+:root:root .pool-card dd small { font: 400 12px var(--sans); letter-spacing: 0; color: var(--muted); }
+:root:root .pool-card dd.pos { color: var(--accent); }
+:root:root .pool-util { margin: 0; }
+:root:root .pool-util-bar { position: relative; height: 4px; background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .pool-util-bar span { display: block; height: 100%; background: var(--accent); }
+:root:root .pool-util-bar i { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); }
+:root:root .pool-util-legend { display: flex; justify-content: space-between; margin-top: 4px; font: 11.5px var(--mono); color: var(--muted); }
+:root:root .pool-info { margin-top: 12px; font-size: 13px; }
+:root:root .pool-info summary { cursor: pointer; color: var(--accent); width: max-content; }
+:root:root .pool-full { margin-top: 10px; overflow-x: auto; }
+:root:root .pool-full table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+:root:root .pool-full th, :root:root .pool-full td { padding: 7px 14px 7px 0; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+:root:root .pool-full thead th { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+:root:root .pool-full td { font-family: var(--mono); }
+:root:root .pool-info .fine { margin: 10px 0 0; }
+@media (max-width: 620px) {
+  :root:root .pool-card { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  :root:root .appnav { gap: 20px; }
+}
+
+/* 9) Uygulama: tekrar eden kutular kalkar. Piyasa (oran ve kullanim havuz ozetinde, fiyat emir formunda)
+   ve Cuzdan (ustteki cuzdan menusunde) kutulari gosterilmez; bos fiyat olcegi yer kaplamaz. */
+:root:root .panel.market, :root:root .cols > .side > section.panel { display: none !important; }
+:root:root .ladder-panel:has(> .ladder > .empty) { display: none; }
+:root:root #plain { display: none !important; }
+/* Kasa yokken yan kutu dar bir sutunda yalniz kalmasin */
+:root:root body:not(.has-vault) .view[data-view-pane="vault"] .cols,
+:root:root body:not(.has-svault) .sellview .cols { grid-template-columns: minmax(0, 1fr); grid-template-areas: "deck"; }
+:root:root body:not(.has-vault) .view[data-view-pane="vault"] .deck,
+:root:root body:not(.has-svault) .sellview .deck { max-width: 720px; }
+:root:root body:not(.has-vault) .view[data-view-pane="vault"] .side,
+:root:root body:not(.has-svault) .sellview .side { display: none; }
+
+/* 10) Uygulama duzeni: solda emir karti, sagda acik emirler kucuk kartlar halinde (CoW Swap duzeni). */
+:root:root .cols,
+:root:root body.has-svault .sellview .cols,
+:root:root .lendpage .lp-cols { grid-template-columns: 440px minmax(0, 1fr); grid-template-areas: "side deck"; gap: 36px; }
+:root:root .deck { gap: 28px; align-content: start; }
+/* Sag sutunda kutu yok: baslik + liste */
+:root:root .deck > .panel { background: none; box-shadow: none !important; padding: 0; }
+:root:root .deck > .panel > .head { padding-bottom: 10px; border-bottom: 1px solid var(--line-2); margin-bottom: 0; }
+:root:root .deck > .panel h2 { font-size: 16px; font-weight: 600; }
+:root:root .deck > .panel.safety { padding-top: 18px; border-top: 1px solid var(--line); }
+:root:root .deck > .panel.safety h2 { font-size: 14px; color: var(--muted); font-weight: 500; }
+:root:root .deck > .panel.safety li { font-size: 13.5px; }
+/* Emirler: tablo yerine iki satirlik kucuk kartlar */
+:root:root #orders, :root:root #sv-orders { overflow: visible; }
+:root:root #orders table, :root:root #sv-orders table,
+:root:root #orders tbody, :root:root #sv-orders tbody { display: block; }
+:root:root #orders thead, :root:root #sv-orders thead { display: none; }
+:root:root #orders tr, :root:root #sv-orders tr { display: grid; grid-template-columns: auto auto auto auto minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+:root:root #orders[data-show="open"] tr.is-done { display: none; }
+:root:root #orders td, :root:root #sv-orders td { display: block; padding: 0; border: 0; font-size: 13px; white-space: nowrap; min-width: 0; }
+:root:root #orders td .muted, :root:root #sv-orders td .muted,
+:root:root #orders td .then-note, :root:root #sv-orders td .then-note { display: inline; margin-left: 6px; font-size: 12px; }
+:root:root #orders td:nth-child(1), :root:root #sv-orders td:nth-child(1) { grid-area: 1 / 1; font: 12px var(--mono); color: var(--muted); }
+:root:root #orders td:nth-child(2), :root:root #sv-orders td:nth-child(2) { grid-area: 1 / 2; font: 500 15px var(--mono); letter-spacing: -0.02em; color: var(--text); }
+:root:root #orders td:nth-child(3), :root:root #sv-orders td:nth-child(3) { grid-area: 1 / 3 / 2 / 6; font: 14px var(--mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+:root:root #orders td:nth-child(3)::before { content: "at "; font-family: var(--sans); color: var(--muted); }
+:root:root #orders td:nth-child(8), :root:root #sv-orders td:nth-child(8) { grid-area: 1 / 6; justify-self: end; }
+:root:root #orders td:nth-child(4), :root:root #sv-orders td:nth-child(4) { grid-area: 2 / 1 / 3 / 3; display: flex; align-items: center; gap: 8px; font-family: var(--mono); color: var(--muted); }
+:root:root #orders td:nth-child(4) .bar, :root:root #sv-orders td:nth-child(4) .bar { width: 56px; flex: none; margin: 0; }
+:root:root #orders td:nth-child(6), :root:root #sv-orders td:nth-child(6) { grid-area: 2 / 3; }
+:root:root #orders td:nth-child(7), :root:root #sv-orders td:nth-child(7) { grid-area: 2 / 4; color: var(--muted); }
+:root:root #orders tr.is-open td:nth-child(7)::before, :root:root #sv-orders tr.is-open td:nth-child(7)::before { content: "ends "; }
+:root:root #orders td:nth-child(5), :root:root #sv-orders td:nth-child(5) { grid-area: 2 / 4; color: var(--muted); }
+:root:root #orders td:nth-child(5)::before, :root:root #sv-orders td:nth-child(5)::before { content: "avg "; }
+:root:root #orders tr.is-open td:nth-child(5), :root:root #sv-orders tr.is-open td:nth-child(5),
+:root:root #orders tr.is-done td:nth-child(7), :root:root #sv-orders tr.is-done td:nth-child(7) { display: none; }
+:root:root #orders td:nth-child(9), :root:root #sv-orders td:nth-child(9) { grid-area: 2 / 6; justify-self: end; display: flex; gap: 6px; }
+:root:root #orders td:nth-child(9) button, :root:root #sv-orders td:nth-child(9) button { padding: 4px 10px; font-size: 12.5px; }
+:root:root #orders tr.is-done td:nth-child(2), :root:root #sv-orders tr.is-done td:nth-child(2) { color: var(--text-2); }
+:root:root #orders[data-show="open"]:has(tr):not(:has(tr.is-open))::after { content: "No open orders right now. Choose All to see filled and cancelled ones."; display: block; padding: 22px 0; color: var(--muted); font-size: 14px; }
+:root:root .empty { text-align: left; padding: 18px 0; }
+@media (max-width: 1000px) {
+  :root:root .cols,
+  :root:root body.has-svault .sellview .cols,
+  :root:root .lendpage .lp-cols { grid-template-columns: minmax(0, 1fr); grid-template-areas: "side" "deck"; gap: 24px; }
+  :root:root .side { max-width: 560px; }
+}
+@media (max-width: 520px) {
+  :root:root #orders tr, :root:root #sv-orders tr { grid-template-columns: auto auto minmax(0, 1fr) auto; }
+  :root:root #orders td:nth-child(3), :root:root #sv-orders td:nth-child(3) { grid-area: 1 / 3 / 2 / 4; }
+  :root:root #orders td:nth-child(8), :root:root #sv-orders td:nth-child(8) { grid-area: 1 / 4; }
+  :root:root #orders td:nth-child(4), :root:root #sv-orders td:nth-child(4) { grid-area: 2 / 1 / 3 / 4; }
+  :root:root #orders td:nth-child(6), :root:root #sv-orders td:nth-child(6) { grid-area: 3 / 1 / 4 / 3; }
+  :root:root #orders td:nth-child(7), :root:root #sv-orders td:nth-child(7),
+  :root:root #orders td:nth-child(5), :root:root #sv-orders td:nth-child(5) { grid-area: 3 / 3; }
+  :root:root #orders td:nth-child(9), :root:root #sv-orders td:nth-child(9) { grid-area: 2 / 4; }
+}
+:root:root #orders td, :root:root #sv-orders td { text-align: left; }
+
+/* 11) Uygulama: urun gorunumu. Morpho / CoW / Jupiter gibi uygulamalardaki ortak dil: dolu ve yuvarlak
+   yuzeyler (cizgi yerine), uc yuzey seviyesi, tek guclu ana dugme, anlam tasiyan renkler
+   (mavi = islem, yesil = kazanc, amber = emre ayrilan) ve buyuk rakam / kucuk etiket karsitligi. */
+:root:root body.appbody { --amber: #a05a00; --cta: #1f4fd1; --cta-hi: #163a9e; --card: var(--surface); --inset: var(--bg-2);
+  background: radial-gradient(1100px 520px at 12% -8%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 62%), radial-gradient(900px 480px at 96% 4%, color-mix(in srgb, var(--ok) 6%, transparent), transparent 60%), var(--bg) !important; background-repeat: no-repeat !important; }
+:root[data-theme="dark"]:root body.appbody { --amber: #f0b454; --cta: #2f62ea; --cta-hi: #4676f5; --card: #0f172b; --inset: #0a1020; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):root body.appbody { --amber: #f0b454; --cta: #2f62ea; --cta-hi: #4676f5; --card: #0f172b; --inset: #0a1020; } }
+
+/* Sekmeler: hap */
+:root:root .appbody .appnav { width: fit-content; max-width: min(100%, calc(100vw - 28px)); min-width: 0; gap: 2px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; }
+:root:root .appbody .appnav a { padding: 9px 16px; border-radius: 10px; font-size: 14.5px; }
+:root:root .appbody .appnav a[aria-current="page"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); box-shadow: none; }
+:root:root .appbody .appnav .new { padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); font-family: var(--sans); }
+
+/* Kasa ozeti: renkli ust kart */
+:root:root .appbody .overview { padding: 24px 28px 22px; border-radius: 22px; background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 15%, var(--card)), var(--card) 58%); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--line)); }
+:root:root .appbody .overview h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+:root:root .appbody .vault-chip { background: color-mix(in srgb, var(--bg) 55%, transparent); box-shadow: inset 0 0 0 1px var(--line); border-radius: 12px; }
+:root:root .appbody .alloc-bar { height: 10px; border-radius: 999px; gap: 3px; background: none; }
+:root:root .appbody .alloc-bar span { border-radius: 999px; }
+:root:root .appbody .a-free { background: var(--accent); }
+:root:root .appbody .a-res { background: var(--amber); }
+:root:root .appbody .alloc-legend .sw { border-radius: 4px; }
+:root:root .appbody .portfolio { border-radius: 16px; background: var(--card); }
+:root:root .appbody .novault { border-radius: 16px; }
+
+/* Emir karti */
+:root:root .appbody .ticket { border-radius: 24px; padding: 10px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line), 0 18px 50px -28px rgba(0, 0, 0, 0.55) !important; }
+:root:root .appbody .ticket .seg { border-radius: 12px; background: var(--inset); }
+:root:root .appbody .ticket .seg button { border-radius: 9px; }
+:root:root .appbody .box { border-radius: 18px; background: var(--inset); box-shadow: inset 0 0 0 1px transparent !important; }
+:root:root .appbody .box:focus-within { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent) !important; }
+:root:root .appbody .box.out { background: color-mix(in srgb, var(--ok) 6%, var(--inset)); }
+:root:root .appbody .ticket .chips button, :root:root .appbody .ticket .opts button { border-radius: 999px; }
+:root:root .appbody .btn.primary, :root:root .appbody button.primary { background: var(--cta) !important; color: #fff !important; border-radius: 14px; font-weight: 600; box-shadow: 0 10px 26px -12px color-mix(in srgb, var(--cta) 80%, transparent) !important; }
+:root:root .appbody .btn.primary:hover, :root:root .appbody button.primary:hover { background: var(--cta-hi) !important; }
+:root:root .appbody .btn.primary:disabled, :root:root .appbody button.primary:disabled { box-shadow: none !important; opacity: 0.55; }
+:root:root .appbody .btn { border-radius: 12px; }
+
+/* Sag sutun: bolumler kart, emirler tek tek kucuk kart */
+:root:root .appbody .deck { gap: 18px; }
+:root:root .appbody .deck > .panel { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; padding: 18px 20px; border-radius: 20px; }
+:root:root .appbody .deck > .panel > .head { border-bottom: 0; padding-bottom: 6px; }
+:root:root .appbody #orders tr, :root:root .appbody #sv-orders tr { padding: 12px 14px; margin-top: 8px; border: 0; border-radius: 14px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody #orders tr.is-open, :root:root .appbody #sv-orders tr.is-open { box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px var(--line); }
+:root:root .appbody #orders tr.is-done, :root:root .appbody #sv-orders tr.is-done { opacity: 0.8; }
+:root:root .appbody .bar { height: 6px; border-radius: 999px; }
+:root:root .appbody .bar span { border-radius: 999px; background: var(--ok); }
+:root:root .appbody .tag { border-radius: 999px; }
+:root:root .appbody .tag.cancelled { color: var(--muted); }
+:root:root .appbody .tag.expired { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+:root:root .appbody .earn-cell { color: var(--ok); }
+:root:root .appbody .pool-card dd.pos { color: var(--ok); font-size: 20px; }
+:root:root .appbody .pool-util-bar, :root:root .appbody .pool-util-bar span { border-radius: 999px; }
+:root:root .appbody .pool-util-bar { height: 6px; }
+:root:root .appbody .legacy { border-radius: 18px; }
+:root:root .appbody .legacy-item { border-radius: 14px; }
+:root:root .appbody .logbox { border-radius: 14px; }
+/* Sutunlar icerikten genis olamaz (uzun satir sayfayi yana kaydirmasin) */
+:root:root .appbody .deck, :root:root .appbody .side { grid-template-columns: minmax(0, 1fr); }
+:root:root .appbody .deck > .panel { min-width: 0; }
+:root:root .appbody #orders, :root:root .appbody #sv-orders { overflow-x: auto; }
+@media (max-width: 560px) {
+  :root:root .appbody .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :root:root .appbody .stats b, :root:root .appbody .stats .num { font-size: clamp(18px, 6.2vw, 26px); }
+  :root:root .appbody .overview { padding: 20px 18px 18px; }
+}
+
+/* 12) Markets: uygulamanin ilk sayfasi. Her satir bir pazar (alim / satis), oranlar havuzdan canli. */
+:root:root .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+:root:root .appbody .mk-head { margin-bottom: 18px; }
+:root:root .appbody .panel.mk { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; border-radius: 20px; padding: 6px 0; overflow: hidden; }
+:root:root .appbody .mk .table-wrap { overflow-x: auto; }
+:root:root .appbody .mk-table { width: 100%; min-width: 860px; border-collapse: collapse; }
+:root:root .appbody .mk-table th { padding: 12px 22px; font-size: 12.5px; font-weight: 400; color: var(--muted); text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+:root:root .appbody .mk-table td { padding: 18px 22px; border-bottom: 1px solid var(--line); font: 400 16px/1.3 var(--mono); letter-spacing: -0.02em; color: var(--text); vertical-align: middle; white-space: nowrap; }
+:root:root .appbody .mk-table tbody tr:last-child td { border-bottom: 0; }
+:root:root .appbody .mk-table tr[data-go] { cursor: pointer; transition: background 0.12s; }
+:root:root .appbody .mk-table tr[data-go]:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+:root:root .appbody .mk-table td small { display: block; margin-top: 3px; font: 400 12px var(--sans); letter-spacing: 0; color: var(--muted); }
+:root:root .appbody .mk-table td.pos { color: var(--ok); font-size: 20px; }
+:root:root .appbody .mk-table td.muted { font: 14px var(--sans); color: var(--muted); }
+:root:root .appbody .mk-pair { display: flex; align-items: center; gap: 8px; font: 500 16px var(--sans); letter-spacing: 0; }
+:root:root .appbody .mk-pair span { color: var(--muted); }
+:root:root .appbody .mk-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+:root:root .appbody .mk-tags span { padding: 2px 9px; border-radius: 999px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); font: 12px var(--sans); letter-spacing: 0; color: var(--text-2); }
+:root:root .appbody .mk-table .pool-util { min-width: 170px; }
+:root:root .appbody .mk-table .btn.primary { padding: 9px 18px; font-size: 14px; white-space: nowrap; }
+:root:root .appbody .marketspage .pool-info { margin: 14px 4px 0; }
+
+/* Emir kartinda acilir bolumler (Scaled orders, Advanced) */
+:root:root .appbody .ticket details.adv summary { color: var(--text-2); display: flex; align-items: center; gap: 6px; list-style: none; }
+:root:root .appbody .ticket details.adv summary::-webkit-details-marker { display: none; }
+:root:root .appbody .ticket details.adv summary::after { content: "+"; margin-left: auto; font: 400 18px/1 var(--mono); color: var(--muted); }
+:root:root .appbody .ticket details.adv[open] summary::after { content: "−"; }
+:root:root .appbody .ticket details.scaled .expiry:first-of-type { margin-top: 12px; }
+:root:root .appbody .marketspage { min-width: 0; }
+:root:root .appbody .panel.mk, :root:root .appbody .marketspage .pool-info { max-width: min(100%, calc(100vw - 28px)); }
+:root:root .appbody .mk .table-wrap { position: relative; }
+
+/* 13) Ek (gostermelik) pazarlar */
+:root:root .coin.other { background: radial-gradient(circle at 50% 50%, #fff 0 3px, transparent 3.5px), #6b7a99; }
+:root:root .appbody .mk-tags span.warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); }
+:root:root .appbody .xwarn { margin: 0 0 16px; padding: 12px 16px; border-radius: 14px; font-size: 13.5px; line-height: 1.5; color: var(--text-2); background: color-mix(in srgb, var(--amber) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); max-width: 96ch; }
+:root:root .appbody .xwarn b { color: var(--amber); }
+:root:root .appbody .xwarn button { margin-left: 8px; }
+:root:root .appbody .mk-table .btn:not(.primary) { padding: 9px 18px; font-size: 14px; }
+
+/* 14) Alt bilgi: logo ve telif satiri */
+:root:root .bottom { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 32px; text-align: left; }
+:root:root .bottom-brand .mark { font-size: 20px; }
+:root:root .bottom-brand p, :root:root .foot-copy { margin: 10px 0 0; font-size: 13.5px; color: var(--muted); }
+:root:root .appbody .ticket .xwarn { margin: 12px 4px; font-size: 13px; }
+
+/* 15) Islem ekrani (spot borsa duzeni): ustte pazar cubugu, ortada grafik ve havuz derinligi, sagda emir karti
+   ve kasa ozeti, altta emirler / gecmis sekmeleri. Portfolio ayri sayfa. */
+:root:root body.appbody { --down: #c8324a; }
+:root[data-theme="dark"]:root body.appbody { --down: #ff7285; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):root body.appbody { --down: #ff7285; } }
+:root:root .appbody .pos { color: var(--ok); }
+:root:root .appbody .neg { color: var(--down); }
+:root:root .appbody .appnav .gone { display: none !important; }
+:root:root body.appbody .shell { max-width: 1440px; }
+:root:root body.appbody[data-view="vault"] .shell, :root:root body.appbody[data-view="sell"] .shell { gap: 14px; }
+:root:root .appbody .pfpage { display: grid; gap: 18px; }
+:root:root .connected.appbody .pfpage.user-only { display: grid; }
+:root:root .appbody .pfpage[hidden] { display: none !important; }
+
+/* Pazar cubugu */
+:root:root .appbody .tbar { align-items: center; gap: 12px 32px; flex-wrap: wrap; padding: 12px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 18px; }
+:root:root .connected.appbody .tbar.user-only { display: flex; }
+:root:root .appbody .tb-pair { display: flex; align-items: center; gap: 10px; }
+:root:root .appbody .pairsel { appearance: none; -webkit-appearance: none; padding: 8px 34px 8px 12px; border: 0; border-radius: 12px; font: 600 16px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset); box-shadow: inset 0 0 0 1px var(--line);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 54%, calc(100% - 12px) 54%; background-size: 5px 5px; background-repeat: no-repeat; }
+:root:root .appbody .tb-px { display: grid; gap: 0; }
+:root:root .appbody .tb-px b { font: 500 26px/1.15 var(--mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+:root:root .appbody .tb-px small, :root:root .appbody .tb-stat span { font-size: 12px; color: var(--muted); }
+:root:root .appbody .tb-stat { display: grid; gap: 2px; }
+:root:root .appbody .tb-stat b { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+:root:root .appbody .tb-earn { margin-left: auto; padding: 9px 14px; border-radius: 12px; font-size: 13.5px; font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+:root:root .appbody .tb-earn b { font-family: var(--mono); font-weight: 500; color: inherit; }
+
+/* Sutunlar: sol grafik + emirler, sag emir karti */
+:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) 350px !important; grid-template-areas: "stage side" "deck side" !important; grid-template-rows: auto 1fr; gap: 14px !important; align-items: start; }
+:root:root .appbody .tradeview .tslot { grid-area: stage; min-width: 0; }
+:root:root .appbody .tradeview .side { display: grid !important; position: static; gap: 12px; max-width: none; align-content: start; }
+:root:root .appbody .tradeview .deck { max-width: none !important; gap: 14px; }
+:root:root .appbody .tstage { display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 14px; align-items: stretch; }
+:root:root .appbody .tpanel { min-width: 0; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 18px; }
+
+/* Grafik */
+:root:root .appbody .chartcard { padding: 10px 12px 8px; }
+:root:root .appbody .chart-head { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 2px 4px 8px; min-height: 40px; }
+:root:root .appbody .tf { display: flex; gap: 2px; padding: 3px; background: var(--inset); border-radius: 10px; }
+:root:root .appbody .tf button { border: 0; background: none; box-shadow: none; padding: 4px 10px; border-radius: 7px; color: var(--muted); font: 500 12.5px var(--mono); cursor: pointer; }
+:root:root .appbody .tf button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .ohlc { display: flex; gap: 4px 10px; flex-wrap: wrap; font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+:root:root .appbody .ohlc b { font-weight: 500; color: var(--text-2); }
+:root:root .appbody .chart-box { position: relative; height: 430px; }
+:root:root .appbody .chart-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; }
+:root:root .appbody .ch-note { margin: 8px 4px 2px; padding: 8px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; color: var(--text-2); background: var(--inset); }
+:root:root .appbody .ch-legend { display: flex; gap: 6px 18px; flex-wrap: wrap; padding: 6px 4px 2px; font-size: 12px; color: var(--muted); }
+:root:root .appbody .ch-legend i { display: inline-block; width: 18px; margin-right: 6px; vertical-align: middle; border-top: 2px dashed var(--accent); }
+:root:root .appbody .ch-legend i.s { border-color: var(--amber); }
+
+/* Havuz derinligi */
+:root:root .appbody .depth { padding: 14px 0 10px; }
+:root:root .appbody .depth h2 { margin: 0 14px 8px; font: 600 14px var(--sans); letter-spacing: 0; }
+:root:root .appbody #dp { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); font-variant-numeric: tabular-nums; }
+:root:root .appbody #dp th { padding: 4px 14px 6px 0; text-align: right; font: 400 11.5px var(--sans); color: var(--muted); border: 0; }
+:root:root .appbody #dp th:first-child, :root:root .appbody #dp td:first-child { text-align: left; padding-left: 14px; }
+:root:root .appbody #dp td { position: relative; padding: 5px 14px 5px 0; text-align: right; border: 0; white-space: nowrap; }
+:root:root .appbody #dp td:nth-child(2) { color: var(--muted); }
+:root:root .appbody #dp tr[data-px] { cursor: pointer; }
+:root:root .appbody #dp tr[data-px]:hover td, :root:root .appbody #dp tr[data-px]:focus-visible td { background: var(--inset); }
+:root:root .appbody #dp .bar { position: absolute; right: 0; top: 2px; bottom: 2px; height: auto; border-radius: 3px 0 0 3px; opacity: 0.16; pointer-events: none; }
+:root:root .appbody #dp .dp-a .bar { background: var(--down); }
+:root:root .appbody #dp .dp-b .bar { background: var(--ok); }
+:root:root .appbody #dp .dp-a td:first-child { color: var(--down); }
+:root:root .appbody #dp .dp-b td:first-child { color: var(--ok); }
+:root:root .appbody #dp .mid td { padding: 9px 14px; text-align: left; font: 500 16px var(--mono); border-block: 1px solid var(--line); }
+:root:root .appbody #dp .mid small { margin-left: 8px; font: 12px var(--sans); color: var(--muted); }
+
+/* Sag sutun: al / sat secimi, emir karti, kasa ozeti */
+:root:root .appbody .sidesw { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; }
+:root:root .appbody.xmarket .sidesw { display: none; }
+:root:root .appbody .sidesw a { padding: 9px; border-radius: 10px; text-align: center; font-weight: 600; color: var(--muted); text-decoration: none; }
+:root:root .appbody .sidesw a:hover { color: var(--text); }
+:root:root .appbody .sidesw a.b[aria-current] { color: var(--ok); background: color-mix(in srgb, var(--ok) 15%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 45%, transparent); }
+:root:root .appbody .sidesw a.s[aria-current] { color: var(--down); background: color-mix(in srgb, var(--down) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--down) 45%, transparent); }
+:root:root .appbody .tradeview .ticket { border-radius: 18px; box-shadow: inset 0 0 0 1px var(--line) !important; }
+:root:root .appbody .tradeview .box { border-radius: 14px; }
+:root:root .appbody .vaultcard { padding: 14px 16px; border-radius: 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .vaultcard .overview-head { margin-bottom: 8px; gap: 8px; }
+:root:root .appbody .vaultcard h2 { margin: 0; font: 600 14px var(--sans); letter-spacing: 0; }
+:root:root .appbody .vaultcard .vault-chip { padding: 3px 4px 3px 10px; font-size: 12.5px; }
+:root:root .appbody .vaultcard .vault-chip:has(> span:empty) { display: none; }
+:root:root .appbody .vaultcard .stats { grid-template-columns: minmax(0, 1fr) !important; justify-content: stretch; }
+:root:root .appbody .vaultcard .tile { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 6px 0; margin: 0; border: 0; border-top: 1px solid var(--line); }
+:root:root .appbody .vaultcard .tile:first-child { border-top: 0; }
+:root:root .appbody .vaultcard .tile b { font: 500 14px var(--mono) !important; letter-spacing: 0; }
+:root:root .appbody .vaultcard .tile small { font-size: 12px; }
+:root:root .appbody .vaultcard .alloc { margin-top: 10px; }
+:root:root .appbody .tradeview .novault { display: grid; gap: 12px; padding: 0; background: none; box-shadow: none !important; }
+:root:root .appbody .tradeview .novault[hidden] { display: none; }
+:root:root .appbody .tradeview .novault h2 { font-size: 15px; }
+
+/* Alt kart: emirler / gecmis / ozet sekmeleri */
+:root:root .appbody .tradeview .deck > .tcard { padding: 4px 0 12px; }
+:root:root .appbody .ttabs { display: flex; gap: 24px; padding: 8px 18px 0; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+:root:root .appbody .ttabs button, :root:root .appbody .ttabs .solo { flex: none; padding: 8px 0 11px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; box-shadow: none; font: 500 14px var(--sans); color: var(--muted); white-space: nowrap; cursor: pointer; }
+:root:root .appbody .ttabs button[aria-selected="true"], :root:root .appbody .ttabs .solo { color: var(--text); border-bottom-color: var(--accent); }
+:root:root .appbody .ttabs .solo { cursor: default; }
+:root:root .appbody .tcard > [data-pane], :root:root .appbody .tcard > #sv-orders { padding: 8px 18px 0; }
+:root:root .appbody .tcard .head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 4px 0 2px; margin: 0; border: 0; }
+
+/* Portfolio */
+:root:root .appbody .pf { display: grid; gap: 14px; min-width: 0; }
+:root:root .appbody .pf-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+:root:root .appbody .pf-kpi, :root:root .appbody .pf-card, :root:root .appbody .pf-empty { min-width: 0; padding: 16px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 18px; }
+:root:root .appbody .pf-kpi { display: grid; gap: 3px; }
+:root:root .appbody .pf-kpi span, :root:root .appbody .pf-kpi > small { font-size: 12.5px; color: var(--muted); }
+:root:root .appbody .pf-kpi b { font: 500 24px/1.2 var(--mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+:root:root .appbody .pf-kpi b small { font: 400 13px var(--sans); color: var(--muted); letter-spacing: 0; }
+:root:root .appbody .pf-card { padding: 16px 0 8px; }
+:root:root .appbody .pf-card h2 { margin: 0 18px 6px; font: 600 15px var(--sans); letter-spacing: 0; }
+:root:root .appbody .pf-card > p { margin: 8px 18px; }
+:root:root .appbody .pf-t { width: 100%; min-width: 640px; border-collapse: collapse; font-size: 13.5px; }
+:root:root .appbody .pf-t th { padding: 8px 18px 6px; text-align: left; font-weight: 400; font-size: 12px; color: var(--muted); white-space: nowrap; border: 0; }
+:root:root .appbody .pf-t td { padding: 11px 18px; border: 0; border-top: 1px solid var(--line); white-space: nowrap; }
+:root:root .appbody .pf-t .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+:root:root .appbody .pf-asset { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+:root:root .appbody .pf-t .tag.buy { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+:root:root .appbody .pf-t .tag.sell { color: var(--down); background: color-mix(in srgb, var(--down) 13%, transparent); }
+:root:root .appbody .pf-empty { display: grid; gap: 14px; justify-items: start; max-width: 560px; }
+:root:root .appbody .pf-empty p { margin: 0; color: var(--text-2); }
+
+@media (max-width: 1320px) {
+  :root:root .appbody .tstage { grid-template-columns: minmax(0, 1fr); }
+  :root:root .appbody .depth { max-width: none; }
+}
+@media (max-width: 960px) {
+  :root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) !important; grid-template-areas: "stage" "side" "deck" !important; }
+  :root:root .appbody .chart-box { height: 310px; }
+  :root:root .appbody .tb-earn { margin-left: 0; }
+  :root:root .appbody .tb-px b { font-size: 22px; }
+  :root:root .appbody .tbar { gap: 10px 22px; padding: 12px 14px; }
+}
+:root:root .appbody .pf, :root:root .appbody .pfpage { grid-template-columns: minmax(0, 1fr); }
+:root:root .appbody .pf-card .table-wrap { overflow-x: auto; }
+
+/* 16) Emir turleri (Limit / Market / Scaled) ve kasa kartindaki Balance / Deposit / Withdraw sekmeleri */
+:root:root .appbody .ticket[data-otype="limit"] .sc-only,
+:root:root .appbody .ticket[data-otype="market"] .sc-only,
+:root:root .appbody .ticket[data-otype="scaled"] .lim-only { display: none !important; }
+:root:root .appbody.xmarket #tk-sell [data-ot="market"] { display: none; }
+:root:root .appbody .tradeview .ticket .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 8px; border-radius: 12px; background: var(--inset); }
+:root:root .appbody.xmarket #tk-sell .tabs { grid-template-columns: repeat(2, 1fr); }
+:root:root .appbody .tradeview .ticket .tabs button { padding: 8px 6px; border-radius: 9px; text-align: center; }
+:root:root .appbody .tradeview .ticket .tabs button[aria-selected="true"] { background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .tradeview .ticket .novault { padding: 10px 8px 8px; }
+:root:root .appbody .stepper { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .stepper button { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); font: 500 16px/1 var(--mono); cursor: pointer; }
+:root:root .appbody .stepper button:hover { color: var(--accent); }
+:root:root .appbody .stepper input { width: 38px; padding: 0; border: 0; background: none; box-shadow: none; text-align: center; font: 500 15px var(--mono); color: var(--text); outline: none; }
+:root:root .appbody .sc-only .fine { margin: 8px 2px 0; }
+:root:root .appbody .ladder-preview { border-radius: 12px; background: var(--inset); }
+:root:root .appbody .ladder-preview div { grid-template-columns: 18px auto 1fr auto; }
+:root:root .appbody .mkt { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
+:root:root .appbody .mkt .swap-top { display: grid; gap: 8px; padding: 4px 6px 2px; }
+:root:root .appbody .mkt-title { font: 600 14px var(--sans); }
+:root:root .appbody .mkt .swap-arrow { margin: -14px auto; position: relative; z-index: 1; }
+:root:root .appbody .mkt .swap-info, :root:root .appbody .mkt .fine, :root:root .appbody .mkt .lp-note { margin-inline: 6px; }
+:root:root .appbody .mkt .lp-note:empty { display: none; }
+:root:root .appbody .vtabs { display: flex; gap: 18px; margin: 2px 0 6px; border-bottom: 1px solid var(--line); }
+:root:root .appbody .vtabs button { padding: 6px 0 9px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; box-shadow: none; font: 500 13.5px var(--sans); color: var(--muted); cursor: pointer; }
+:root:root .appbody .vtabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+:root:root .appbody .vaultcard [data-pane] .box { margin-top: 8px; }
+:root:root .appbody .chips.pct { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+:root:root .appbody .chips.pct button { padding: 5px 0; text-align: center; font-family: var(--mono); }
+:root:root .appbody .box-top #market, :root:root .appbody .box-top #sv-mkt { font-size: inherit; }
+:root:root .appbody .box:has(> .chips.pct) { padding-bottom: 20px; }
+:root:root .appbody .box-top #market, :root:root .appbody .box-top #sv-mkt { white-space: nowrap; flex: none; }
+:root:root .appbody .tp-box { margin-top: 10px; }
+:root:root .appbody .tp-box[hidden] { display: none; }
+:root:root .appbody .tp-box input.big { font-size: 22px; }
+
+/* 17) Emir formu, borsa duzeni: acilir tur secimi, sikisik alanlar, noktali yuzde cizgisi, renkli Al / Sat dugmesi */
+:root:root .appbody .otsel { display: block; margin: 2px 0 8px; }
+:root:root .appbody .otsel select { width: 100%; appearance: none; -webkit-appearance: none; padding: 12px 38px 12px 14px; border: 0; border-radius: 12px; font: 600 15px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 20px) 54%, calc(100% - 14px) 54%; background-size: 6px 6px; background-repeat: no-repeat; }
+:root:root .appbody .avrow, :root:root .appbody .maxrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 2px 6px 8px; font-size: 13.5px; color: var(--muted); }
+:root:root .appbody .avval { display: inline-flex; align-items: center; gap: 8px; }
+:root:root .appbody .avval .link { font: 500 13.5px var(--mono); color: var(--text); text-decoration: none; }
+:root:root .appbody .plus { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; box-shadow: inset 0 0 0 1.5px var(--text-2); color: var(--text); font: 500 15px/1 var(--mono); cursor: pointer; }
+:root:root .appbody .plus:hover { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--accent); }
+:root:root .appbody .maxrow { margin: 8px 0 2px; padding: 9px 14px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line-2); font-size: 12.5px; }
+:root:root .appbody .maxrow b { font: 500 12.5px var(--mono); color: var(--text); }
+:root:root .appbody .tradeview .ticket .box { padding: 9px 14px 10px; margin-top: 8px; border-radius: 12px; }
+:root:root .appbody .tradeview .ticket .box:has(> .chips.pct) { padding-bottom: 10px; }
+:root:root .appbody .tradeview .ticket .box-top { font-size: 12px; margin-bottom: 0; }
+:root:root .appbody .tradeview .ticket input.big { font: 500 18px var(--mono); letter-spacing: -0.01em; padding: 2px 0 0; }
+:root:root .appbody .tradeview .ticket input.big[readonly] { color: var(--text-2); }
+:root:root .appbody .tradeview .ticket .unit { font: 600 15px var(--sans); color: var(--text); }
+:root:root .appbody .tradeview .ticket .swap-arrow { display: none; }
+:root:root .appbody .tradeview #gauge { display: none !important; }
+/* Yuzde: bes noktali cizgi (0 / 25 / 50 / 75 / 100) */
+:root:root .appbody .chips.pct { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 0; margin: 14px 8px 8px; }
+:root:root .appbody .chips.pct::before { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; height: 2px; margin-top: -1px; background: var(--line-2); }
+:root:root .appbody .chips.pct button { position: relative; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; font-size: 0; background: var(--card); box-shadow: inset 0 0 0 2px var(--line-2); cursor: pointer; }
+:root:root .appbody .chips.pct button::after { content: ""; position: absolute; inset: -8px; }
+:root:root .appbody .chips.pct button:hover { box-shadow: inset 0 0 0 2px var(--text-2); }
+:root:root .appbody .chips.pct button[aria-pressed="true"] { background: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 25%, transparent); }
+:root:root .appbody .chips.pct button:has(~ button[aria-pressed="true"]) { background: var(--text-2); box-shadow: none; }
+:root:root .appbody .mkt .chips.pct { margin: 12px 8px 2px; }
+/* Kar al */
+:root:root .appbody .chk { display: flex; align-items: center; gap: 10px; margin: 10px 6px 0; font-size: 14px; color: var(--text); cursor: pointer; }
+:root:root .appbody .chk input { width: 18px; height: 18px; margin: 0; accent-color: var(--cta); }
+:root:root .appbody #autosell-row:not(.open) .tp-box { display: none; }
+:root:root .appbody #autosell-row[hidden] { display: none; }
+:root:root .appbody .tp-box input.big { font-size: 18px; }
+/* Onizleme: kapali baslar */
+:root:root .appbody details.preview { margin-top: 10px; padding: 10px 14px; border-radius: 12px; }
+:root:root .appbody details.preview > summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; margin: 0; font-size: 13px; }
+:root:root .appbody details.preview > summary::-webkit-details-marker { display: none; }
+:root:root .appbody details.preview > summary::after { content: "+"; font: 16px var(--mono); color: var(--muted); }
+:root:root .appbody details.preview[open] > summary::after { content: "−"; }
+:root:root .appbody details.preview[hidden] { display: none; }
+/* Al / Sat dugmesi */
+:root:root .appbody .btn.primary.go-buy { background: #12a06c !important; box-shadow: none !important; border-radius: 999px; margin-top: 12px; }
+:root:root .appbody .btn.primary.go-buy:hover { background: #0e8a5d !important; }
+:root:root .appbody .btn.primary.go-sell { background: #e5384f !important; box-shadow: none !important; border-radius: 999px; margin-top: 12px; }
+:root:root .appbody .btn.primary.go-sell:hover { background: #cc2c42 !important; }
+
+/* 18) Grafik: cizgi / mum secimi, yakinlastirma, daha yuksek tuval */
+:root:root .appbody .chart-box { height: 470px; }
+:root:root .appbody .chart-box canvas { cursor: crosshair; touch-action: pan-y; }
+:root:root .appbody .chart-head { gap: 8px 12px; }
+:root:root .appbody .ch-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+:root:root .appbody .ch-btn { padding: 5px 11px; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
+:root:root .appbody .ch-btn[hidden] { display: none; }
+:root:root .appbody #ch-zoom button { width: 28px; padding: 4px 0; font-size: 14px; }
+:root:root .appbody .ohlc { font-size: 12.5px; align-items: baseline; }
+:root:root .appbody .ohlc b { font-size: 13px; color: var(--text); }
+@media (max-width: 960px) { :root:root .appbody .chart-box { height: 330px; } :root:root .appbody .ch-tools { margin-left: 0; } }
+:root:root .appbody .chart-head .ohlc { order: 3; flex-basis: 100%; min-height: 18px; }
+
+/* 19) Kasa kartlari (bakiye, yatirma, cekme) yalnizca Portfolio sayfasinda */
+:root:root .appbody .pf-vaults { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; align-items: start; }
+:root:root .appbody .pf-vaults:not(:has(> .vaultcard:not([hidden]))) { display: none; }
+:root:root .appbody .vaultcard .box { margin-top: 8px; border-radius: 12px; }
+:root:root .appbody .vaultcard [data-pane] > .btn { margin-top: 10px; }
+
+/* 20. Eski sayfa uyarisi ve Portfolio'da eski kasa notu */
+.stale { position: sticky; top: 0; z-index: 200; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 18px; padding: 12px 16px; font-size: 14px; line-height: 1.45; color: var(--text); background: var(--surface); box-shadow: inset 0 -1px 0 var(--line), inset 0 3px 0 var(--accent); }
+.stale .btn { padding: 8px 16px; }
+.pf-old { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin: 0 0 16px; padding: 14px 18px; border-radius: 16px; font-size: 14px; line-height: 1.5; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line), inset 3px 0 0 var(--accent); }
+.pf-old span { flex: 1 1 320px; min-width: 0; }
+
+/* 21. Surum 7: "cikti kasada kalsin" secenegi yalnizca tek kasada gorunur */
+.keeprow { display: none; margin: 10px 0 2px; font-size: 13px; }
+body.v7 .keeprow { display: flex; }
+body.xmarket .keeprow { display: none; }
+
+/* 22. Lend & Borrow: varlik basina tutarlar */
+.lp-break { display: block; margin-top: 6px; font-size: 12.5px; line-height: 1.45; color: var(--muted, #8b94a7); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.lp-break:empty { display: none; }
+.lp-usd { display: block; font-size: 12px; }
+.lp-markets, #lp-markets { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.lp-markets table td small.muted { display: inline; font-size: 12px; }

@@ -1,0 +1,51 @@
+# Iora keeper on GitHub Actions: scans all vaults every ~5 minutes and fills orders whose limit is met.
+# Free for public repositories. The keeper key and Telegram settings come from repository secrets.
+# Note: GitHub pauses scheduled workflows after 60 days without repository activity; any push re-enables them.
+name: keeper
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # scan and fill (GitHub may delay scheduled runs by a few minutes)
+    - cron: "17 3 * * *"    # once a day: also extend storage TTL of vaults and orders
+  workflow_dispatch:
+    inputs:
+      ttl:
+        description: "Also extend storage TTL"
+        type: boolean
+        default: false
+
+# Tarama ve gunluk TTL ayri gruplarda: kuyruktaki TTL calismasi bir taramayla yer degistirip dusmesin.
+concurrency:
+  group: keeper-${{ (github.event.schedule == '17 3 * * *' || inputs.ttl) && 'ttl' || 'scan' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    # Zamanlanmis calisma yalnizca depo degiskeni KEEPER_CLOUD=1 ise (scripts/keeper-github.sh bunu ayarlar).
+    # Boylece bilgisayardaki keeper ile ayni anda calisip islem cakismasi ve bosa Actions dakikasi olmaz.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.KEEPER_CLOUD == '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: keeper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Scan and fill
+        env:
+          KEEPER_SECRET: ${{ secrets.KEEPER_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$KEEPER_SECRET" ]; then echo "KEEPER_SECRET secret is not set"; exit 1; fi
+          FLAGS="--once"
+          if [ "${{ github.event.schedule }}" = "17 3 * * *" ] || [ "${{ inputs.ttl }}" = "true" ]; then FLAGS="$FLAGS --ttl"; fi
+          node keeper.js $FLAGS

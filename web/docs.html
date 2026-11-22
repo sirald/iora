@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Iora Docs</title>
+    <meta name="description" content="Iora documentation: vaults, limit orders, yield, keepers, security, risks and contract reference." />
+    <meta name="theme-color" content="#1f4fd1" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Iora" />
+    <meta property="og:title" content="Iora Docs" />
+    <meta property="og:description" content="Iora documentation: vaults, limit orders, yield, keepers, security, risks and contract reference." />
+    <meta property="og:url" content="https://iorafi.com/docs.html" />
+    <meta property="og:image" content="https://iorafi.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@iorafinance" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/theme.js"></script>
+    <!-- Vercel Web Analytics: cerezsiz, kisisel veri toplamaz. Vercel panelinde Analytics acilinca calisir. -->
+    <script defer src="/_vercel/insights/script.js"></script>
+  </head>
+  <body class="landing docs">
+    <header class="top">
+      <a href="/" class="mark"><span class="buoy" aria-hidden="true"></span>Iora</a>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/docs.html" aria-current="page">Docs</a>
+        <button class="theme-toggle" type="button" aria-label="Switch between light and dark theme" title="Light or dark theme">
+          <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>
+          <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4" /></svg>
+        </button>
+        <a href="/app.html" class="nav-app">Testnet</a>
+      </nav>
+    </header>
+
+    <div class="docs-wrap">
+      <aside class="toc" aria-label="Documentation">
+        <label class="toc-search">
+          <span class="sr">Filter topics</span>
+          <input id="toc-filter" type="search" placeholder="Filter topics" autocomplete="off" />
+        </label>
+        <nav id="toc">
+          <p class="toc-group">Getting started</p>
+          <ol>
+            <li><a href="#overview">Overview</a></li>
+            <li><a href="#quickstart">Quick start</a></li>
+            <li><a href="#compare">How Iora compares</a></li>
+          </ol>
+          <p class="toc-group">Concepts</p>
+          <ol>
+            <li><a href="#vault">Vaults</a></li>
+            <li><a href="#sell">Buying and selling</a></li>
+            <li><a href="#stop-loss">Take profit and stop loss</a></li>
+            <li><a href="#orders">Limit orders</a></li>
+            <li><a href="#lifecycle">Order lifecycle</a></li>
+            <li><a href="#yield">Where the yield comes from</a></li>
+            <li><a href="#keepers">Keepers</a></li>
+            <li><a href="#lend">Lend &amp; Borrow</a></li>
+          </ol>
+          <p class="toc-group">Security</p>
+          <ol>
+            <li><a href="#guarantees">What the contract guarantees</a></li>
+            <li><a href="#risks">Risks</a></li>
+            <li><a href="#pause">Emergency pause</a></li>
+            <li><a href="#audits">Audits</a></li>
+          </ol>
+          <p class="toc-group">Resources</p>
+          <ol>
+            <li><a href="#faq">FAQ</a></li>
+            <li><a href="#glossary">Glossary</a></li>
+            <li><a href="#roadmap">Roadmap</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <article class="doc">
+        <header class="doc-head">
+          <h1>Iora documentation</h1>
+          <p class="lede">
+            Iora is a non-custodial vault on Stellar. Your assets earn interest on Blend while your limit orders wait,
+            and when the price reaches your limit the order is filled from the vault in a single transaction.
+          </p>
+          <p class="note">Iora runs on Stellar <b>testnet</b> only. Everything on this page uses test funds. The contracts have not been audited.</p>
+        </header>
+
+        <!-- ================= GETTING STARTED ================= -->
+        <section id="overview">
+          <h2>Overview</h2>
+          <p>
+            A normal limit order leaves your money idle until the price comes to you. That can take days or weeks. Iora keeps
+            the money at work in the meantime: whatever sits behind your order is supplied to a Blend lending pool and earns
+            interest until the moment it is spent. You have <b>one vault</b>. It holds all of your assets, buys a coin at or
+            below your price and sells it at or above your price, and what an order buys can stay in the vault and keep earning.
+          </p>
+          <p>The name says it: Iora stands for <b>I</b>nterest <b>O</b>n <b>R</b>esting <b>A</b>ssets.</p>
+          <div class="cards">
+            <div><h3>Your own vault</h3><p>Each user gets a separate smart contract. Only your wallet can deposit, withdraw, place or cancel orders.</p></div>
+            <div><h3>Earning while waiting</h3><p>The assets you deposit go to Blend right away, including the part reserved for open orders. What your orders buy can stay in the vault and keep earning too.</p></div>
+            <div><h3>One-step fills</h3><p>Withdraw from Blend, swap on Soroswap and put the coin you bought back to work in your vault (or send it to your wallet), all in one atomic transaction.</p></div>
+          </div>
+          <h3>Who it is for</h3>
+          <ul>
+            <li>People who want to buy a coin below today's price and don't want their cash idle while they wait.</li>
+            <li>Savers who buy in steps (dollar-cost averaging) and want each step to keep earning until it fills.</li>
+            <li>Wallets and DAOs on Stellar that want to offer yield-bearing limit orders without holding user funds.</li>
+          </ul>
+        </section>
+
+        <section id="quickstart">
+          <h2>Quick start</h2>
+          <p>Getting set up on testnet takes about five minutes and costs nothing.</p>
+          <ol class="howto">
+            <li><b>Get an invite.</b> The testnet app is invite-only during the beta. Ask for access with the <a href="/#beta">beta form</a>; you will receive an invite code, or your wallet is added to the access list. The invite only opens the app. It is not a security feature: the contracts are public on Stellar.</li>
+            <li><b>Install a wallet.</b> Get the Freighter browser extension at <a href="https://www.freighter.app" target="_blank" rel="noopener">freighter.app</a> and create a wallet. Wallets that work like Freighter, such as Varial, also connect. Never share your recovery phrase with anyone, including us.</li>
+            <li><b>Switch to Testnet.</b> In your wallet's settings, select the <i>Testnet</i> network.</li>
+            <li><b>Connect.</b> Open the <a href="/app.html">testnet app</a>, enter your invite code if asked, and press <i>Connect wallet</i>.</li>
+            <li><b>Get test XLM.</b> On the app's <i>Test funds</i> page, press <i>Get 10,000 test XLM</i>.</li>
+            <li><b>Get test USDC.</b> On the same page press <i>Add USDC trustline</i>, then sell some XLM for USDC with a <i>Market</i> order on the <i>Trade</i> page (Sell side).</li>
+            <li><b>Open your vault.</b> On the <i>Trade</i> page press <i>Open my vault</i> and sign. This deploys your personal vault contract. You do this once; the same vault is used for buying and for selling.</li>
+            <li><b>Deposit.</b> On the <i>Portfolio</i> page choose an asset, enter an amount and press <i>Deposit</i>. It starts earning on Blend immediately.</li>
+            <li><b>Place an order.</b> Fill in the order form on the Trade page, review and sign. Pick the pair at the top of the page. Switch the form to Sell to set how much of the coin to sell and the price you want for it; both use the same vault. Your open orders show up as dashed lines on the price chart.</li>
+          </ol>
+        </section>
+
+        <section id="compare">
+          <h2>How Iora compares</h2>
+          <p>
+            Yield on waiting orders is not a new idea. On EVM chains, Mangrove's “reactive liquidity” lets offers source funds from
+            lending markets such as Aave until they are taken, mainly for market makers. Iora brings the same principle to Stellar
+            in a simple form for everyday buyers.
+          </p>
+          <div class="table-wrap">
+            <table class="cmp">
+              <thead>
+                <tr><th></th><th>Stellar order book</th><th>DEX limit orders<br /><span>e.g. CoW Swap</span></th><th>Reactive liquidity<br /><span>Mangrove, EVM</span></th><th class="us">Iora</th></tr>
+              </thead>
+              <tbody>
+                <tr><th>Funds earn while waiting</th><td>No</td><td>No, funds stay idle in your wallet</td><td>Yes, through strategies such as Kandel-AAVE</td><td class="us">Yes, on Blend</td></tr>
+                <tr><th>Who holds the funds</th><td>Your account</td><td>Your wallet</td><td>A strategy contract you control</td><td class="us">Your own vault contract</td></tr>
+                <tr><th>Every order fully funded</th><td>Yes</td><td>No, one balance can back several orders</td><td>Depends on strategy</td><td class="us">Yes, each order reserves its amount</td></tr>
+                <tr><th>Partial fills</th><td>Yes</td><td>Yes</td><td>Yes</td><td class="us">Yes, with a minimum fill size you choose</td></tr>
+                <tr><th>Built for</th><td>Traders</td><td>Traders</td><td>Market makers and builders</td><td class="us">Everyday buyers and savers</td></tr>
+                <tr><th>Network</th><td>Stellar</td><td>Ethereum and L2s</td><td>EVM chains</td><td class="us">Stellar (Soroban)</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ================= CONCEPTS ================= -->
+        <section id="vault">
+          <h2>Vaults</h2>
+          <p>
+            A vault is a smart contract deployed for one owner by the Iora factory. Its address is derived from your wallet
+            address, so each wallet has exactly one vault and it can always be found again. One vault holds several assets:
+            you deposit any of the supported assets, and you buy and sell from it. Whatever you deposit is supplied to Blend in the
+            vault's name. Iora never pools user funds in a contract of its own, but every vault supplies to the same Blend
+            pool (see <a href="#risks">Risks</a>).
+          </p>
+          <p>Each asset in the vault has its own figures, shown on the <i>Portfolio</i> page:</p>
+          <dl class="terms">
+            <dt>Balance on Blend</dt><dd>Your principal plus interest earned, read live from Blend.</dd>
+            <dt>Reserved for orders</dt><dd>The sum of what is still unfilled in your open orders that sell this asset. It keeps earning until it is spent. An order that spends one asset never ties up another.</dd>
+            <dt>Available</dt><dd>Balance minus reserved. This is what you can withdraw or use for a new order. While an order is open on an asset that is supplied to Blend, 0.001 of it is held back as a rounding buffer. Assets that are not on Blend have no buffer.</dd>
+            <dt>Interest earned</dt><dd>Balance minus principal. Principal is what you deposited plus what your orders bought and left in the vault, less what you withdrew or spent.</dd>
+          </dl>
+          <h3>Depositing and withdrawing</h3>
+          <p>
+            Deposits move an asset from your wallet to Blend through the vault. Withdrawals move it from Blend back to your wallet and
+            are limited to the available balance, so they can never take money that an open order needs. Leave the amount empty to
+            withdraw everything available, interest included. To withdraw reserved money, cancel the order first.
+            The app keeps at least 5 XLM in your wallet when you deposit XLM, so you can still pay network fees.
+          </p>
+          <h3>What happens to what you buy</h3>
+          <p>
+            When an order fills, the coin you bought stays in your vault by default. It is supplied to Blend in the same
+            transaction and starts earning straight away, and you can use it for the next order or withdraw it whenever you
+            like. If you untick <i>Keep it in my vault</i> on the order form, the coin is sent to your wallet instead. If your
+            wallet cannot receive it (for example it has no trustline for that asset), the fill still goes through and the
+            coin waits in your vault as part of your balance.
+          </p>
+        </section>
+
+        <section id="sell">
+          <h2>Buying and selling</h2>
+          <p>
+            The <i>Trade</i> page has two sides, <i>Buy</i> and <i>Sell</i>, and both work on the same vault. A buy order spends
+            the USDC in your vault to buy a coin when 1 unit of it costs at most your price. A sell order sells the coin in your vault
+            when 1 unit of it is worth at least your price. Either way the keeper makes the trade on Soroswap in one transaction when
+            the price reaches yours, and until then the amount behind the order keeps earning on Blend.
+          </p>
+          <p>
+            Every rule on this page applies to both sides: only your wallet can move funds, the keeper can only fill an
+            order when your price is met, and cancelling or withdrawing never depends on the keeper or on Iora (a withdrawal
+            can still have to wait if the Blend pool is short on cash, see <a href="#risks">Risks</a>).
+          </p>
+          <dl class="terms">
+            <dt>You pay / You sell</dt><dd>The USDC (buy) or the coin (sell) set aside for the order. It is reserved from your available balance of that asset and keeps earning until it is spent.</dd>
+            <dt>Price</dt><dd>For a buy, the most USDC you pay for 1 unit of the coin. For a sell, the least USDC you accept for 1 unit. The order fills at this price or better, never worse.</dd>
+            <dt>You receive at least</dt><dd>Computed on-chain from your price and checked again after the swap.</dd>
+            <dt>Keep it in my vault</dt><dd>Ticked by default: what the order buys stays in your vault and earns. Unticked: it goes to your wallet.</dd>
+          </dl>
+          <p class="muted">Every market is a coin against USDC. On testnet today those coins are XLM, BTC, EURC, XRP and XTAR. Your assets earn interest while they wait, as long as the lending pool has a market for them. The testnet pool does not list the Soroswap test tokens (BTC, EURC, XRP, XTAR) yet, so on testnet those four wait in your vault without earning; stop loss is not available for them and their test pools are small.</p>
+        </section>
+
+        <section id="stop-loss">
+          <h2>Take profit and stop loss</h2>
+          <p>
+            <b>Take profit (buy, then sell automatically).</b> On the Buy side of the Trade page, tick <i>Take profit</i> and
+            type a price before you place a buy order. When the buy fills, the coin stays in your vault, keeps earning, and a
+            sell order for it opens in the same transaction at your take profit price, valid for 30 days. There is nothing
+            extra to sign. The take profit price cannot be below your buy price. If new orders are paused at that moment, the
+            buy still fills and the coin simply waits in your vault as available balance.
+          </p>
+          <p>
+            <b>Sell it higher.</b> For a buy order that has already filled, the orders table shows a <i>Sell higher</i> button
+            that places a sell order above what you paid.
+          </p>
+          <p>
+            <b>Stop loss (coming with mainnet).</b> You'll be able to set the price you don't want a coin to fall below. Your coin
+            keeps earning on Blend. If its price drops to your stop price, the keeper sells it. The contract checks the price
+            against the same price oracle Blend uses, not the swap pool, so nobody can trigger your stop by pushing the pool
+            price for a moment. It never sells more than a band you choose (3% by default) below the oracle price: if the
+            price gaps lower than that, the order waits instead of selling cheap. On testnet the oracle price is fixed, so
+            stop loss is switched off in the app.
+          </p>
+        </section>
+
+        <section id="orders">
+          <h2>Limit orders</h2>
+          <p>Iora supports two order directions from the same vault. A <b>buy order</b> buys a coin with USDC at or below a price you set, while the USDC earns on Blend. A <b>sell order</b> sells a coin for USDC at or above a price you set, while that coin earns on Blend. The rules below apply to both. The order form also offers <i>Market</i> (swap now, from your wallet) and <i>Scaled</i> (several limit orders spread between two prices).</p>
+          <dl class="terms">
+            <dt>Amount</dt><dd>The USDC (buy) or the coin (sell) set aside for the order. It is reserved from your available balance when you place the order.</dd>
+            <dt>Limit</dt><dd>For a buy order, the most USDC you are willing to pay for 1 unit of the coin. For a sell order, the least USDC you accept for 1 unit. The order fills at this price or better, never worse.</dd>
+            <dt>Minimum fill</dt><dd>The smallest piece the order may be filled in. Only the final remainder can be smaller. Left empty, the app uses a quarter of the amount.</dd>
+            <dt>Max price impact</dt><dd>How far a single fill may move the Soroswap pool price. If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
+            <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them. An order that is still open after one year ends by itself.</dd>
+          </dl>
+          <h3>Price improvement</h3>
+          <p>
+            The contract computes the minimum amount you must receive from your limit (the coin for a buy order, USDC for a sell order),
+            and checks it again after the swap. Your limit is a guarantee; a better price is not. When the market is better than your limit at the moment of the fill, the
+            swap can return more than the minimum. Whoever fills the order may take a small, capped fill fee out of that extra (see <a href="#keepers">Keepers</a>); the rest goes to you, and Iora itself takes no cut. That is how it works during the testnet beta; what Iora charges will be reviewed before mainnet. Filling is open to anyone, and
+            whoever fills an order can arrange the trade so that it fills exactly at your limit and keep the difference
+            themselves. You never receive less than your limit; you should not count on receiving more. To get a better price,
+            set a better limit.
+          </p>
+          <h3>Partial fills</h3>
+          <p>
+            An order can fill in several pieces, for example when the pool cannot absorb the whole amount within your price impact
+            limit. Each piece is a separate transaction and each one meets your limit on its own. The orders list on the <i>Trade</i> page shows
+            how much has filled and your average price.
+          </p>
+        </section>
+
+        <section id="lifecycle">
+          <h2>Order lifecycle</h2>
+          <figure class="flow" aria-label="An open order can fill in pieces or all at once, or end as cancelled or expired">
+            <svg viewBox="0 0 640 220" role="img">
+              <title>Order lifecycle</title>
+              <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" /></marker></defs>
+              <g class="node end"><rect x="200" y="8" width="160" height="40" rx="20" /><text x="280" y="33">Cancelled or expired</text></g>
+              <g class="node"><rect x="10" y="88" width="110" height="44" rx="22" /><text x="65" y="115">Open</text></g>
+              <g class="node"><rect x="200" y="88" width="160" height="44" rx="22" /><text x="280" y="115">Partially filled</text></g>
+              <g class="node done"><rect x="470" y="88" width="160" height="44" rx="22" /><text x="550" y="115">Filled</text></g>
+              <g class="edge">
+                <path d="M120 110 H195" />
+                <path d="M360 110 H465" />
+                <path d="M65 88 C 65 40, 120 28, 195 28" />
+                <path d="M280 88 V53" />
+                <path d="M65 132 C 70 200, 545 200, 550 137" class="skip" />
+              </g>
+              <text class="lbl" x="158" y="102">a piece fills</text>
+              <text class="lbl" x="412" y="102">last piece</text>
+              <text class="lbl" x="310" y="206">or the whole order fills at once</text>
+            </svg>
+          </figure>
+          <dl class="terms">
+            <dt>Open</dt><dd>Waiting for the price. The reserved amount is earning on Blend.</dd>
+            <dt>Partially filled</dt><dd>Still open; part of the amount has been swapped. What it bought is already in your vault (or in your wallet, if you chose that).</dd>
+            <dt>Filled</dt><dd>The whole amount has been spent.</dd>
+            <dt>Cancelled</dt><dd>You cancelled it. The unfilled part returns to your available balance immediately.</dd>
+            <dt>Expired</dt><dd>The duration passed before it filled completely. The unfilled part stays reserved, and keeps earning, until you press <i>Cancel</i> to release it.</dd>
+          </dl>
+        </section>
+
+        <section id="yield">
+          <h2>Where the yield comes from</h2>
+          <p>
+            Iora does not create yield. Your vault lends your assets on Blend, and Blend borrowers pay
+            interest on what they borrow. Each asset has its own rate.
+            Lenders share that interest: the supply rate is roughly the borrow rate multiplied by the pool's utilization, so it
+            rises when borrowing demand is high and falls when it is low. Interest is added to your balance continuously and paid
+            out when you withdraw or when an order spends it.
+          </p>
+          <ul>
+            <li>The rate changes all the time; past rates are not a promise.</li>
+            <li>BLND token emissions that some Blend pools pay to lenders are not claimed automatically. The vault owner can claim them to their own wallet with <code>claim_rewards</code>; the app has no button for it yet.</li>
+            <li>The landing page simulation is sped up for illustration and does not show real rates.</li>
+          </ul>
+        </section>
+
+        <section id="keepers">
+          <h2>Keepers</h2>
+          <p>
+            Orders are filled by a keeper, a bot that watches the price. Filling is permissionless: the <code>execute</code>
+            function can be called by anyone, so anyone can run a keeper. The caller only chooses which order to fill, how
+            much, and the address that receives the fill fee. The tokens, the recipient, the limit and the minimum output are fixed by the contract.
+          </p>
+          <ul>
+            <li>The Iora keeper scans all vaults on every new Stellar ledger (about every 5 seconds) and quotes each open order on Soroswap in its own direction.</li>
+            <li>When your limit is met, it tries the full remaining amount. If the price impact is too high, it halves the piece, down to your minimum fill.</li>
+            <li>The keeper pays the network fee for fills. In return, whoever fills an order receives a small fill fee: a small capped amount per fill, paid in the coin the order buys (on testnet: about 0.003 USDC, or the same value in the coin bought). The fee is taken only from the part of a fill that came out better than your limit, so you always receive at least what your limit promises. If a fill lands exactly on your limit, the fee is zero. These amounts apply during the testnet beta; the fill fee will be reviewed before mainnet.</li>
+            <li>Because the fee has to come out of that difference, the keeper waits until the price has passed your limit by enough to cover it. For most orders this is a tiny fraction of a percent. Very small orders are allowed, but they need a larger move past the limit before they fill.</li>
+            <li>If the keeper is offline, orders simply wait. Your funds are unaffected, and cancelling and withdrawing do not need the keeper.</li>
+          </ul>
+        </section>
+
+        <section id="lend">
+          <h2>Lend &amp; Borrow</h2>
+          <p>
+            The app also has a <i>Lend &amp; Borrow</i> page for using Blend directly, without a limit order. These positions are
+            opened from your own wallet on the same Blend pool; Iora's vault contracts are not involved, and your vault and its
+            orders are not affected.
+          </p>
+          <dl class="terms">
+            <dt>Supply</dt><dd>Deposits an asset as collateral. It earns the supply rate and raises your borrowing power.</dd>
+            <dt>Withdraw</dt><dd>Takes collateral back, as long as what remains still covers your debt.</dd>
+            <dt>Borrow</dt><dd>Sends the asset to your wallet. Interest is added to your debt over time.</dd>
+            <dt>Repay</dt><dd>Pays debt back. Paying more than you owe is safe; Blend returns the extra in the same transaction.</dd>
+            <dt>Health factor</dt><dd>Your collateral times each asset's collateral factor, divided by your debt divided by each asset's liability factor, all valued with the pool's oracle prices. Below 1, part of your collateral can be liquidated.</dd>
+          </dl>
+          <p>Borrowing carries liquidation risk. Keep your health factor well above 1, especially when borrowing an asset whose price moves differently from your collateral.</p>
+        </section>
+
+        <!-- ================= SECURITY ================= -->
+        <section id="guarantees">
+          <h2>What the contract guarantees</h2>
+          <ul class="checks">
+            <li>Deposits, withdrawals, orders and cancellations require the vault owner's signature.</li>
+            <li>No key can move your funds and there is no upgrade function. Nobody can change a deployed vault's code. The factory's guardian can only pause new vaults and new orders and edit the list of coins that new orders may use; withdrawals, cancellations and fills keep working.</li>
+            <li>What a fill buys always goes to the vault owner: it stays in the owner's vault or is sent to the owner's wallet, as the owner chose when placing the order. A keeper cannot redirect it; the only thing a keeper can receive is the capped fill fee, and only out of price improvement.</li>
+            <li>The minimum output is computed on-chain from your limit and checked again after the swap. If it is not met, the whole transaction reverts and your funds stay on Blend.</li>
+            <li>The same balance cannot back two orders, or an order and a withdrawal.</li>
+            <li>Swaps have a five-minute deadline, so a delayed transaction cannot execute at a stale price.</li>
+          </ul>
+        </section>
+
+        <section id="risks">
+          <h2>Risks</h2>
+          <p>Using Iora means trusting its contracts and the protocols it is built on. Please read these before depositing.</p>
+          <dl class="risk-list">
+            <dt>Blend pool risk</dt>
+            <dd>
+              For now, your deposit sits in a Blend lending pool that Iora does not run. The pool, its price oracle and its
+              backstop are run by Blend and the pool's operators. Iora does not control them and cannot make up a loss that
+              happens there. Once there is enough liquidity, we plan to open Iora's own lending pools; until then every
+              vault uses this Blend pool.
+              All vaults supply to the same Blend pool. If a borrower's debt exceeds their collateral, for example after an oracle
+              failure, the loss is covered first by Blend's backstop. If the backstop cannot cover it, the remaining bad debt is
+              spread across lenders, which lowers the value of every deposit in that pool, including your vault's.
+            </dd>
+            <dt>Liquidity risk</dt>
+            <dd>When most of the pool is borrowed, there may not be enough cash to withdraw or fill right away. High utilization pushes rates up, which usually brings cash back quickly.</dd>
+            <dt>Smart contract risk</dt>
+            <dd>All vaults run the same code, so a bug could affect every vault. The contracts have not yet been independently audited.</dd>
+            <dt>Swap and price risk</dt>
+            <dd>Fills use the Soroswap pool for the two tokens of the order, so a bug in Soroswap is also a risk. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
+            <dt>Oracle risk (stop loss)</dt>
+            <dd>Stop loss orders rely on the price oracle of the Blend pool. If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
+            <dt>Keeper risk</dt>
+            <dd>If no keeper is running, orders do not fill, and you can miss a price that came and went. Today Iora runs a single keeper, so it can be offline for hours. This never puts funds at risk: cancelling and withdrawing do not need the keeper.</dd>
+            <dt>Coins that can be traded</dt>
+            <dd>A vault only accepts orders between coins on the factory's allowed list (on testnet: USDC, XLM, BTC, EURC, XRP, XTAR). An order that buys any other token is rejected by the contract, so nobody can trick you into signing an order for a fake token. The guardian can add a coin to the list or remove one; removing only blocks new orders, and you can always withdraw whatever your vault holds.</dd>
+            <dt>Sending to a wallet without a trustline</dt>
+            <dd>If you choose to have a fill sent to your wallet and the wallet cannot hold that asset (for example no USDC trustline), the fill still happens and the coin stays in your vault instead.</dd>
+            <dt>Website and network access</dt>
+            <dd>This website and the public RPC servers it uses can be slow or unavailable. Your funds do not depend on them: the vault is a contract on Stellar, and its owner can call <code>cancel_order</code> and <code>withdraw</code> with any Soroban tool (for example the Stellar CLI or Stellar Lab) using the vault address shown in the app. Write that address down.</dd>
+            <dt>Phishing</dt>
+            <dd>Always check the address bar (iorafi.com) and read what your wallet asks you to sign. Iora will never ask for your recovery phrase.</dd>
+          </dl>
+        </section>
+
+        <section id="pause">
+          <h2>Emergency pause</h2>
+          <p>
+            The factory has a guardian address that can pause the system and edit the list of coins that orders may use. Pausing stops new vaults and new orders only.
+            Withdrawals, cancellations and fills of existing orders keep working, and the guardian has no way to move user funds.
+          </p>
+        </section>
+
+        <section id="audits">
+          <h2>Audits</h2>
+          <p>
+            The contracts have not been audited yet. A written threat model is kept in
+            the repository. Iora will not launch on mainnet before an independent security audit
+            is complete, and the report will be published here.
+          </p>
+          <p class="addr">
+            The contracts are public on Stellar testnet. Vault factory: <code id="addr-factory">CAJCXP5WEK5MNRT2BITI5YD57RILKWFNTFQGUFZSZRLCGHMQXPN6RCR5</code>
+          </p>
+          <p>
+            Found a vulnerability? Please report it privately to <a href="mailto:hello@iorafi.com?subject=Security">hello@iorafi.com</a>
+            with the subject “Security”, and give us time to fix it before sharing it publicly.
+          </p>
+        </section>
+
+        <!-- ================= DEVELOPERS ================= -->
+        <section id="faq">
+          <h2>FAQ</h2>
+          <details><summary>Can I sell coins too, not just buy?</summary><p>Yes. The same vault holds all of your assets. Pick a pair, and on the Sell side of the Trade page set the price at which your coin is sold for USDC; it keeps earning on Blend until then. More pairs will follow.</p></details>
+          <details><summary>I got test USDC from another faucet. Why can't I use it?</summary><p>On Stellar a token is identified by its name and its issuer. Iora uses the test USDC that the Blend testnet pool accepts. Test USDC from Circle's faucet or from Soroswap has the same name but a different issuer, so it is a different token and will not show up here. Get the right one on the <i>Test funds</i> page by selling a little test XLM. On mainnet there is only one USDC.</p></details>
+          <details><summary>Does Iora hold my funds?</summary><p>No. Your funds are in your own vault contract and, through it, on Blend. Neither Iora nor the keeper can withdraw them.</p></details>
+          <details><summary>Why not use Stellar's built-in order book?</summary><p>An order on the Stellar order book keeps your funds idle until it fills. With Iora, the amount waiting for your price earns interest on Blend.</p></details>
+          <details><summary>Why hasn't my order filled?</summary><p>The price may not have reached your limit, the order may have expired, or the pool may be too thin to fill within your price impact limit. The orders list on the <i>Trade</i> page shows the status.</p></details>
+          <details><summary>Can I lose money?</summary><p>Yes. Blend bad debt, a contract bug or a phishing site could cause losses. See <a href="#risks">Risks</a>. On testnet only test funds are used.</p></details>
+          <details><summary>How much interest will I earn?</summary><p>It depends on how much of the Blend pool is borrowed, and changes constantly. The <i>Portfolio</i> page shows what you have earned.</p></details>
+          <details><summary>What happens to an expired order?</summary><p>It can no longer fill. Its unfilled amount stays reserved and keeps earning until you cancel it.</p></details>
+          <details><summary>When will Iora launch on mainnet?</summary><p>Not before an independent security audit is complete.</p></details>
+        </section>
+
+        <section id="glossary">
+          <h2>Glossary</h2>
+          <dl class="terms">
+            <dt>Blend</dt><dd>A lending protocol on Stellar. Your vault supplies your assets to it to earn interest.</dd>
+            <dt>Backstop</dt><dd>Blend's insurance layer that absorbs bad debt before lenders do.</dd>
+            <dt>Fill</dt><dd>Spending part or all of an order's amount: USDC to buy a coin, or a coin sold for USDC.</dd>
+            <dt>Friendbot</dt><dd>A testnet service that sends free test XLM.</dd>
+            <dt>Guardian</dt><dd>The address that can pause new vaults and orders and edit the list of tradable coins. It cannot move funds.</dd>
+            <dt>Keeper</dt><dd>A bot that watches prices and calls <code>execute</code> when an order can fill.</dd>
+            <dt>Vault</dt><dd>Your own contract. It holds your assets, supplies them to Blend, and places buy and sell orders from them.</dd>
+            <dt>Limit price</dt><dd>For a buy order, the most USDC you will pay for 1 unit of a coin; for a sell order, the least USDC you accept for 1 unit.</dd>
+            <dt>Buy vault, sell vault</dt><dd>The two separate vaults used by earlier versions. They still work for the people who opened them.</dd>
+            <dt>Price impact</dt><dd>How much a trade moves a pool's price; larger trades in smaller pools move it more.</dd>
+            <dt>Soroswap</dt><dd>A decentralized exchange on Stellar used for the swaps between USDC and the other coins.</dd>
+            <dt>Trustline</dt><dd>A one-time Stellar setting that lets your account hold an asset such as USDC.</dd>
+            <dt>Utilization</dt><dd>The share of a Blend pool that is currently borrowed.</dd>
+          </dl>
+        </section>
+
+        <section id="roadmap">
+          <h2>Roadmap</h2>
+          <ol class="road">
+            <li><b>Testnet prototype</b><span>Vaults, limit orders in both directions, keeper, app and docs. Done.</span></li>
+            <li class="now"><b>Testnet beta</b><span>Invite-only beta, feedback round. Under way. Each user now has a single vault for all of their coins; XLM, BTC, EURC, XRP and XTAR trade against USDC. Next: keeper running on a server.</span></li>
+            <li><b>Open testnet</b><span>Open to everyone on testnet, no invite needed.</span></li>
+            <li><b>Independent audit</b><span>Security review of the vault and factory contracts; report published.</span></li>
+            <li><b>Mainnet</b><span>Only after the audit is complete.</span></li>
+            <li class="goal"><b>Cross-chain</b><span>Keep your money on Stellar and place orders to buy coins on other networks.</span></li>
+            <li><b>Planned</b><span>Iora's own lending pools once liquidity allows, more pairs, more wallets, wallet and DAO integrations.</span></li>
+          </ol>
+        </section>
+
+        <!-- ================= RESOURCES ================= -->
+        <p class="doc-foot muted">Sources for protocol behaviour: <a href="https://docs.blend.capital/users/lending-borrowing/lending" target="_blank" rel="noopener">Blend lending docs</a>, <a href="https://docs.blend.capital/tech-docs/core-contracts/lending-pool/bad-debt-management" target="_blank" rel="noopener">Blend bad debt management</a>.</p>
+      </article>
+    </div>
+
+    <footer class="bottom">
+      <div class="bottom-brand">
+        <a href="/" class="mark"><span class="buoy" aria-hidden="true"></span>Iora</a>
+        <p>© 2026 Iora. All rights reserved.</p>
+      </div>
+      <p>Iora is a testnet prototype. It has not been audited; do not use real funds. · <a href="https://x.com/iorafinance" target="_blank" rel="noopener">@iorafinance</a> · <a href="mailto:hello@iorafi.com">hello@iorafi.com</a></p>
+    </footer>
+
+    <script type="module" src="/src/docs.js"></script>
+  </body>
+</html>

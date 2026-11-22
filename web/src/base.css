@@ -1,0 +1,200 @@
+/* Iora: buyuk I harfi serifli (Iora 'lora' okunmasin) */
+@font-face{font-family:"SerifI";src:url(/fonts/serif-i-Light.woff) format("woff");font-weight:300;font-display:swap;unicode-range:U+0049}
+@font-face{font-family:"SerifI";src:url(/fonts/serif-i-Regular.woff) format("woff");font-weight:400;font-display:swap;unicode-range:U+0049}
+@font-face{font-family:"SerifI";src:url(/fonts/serif-i-Medium.woff) format("woff");font-weight:500;font-display:swap;unicode-range:U+0049}
+@font-face{font-family:"SerifI";src:url(/fonts/serif-i-SemiBold.woff) format("woff");font-weight:600;font-display:swap;unicode-range:U+0049}
+/* Iora ortak tokenlar: "emir fisi" gorunumu. Logonun mavisi tek vurgu; soguk beyaz / gece laciverti zemin, lacivert yazi. */
+/* Iki tema. Varsayilan: sistemin tercihi; kullanici secerse html[data-theme] ile sabitlenir. */
+:root {
+  color-scheme: light;
+  --bg: #f4f6fa;
+  --bg-2: #ebeef4;
+  --surface: #ffffff;
+  --surface-2: #ffffff;
+  --line: #d5dbe6;
+  --line-2: #0b1530;
+  --text: #0b1530;
+  --text-2: #27314a;
+  --muted: #4a5670;
+  --accent: #1f4fd1;
+  --accent-hi: #1f4fd1;
+  --accent-ink: #ffffff;
+  --primary-1: #1f4fd1;
+  --primary-2: #163a9e;
+  --signal: #1f4fd1;
+  --signal-ink: #ffffff;
+  --ok: #12764c;
+  --err: #c43c33;
+  --hg-1: #0b1530;
+  --hg-2: #0b1530;
+  --hg-3: #0b1530;
+  --sounding: #9aa6b8;
+  --shadow: none;
+  --glow: 0;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #080d1a;
+  --bg-2: #0b1120;
+  --surface: #0f1626;
+  --surface-2: #131c30;
+  --line: #1c2740;
+  --line-2: #34415f;
+  --text: #e8edf7;
+  --text-2: #c3cee0;
+  --muted: #94a3bd;
+  --accent: #9cc0ff;
+  --accent-hi: #bfd6ff;
+  --accent-ink: #0b1530;
+  --primary-1: #9cc0ff;
+  --primary-2: #7faaf5;
+  --signal: #9cc0ff;
+  --signal-ink: #0b1530;
+  --ok: #7fd6ae;
+  --err: #ff8f85;
+  --hg-1: #e8edf7;
+  --hg-2: #e8edf7;
+  --hg-3: #e8edf7;
+  --sounding: #4b5b72;
+  --shadow: none;
+  --glow: 0;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #080d1a;
+    --bg-2: #0b1120;
+    --surface: #0f1626;
+    --surface-2: #131c30;
+    --line: #1c2740;
+    --line-2: #34415f;
+    --text: #e8edf7;
+    --text-2: #c3cee0;
+    --muted: #94a3bd;
+    --accent: #9cc0ff;
+    --accent-hi: #bfd6ff;
+    --accent-ink: #0b1530;
+    --primary-1: #9cc0ff;
+    --primary-2: #7faaf5;
+    --signal: #9cc0ff;
+    --signal-ink: #0b1530;
+    --ok: #7fd6ae;
+    --err: #ff8f85;
+    --hg-1: #e8edf7;
+    --hg-2: #e8edf7;
+    --hg-3: #e8edf7;
+    --sounding: #4b5b72;
+    --shadow: none;
+    --glow: 0;
+  }
+}
+:root {
+  --display: "IBM Plex Sans", "Inter", system-ui, sans-serif;
+  --sans: "IBM Plex Sans", "Inter", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* eski adlar */
+  --chart: var(--bg);
+  --chart-deep: var(--bg-2);
+  --paper: var(--surface);
+  --ink: var(--text);
+  --depth: var(--accent);
+  --serif: var(--display);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; background: var(--bg); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 6px; }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+.top {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.mark {
+  font: 500 21px/1 var(--display);
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.buoy {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: url(/logo.svg) center / contain no-repeat;
+}
+.top nav { display: flex; gap: 26px; align-items: center; font-size: 14.5px; }
+.top nav a { color: var(--muted); text-decoration: none; transition: color 0.2s; }
+.top nav a:hover, .top nav a[aria-current="page"] { color: var(--text); }
+.nav-app { color: var(--text) !important; padding: 8px 16px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 0 0 0 1px var(--line-2); }
+
+.btn {
+  display: inline-block;
+  font: 500 15.5px/1 var(--sans);
+  padding: 15px 24px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.btn:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent), 0 0 32px color-mix(in srgb, var(--accent) 25%, transparent); }
+.btn.ghost { background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); color: var(--text); }
+.btn.ghost:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn:disabled:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.btn.ghost:disabled:hover { background: transparent; }
+
+.bottom {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 36px 24px 56px;
+  font-size: 13.5px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+.bottom p { margin: 4px 0; }
+.bottom a { color: var(--text); }
+
+/* Tema dugmesi */
+.theme-toggle {
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.theme-toggle:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.theme-toggle svg { width: 17px; height: 17px; }
+.theme-toggle .sun { display: none; }
+:root[data-theme="dark"] .theme-toggle .sun { display: block; }
+:root[data-theme="dark"] .theme-toggle .moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle .sun { display: block; }
+  :root:not([data-theme="light"]) .theme-toggle .moon { display: none; }
+}
+
+/* Ana eylem butonu */
+.btn.primary { background: linear-gradient(180deg, var(--primary-1), var(--primary-2)); color: var(--accent-ink); box-shadow: 0 1px 0 color-mix(in srgb, white 20%, transparent) inset, 0 6px 18px color-mix(in srgb, var(--primary-2) 30%, transparent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--primary-1), var(--primary-2)); }
+.btn.primary:disabled:hover { filter: none; }

@@ -1,0 +1,50 @@
+target/
+wasm/
+sonuc.txt
+deps.txt
+.stellar/
+.soroban/
+node_modules/
+.env
+*.local
+keeper/keeper.log
+keeper/durum.json
+contracts/*/test_snapshots/
+testnet/err.txt
+testnet/*.xdr
+erisim.env
+
+# Old names and local backups are not published
+yedek/
+# Internal notes (plans, open weaknesses): stay on the local machine
+NOTLAR.md
+# Build output: regenerated on every deploy
+web/dist/
+berthly.sh
+moor.sh
+
+# Temporary copies of secret files, lock and state files
+erisim.env*
+*.tmp
+keeper/.env*
+
+# Test output and one-off historical scripts
+test-result.txt
+scripts/archive/
+
+# Discord bot lives in its own repository
+discord-bot/
+
+# Server address for scripts/server.sh
+server.env
+
+# testnet/: only the settings the scripts read are published. Run logs, trial outputs and backups of earlier
+# settings stay on the local machine.
+testnet/*
+!testnet/addr.env
+!testnet/factory.env
+!testnet/factory-sell.env
+!testnet/eski-fabrikalar.env
+!testnet/nesiller.env
+!testnet/markets.env
+!testnet/pairs.env
