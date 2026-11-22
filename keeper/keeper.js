@@ -9,6 +9,7 @@
 //   node keeper.js            surekli calisir: her yeni ledger'da (~5 sn) tarar (SCAN_MODE=interval ile INTERVAL_SEC aralikla)
 //   node keeper.js --once     bir kez tarar (birkac tur), cikar
 //   node keeper.js --ttl      ayrica kayitlarin suresini uzatir (surekli modda bos ledger'larda, parca parca)
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,7 @@ import {
   Keypair,
   Networks,
   Operation,
+  Asset,
   SorobanDataBuilder,
   TransactionBuilder,
   nativeToScVal,
@@ -51,6 +53,7 @@ const cfg = {
   ...readEnv(path.join(root, "testnet/factory-sell.env")),
   ...readEnv(path.join(root, "testnet/eski-fabrikalar.env")),
   ...readEnv(path.join(root, "testnet/markets.env")),
+  ...readEnv(path.join(root, "testnet/batch.env")),
   ...readEnv(path.join(here, ".env")),
   ...process.env,
 };
@@ -107,6 +110,28 @@ const SYM = { [USDC]: "USDC", [XLM]: "XLM" };
 const sym = (a) => SYM[a] || short(a);
 const kp = Keypair.fromSecret(cfg.KEEPER_SECRET);
 const server = makeServer(RPC_URLS);
+
+// ----- worker accounts: several fills per ledger -----
+// One account can have one transaction per ledger, so a single key fills about one order every 5 seconds. Worker
+// accounts are extra sending accounts derived from the keeper key (nothing new to store); each sends its own
+// transaction in the same ledger. The fill fee always goes to the main keeper account. The main account creates
+// the workers and tops them up with XLM for network fees.
+const WORKERS = Math.max(0, Math.min(50, Number(cfg.KEEPER_WORKERS ?? 9)));
+// ----- batch filler: several fills in one transaction -----
+// With BATCH set (testnet/batch.env), fills that are ready at the same time go out together through the batch
+// contract's `fill_many`. Measured on testnet and the same on mainnet: 6 fills fit in one transaction (the limit is
+// the 16384 bytes of events per transaction), so the default is 5. A fill that fails inside a batch does not stop the
+// others; it is then tried alone, which gives the real reason. The network allows about 55 fills per ledger in
+// total (580M instructions, about 10.4M per fill), which ten sending accounts reach.
+const BATCH = (cfg.BATCH || "").trim();
+const BATCH_SIZE = Math.max(1, Math.min(6, Number(cfg.BATCH_SIZE || 5)));
+const BATCH_WAIT_MS = Number(cfg.BATCH_WAIT_MS || 400);
+const WORKER_START_XLM = String(cfg.WORKER_START_XLM || "10");
+const WORKER_MIN_XLM = Number(cfg.WORKER_MIN_XLM || 3);
+const workerKey = (i) =>
+  Keypair.fromRawEd25519Seed(crypto.createHash("sha256").update(kp.rawSecretKey()).update(`iora-keeper-worker-${i}`).digest());
+/** Accounts that send transactions: the main key first, then the workers that are ready. */
+const signers = [{ kp, chain: Promise.resolve(), queued: 0 }];
 
 const args = process.argv.slice(2);
 const ONCE = args.includes("--once");
@@ -316,8 +341,8 @@ function readTx(contractId, method, callArgs) {
 }
 
 /** Gonderilecek islem: guncel sira numarasiyla. */
-async function liveTx(contractId, method, callArgs) {
-  const account = await server.getAccount(kp.publicKey());
+async function liveTx(contractId, method, callArgs, signer = kp) {
+  const account = await server.getAccount(signer.publicKey());
   return new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
     .addOperation(new Contract(contractId).call(method, ...callArgs))
     .setTimeout(TX_TIMEOUT_SEC)
@@ -336,8 +361,8 @@ async function read(contractId, method, callArgs = []) {
  * "zaman asimi" donerse islem kesinlikle zincire yazilmamistir ve tekrar denemek guvenlidir.
  * retry=true: ag islemi hic kabul etmedi (yogunluk, ayni hesapta bekleyen islem); sonraki ledger'da denenir.
  */
-async function submit(tx) {
-  tx.sign(kp);
+async function submit(tx, signer = kp) {
+  tx.sign(signer);
   let sent;
   try {
     sent = await server.sendTransaction(tx);
@@ -398,22 +423,144 @@ function padSim(sim) {
   return sim;
 }
 
-// Ayni hesaptan ayni anda tek islem: paralel taranan kasalarin islemleri sirayla gonderilir.
-let writeChain = Promise.resolve();
-function serialized(fn) {
-  const p = writeChain.then(fn, fn);
-  writeChain = p.catch(() => {});
+// Ayni hesaptan ayni anda tek islem: her gonderen hesabin kendi sirasi vardir. Is, sirasi en kisa olan hesaba verilir;
+// boylece birden fazla hesap varsa ayni ledger'da birden fazla islem gider.
+function serialized(fn, s = signers[0]) {
+  s.queued++;
+  const run = () => fn(s.kp);
+  const p = s.chain.then(run, run);
+  s.chain = p
+    .catch(() => {})
+    .then(() => {
+      s.queued--;
+    });
   return p;
 }
+const freeSigner = () => signers.reduce((a, b) => (b.queued < a.queued ? b : a));
 
-/** Simule et, basariliysa imzala ve gonder. */
-function write(contractId, method, callArgs) {
-  return serialized(async () => {
-    const tx = await liveTx(contractId, method, callArgs);
-    const sim = await server.simulateTransaction(tx);
-    if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
-    return submit(rpc.assembleTransaction(tx, padSim(sim)).build());
+/** Simule et, basariliysa imzala ve gonder. anySigner: dolumlar icin bos olan hesap secilir; digerleri ana hesaptan gider. */
+function write(contractId, method, callArgs, anySigner = false) {
+  return serialized(
+    async (signer) => {
+      const tx = await liveTx(contractId, method, callArgs, signer);
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
+      return submit(rpc.assembleTransaction(tx, padSim(sim)).build(), signer);
+    },
+    anySigner ? freeSigner() : signers[0],
+  );
+}
+
+const pendingFills = [];
+let flushTimer = null;
+let batchTxs = 0;
+let batchFills = 0;
+
+/**
+ * A fill for a vault whose `execute` takes (executor, order_id, amount, via). Without a batch contract it is sent
+ * alone (`single`). With one, it waits a moment for other fills and goes out with them in one transaction.
+ * Resolves to the same shape as `write`.
+ */
+function fillOrder(vault, id, amount, via, single) {
+  if (!BATCH || BATCH_SIZE < 2) return single();
+  return new Promise((resolve) => {
+    pendingFills.push({ vault, id, amount, via, single, resolve });
+    if (pendingFills.length >= BATCH_SIZE) flushFills();
+    else if (!flushTimer) flushTimer = setTimeout(flushFills, BATCH_WAIT_MS);
   });
+}
+
+function flushFills() {
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  while (pendingFills.length) sendBatch(pendingFills.splice(0, BATCH_SIZE));
+}
+
+async function sendBatch(items) {
+  const alone = async (it) => {
+    try {
+      it.resolve(await it.single());
+    } catch (e) {
+      it.resolve({ ok: false, error: e.message });
+    }
+  };
+  if (items.length === 1) return alone(items[0]);
+  const entry = (k, v) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(k), val: v });
+  // Struct fields in alphabetical order, as the contract type expects.
+  const fills = items.map((it) =>
+    xdr.ScVal.scvMap([
+      entry("amount", i128(it.amount)),
+      entry("order_id", u32(it.id)),
+      entry("vault", new Address(it.vault).toScVal()),
+      entry("via", it.via ? new Address(it.via).toScVal() : xdr.ScVal.scvVoid()),
+    ]),
+  );
+  let r;
+  try {
+    r = await write(BATCH, "fill_many", [new Address(kp.publicKey()).toScVal(), xdr.ScVal.scvVec(fills)], true);
+  } catch (e) {
+    r = { ok: false, error: e.message };
+  }
+  if (r.retry) {
+    for (const it of items) it.resolve(r); // the network did not take it: nothing was paid, next ledger
+    return;
+  }
+  if (!r.ok || !Array.isArray(r.value)) {
+    log(`toplu dolum (${items.length} emir) olmadi: ${errText(r)}; emirler tek tek denenecek`);
+    await Promise.all(items.map(alone));
+    return;
+  }
+  const done = items.filter((_, i) => BigInt(r.value[i] ?? 0) > 0n).length;
+  batchTxs++;
+  batchFills += done;
+  log(`TOPLU ${done}/${items.length} emir tek islemde doldu ucret=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`);
+  const share = r.fee !== null && done > 0 ? r.fee / BigInt(done) : null;
+  await Promise.all(
+    items.map((it, i) => {
+      const got = BigInt(r.value[i] ?? 0);
+      if (got > 0n) return it.resolve({ ok: true, hash: r.hash, fee: share, value: got });
+      return alone(it); // it failed inside the batch: alone, the simulation gives the reason at no cost
+    }),
+  );
+}
+
+/** Creates the worker accounts that do not exist yet and tops up the ones running low. Failures only mean fewer workers. */
+async function ensureWorkers() {
+  for (let i = 0; i < WORKERS; i++) {
+    const w = workerKey(i);
+    const pub = w.publicKey();
+    try {
+      const bal = await read(XLM, "balance", [new Address(pub).toScVal()]);
+      const have = bal.ok ? Number(BigInt(bal.value)) / 1e7 : 0;
+      let exists = true;
+      try {
+        await server.getAccount(pub);
+      } catch {
+        exists = false;
+      }
+      if (!exists || have < WORKER_MIN_XLM) {
+        const op = exists
+          ? Operation.payment({ destination: pub, asset: Asset.native(), amount: WORKER_START_XLM })
+          : Operation.createAccount({ destination: pub, startingBalance: WORKER_START_XLM });
+        const r = await serialized(async (signer) => {
+          const account = await server.getAccount(signer.publicKey());
+          const tx = new TransactionBuilder(account, { fee: String(Number(BASE_FEE) * 10), networkPassphrase: PASSPHRASE })
+            .addOperation(op)
+            .setTimeout(TX_TIMEOUT_SEC)
+            .build();
+          return submit(tx, signer);
+        });
+        if (!r.ok) {
+          log(`yardimci hesap ${i + 1} hazirlanamadi: ${r.error}`);
+          continue;
+        }
+        log(`yardimci hesap ${i + 1} ${exists ? "takviye edildi" : "olusturuldu"}: ${short(pub)} (+${WORKER_START_XLM} XLM)`);
+      }
+      if (!signers.some((s) => s.kp.publicKey() === pub)) signers.push({ kp: w, chain: Promise.resolve(), queued: 0 });
+    } catch (e) {
+      log(`yardimci hesap ${i + 1} kontrol edilemedi: ${e.message || e}`);
+    }
+  }
 }
 
 /** Sinirli paralellik: en fazla n is ayni anda. */
@@ -576,7 +723,9 @@ const dirty = new Set(); // an order_placed event named them; read on the next s
 let sweepAt = 0; // position of the rotating sweep over idle vaults
 let eventLedger = 0; // last ledger whose events were read (0: start from the current ledger)
 let eventLogAt = 0;
-const PLACED_TOPIC = xdr.ScVal.scvSymbol("order_placed").toXDR("base64");
+// Every event that changes a vault's order book: a new order, a fill (by anyone) and a cancellation.
+const ORDER_TOPICS = ["order_placed", "order_filled", "order_cancelled"].map((n) => [xdr.ScVal.scvSymbol(n).toXDR("base64"), "*"]);
+let eventsOk = false; // true while the events of every ledger since the last scan have been read
 
 /** Marks the vaults that placed an order since the last scan. Any failure is harmless: the sweep finds them later. */
 async function collectPlaced(known) {
@@ -584,12 +733,14 @@ async function collectPlaced(known) {
     const latest = (await server.getLatestLedger()).sequence;
     if (!eventLedger) {
       eventLedger = latest; // the first scan reads every vault anyway
+      eventsOk = false;
       return;
     }
     if (latest <= eventLedger) return;
-    const filters = [{ type: "contract", topics: [[PLACED_TOPIC, "*"]] }];
+    const filters = [{ type: "contract", topics: ORDER_TOPICS }];
     let cursor = null;
-    for (let page = 0; page < 10; page++) {
+    let complete = false;
+    for (let page = 0; page < 50; page++) {
       const r = await server.getEvents(cursor ? { filters, cursor, limit: 200 } : { filters, startLedger: eventLedger + 1, limit: 200 });
       const events = (r && r.events) || [];
       for (const ev of events) {
@@ -597,14 +748,19 @@ async function collectPlaced(known) {
         const id = typeof c === "string" ? c : c && typeof c.contractId === "function" ? c.contractId() : String(c ?? "");
         if (known.has(id)) dirty.add(id);
       }
-      if (events.length < 200) break;
+      if (events.length < 200) {
+        complete = true;
+        break;
+      }
       const last = events[events.length - 1];
       cursor = r.cursor || last.pagingToken || last.id;
       if (!cursor) break;
     }
     eventLedger = latest;
+    eventsOk = complete; // a flood beyond 10,000 events: fall back to reading vaults with open orders directly
   } catch (e) {
     eventLedger = 0;
+    eventsOk = false;
     if (Date.now() - eventLogAt > 10 * 60_000) {
       eventLogAt = Date.now();
       log(`emir olaylari okunamadi (bos kasalar sirayla taranmaya devam eder): ${e.message || e}`);
@@ -619,7 +775,9 @@ async function vaultsToRead(all) {
   const idle = [];
   for (const v of all) {
     const st = book.get(v);
-    if (!seenVaults.has(v) || dirty.has(v) || (st && (st.open.length > 0 || st.more))) now.push(v);
+    // While events are being read, a vault's orders are re-read only when something happened in it; the cached
+    // copy is used for the price check. Without events, vaults with open orders are re-read on every scan.
+    if (!seenVaults.has(v) || dirty.has(v) || (st && (st.more || (!eventsOk && st.open.length > 0)))) now.push(v);
     else idle.push(v);
   }
   const n = Math.min(SWEEP_PER_SCAN, idle.length);
@@ -631,6 +789,7 @@ async function vaultsToRead(all) {
 
 async function ordersToCheck(vault) {
   const st = book.get(vault) ?? { next: 0, open: [], cursor: 0 };
+  if (!st.orders) st.orders = new Map(); // id -> last read copy of every open order
   book.set(vault, st);
   const fresh = new Map();
   st.more = true; // stays true only if the loop below ends by reaching its cap (more new orders may follow)
@@ -649,6 +808,7 @@ async function ordersToCheck(vault) {
     } else closed.add(`${vault}:${st.next}`);
     st.next++;
   }
+  for (const [id, o] of fresh) st.orders.set(id, { id, ...o });
   st.open = st.open.filter((id) => !closed.has(`${vault}:${id}`));
   const n = st.open.length;
   const take = Math.min(n, MAX_ORDERS_PER_VAULT);
@@ -668,9 +828,71 @@ async function ordersToCheck(vault) {
       closed.add(`${vault}:${id}`);
       continue;
     }
+    st.orders.set(id, { id, ...o });
     orders.push({ id, ...o });
   }
+  st.open = st.open.filter((id) => !closed.has(`${vault}:${id}`));
+  for (const id of st.orders.keys()) if (!st.open.includes(id)) st.orders.delete(id);
   return orders;
+}
+
+// ----- local price check -----
+// Asking the network for a quote per order per scan does not scale. Instead the reserves of each Soroswap pool are
+// read once per scan and the output of a swap is computed here with the pool's own formula (constant product,
+// 0.3% fee). An order whose limit is clearly not met costs no network call at all. Anything close to its limit
+// still goes through the network quote and the contract's own checks, so this only decides what to skip. The
+// formula is compared with a real quote for each pair every 30 minutes and switched off for that pair if it differs.
+const pairCache = new Map(); // "a|b" -> { pair, token0 } | { none: true, at }
+const reservesNow = new Map(); // per scan: pair -> [r0, r1] | null
+const localCheck = new Map(); // "tin|tout" -> { okAt } | { offUntil }
+const LOCAL_RECHECK_MS = 30 * 60_000;
+let localSkips = 0;
+
+async function poolOf(a, b) {
+  const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+  const c = pairCache.get(key);
+  if (c && (!c.none || Date.now() - c.at < 10 * 60_000)) return c.none ? null : c;
+  let info = { none: true, at: Date.now() };
+  try {
+    const p = await read(ROUTER, "router_pair_for", [new Address(a).toScVal(), new Address(b).toScVal()]);
+    if (p.ok && p.value) {
+      const t0 = await read(String(p.value), "token_0");
+      if (t0.ok && t0.value) info = { pair: String(p.value), token0: String(t0.value) };
+    }
+  } catch {}
+  pairCache.set(key, info);
+  return info.none ? null : info;
+}
+
+/** Output of swapping `amount` of `a` into `b` in their pool, or null when the pool cannot be read. */
+async function hopOut(amount, a, b) {
+  const info = await poolOf(a, b);
+  if (!info) return null;
+  let r = reservesNow.get(info.pair);
+  if (r === undefined) {
+    r = null;
+    try {
+      const got = await read(info.pair, "get_reserves");
+      if (got.ok && got.value && got.value.length === 2) r = [BigInt(got.value[0]), BigInt(got.value[1])];
+    } catch {}
+    reservesNow.set(info.pair, r);
+  }
+  if (!r) return null;
+  const [rin, rout] = info.token0 === a ? [r[0], r[1]] : [r[1], r[0]];
+  if (rin <= 0n || rout <= 0n) return 0n;
+  const x = amount * 997n;
+  return (x * rout) / (rin * 1000n + x);
+}
+
+/** Best output over the same routes `bestRoute` tries, computed locally; null when no route could be computed. */
+async function localBest(amount, tin, tout, vias) {
+  let best = null;
+  for (const via of vias) {
+    let q = await hopOut(amount, tin, via || tout);
+    if (q !== null && via) q = q > 0n ? await hopOut(q, via, tout) : 0n;
+    if (q !== null && (best === null || q > best)) best = q;
+  }
+  return best;
 }
 
 async function quotePath(amount, path) {
@@ -749,7 +971,7 @@ function priceNoteFor(tin, tout, fill, q, limit) {
   return `piyasa ${(Number(q) / Number(fill)).toFixed(4)} < hedef ${target.toFixed(4)} ${sym(tout)}/${sym(tin)}`;
 }
 
-async function tryOrder(vault, o) {
+async function tryOrder(vault, o, ctx = { net: 0 }) {
   const pc = await pair(vault);
   const tin = pc.v7 ? String(o.sell) : pc.tin;
   const tout = pc.v7 ? String(o.buy) : pc.tout;
@@ -783,6 +1005,17 @@ async function tryOrder(vault, o) {
   const sizes = candidates(remaining, minFill > minFillFor(tin) ? minFill : minFillFor(tin), minFill);
   const smallest = sizes[sizes.length - 1];
 
+  // Local price check first: no network call for an order whose limit is clearly not met (see "local price check").
+  const lk = `${tin}|${tout}`;
+  const lc = localCheck.get(lk);
+  const est = lc && lc.offUntil > Date.now() ? null : await localBest(smallest, tin, tout, vias);
+  const trusted = !!(lc && lc.okAt && Date.now() - lc.okAt < LOCAL_RECHECK_MS);
+  if (est !== null && trusted && (est * 1005n) / 1000n + 2n < minOut(smallest, limit)) {
+    localSkips++;
+    return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, est, limit));
+  }
+  ctx.net++; // from here on the order costs network calls
+
   // Tetikli emir (zarar kes): tetigi kontrat Blend oracle'indan kontrol eder. Once tek bir simulasyonla
   // tetik sorulur; gelmediyse ("tetik yok" 16, "oracle yok" 19) fiyat sorgusu hic yapilmadan beklenir.
   if (trigger > 0n) {
@@ -798,6 +1031,16 @@ async function tryOrder(vault, o) {
   if (qSmall === null) {
     log(`${tag} fiyat alinamadi`);
     return "error";
+  }
+  if (est !== null && !trusted) {
+    // Compare the local formula with the real quote for this pair before relying on it.
+    const diff = est > qSmall ? est - qSmall : qSmall - est;
+    const tol = qSmall / 300n > 2n ? qSmall / 300n : 2n;
+    if (diff <= tol) localCheck.set(lk, { okAt: Date.now() });
+    else {
+      localCheck.set(lk, { offUntil: Date.now() + LOCAL_RECHECK_MS });
+      log(`yerel fiyat hesabi ${sym(tin)}->${sym(tout)} icin tutmadi (yerel ${est}, ag ${qSmall}); bu cift 30 dk ag uzerinden sorulacak`);
+    }
   }
   if (qSmall < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, qSmall, limit));
 
@@ -829,7 +1072,9 @@ async function tryOrder(vault, o) {
         continue;
       }
     }
-    const r = await write(vault, "execute", execArgs(fill, via));
+    const single = () => write(vault, "execute", execArgs(fill, via), true);
+    const r = pc.v8 ? await fillOrder(vault, o.id, fill, via, single) : await single();
+    dirty.add(vault); // whatever happened, read this vault's orders again on the next scan
     if (r.ok) {
       stats.fills++;
       stuck.delete(key);
@@ -1033,25 +1278,43 @@ async function scan() {
   const vaults = vaultCache.list;
   let open = 0;
   let filled = 0;
+  // 1) Refresh the order book of the vaults that need it (new, changed, or the rotating sweep).
   await pool(await vaultsToRead(vaults), SCAN_CONCURRENCY, async (v) => {
-    let orders = [];
     try {
-      orders = await ordersToCheck(v);
+      await ordersToCheck(v);
     } catch (e) {
       log(`HATA ${e.message}`);
       return;
     }
     seenVaults.add(v);
     dirty.delete(v);
+  });
+  // 2) Check every open order against this scan's prices, from the cached copies. Fills run in parallel, one per
+  //    sending account at a time.
+  reservesNow.clear();
+  const active = vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0);
+  // With the batch filler each sending account carries BATCH_SIZE fills, so that many vaults are checked at once.
+  const lanes = Math.min(Math.max(SCAN_CONCURRENCY, signers.length * (BATCH ? BATCH_SIZE : 1)), 40);
+  await pool(active, lanes, async (v) => {
+    const st = book.get(v);
+    const cached = st.open.map((id) => st.orders?.get(id)).filter(Boolean);
+    // Start one further each scan, so that when only some orders can be checked over the network (the cap
+    // below) every order gets its turn.
+    st.turn = cached.length ? ((st.turn || 0) + 1) % cached.length : 0;
+    const orders = [...cached.slice(st.turn), ...cached.slice(0, st.turn)];
+    const ctx = { net: 0 };
     let tries = 0;
-    for (const o of orders) {
-      if (tries >= MAX_FILLS_PER_VAULT) {
-        log(`${short(v)}: bu turda ${MAX_FILLS_PER_VAULT} islem denendi, kalanlar sonraki tura`);
-        break;
+    // With the batch filler a vault's orders are checked a few at a time, so that several of them can go out in
+    // the same transaction; without it, one after the other. The caps are checked before each group.
+    const width = BATCH ? BATCH_SIZE : 1;
+    const one = async (o) => {
+      if (closed.has(`${v}:${o.id}`)) {
+        dirty.add(v); // the cached copy is out of date: read the vault again on the next scan
+        return;
       }
-      if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) continue; // toz emirler (buyuk emrin son kucuk parcasi degil)
+      if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // toz emirler (buyuk emrin son kucuk parcasi degil)
       try {
-        const res = await tryOrder(v, o);
+        const res = await tryOrder(v, o, ctx);
         if (res === "filled") filled++;
         if (res === "filled" || res === "error" || res === "busy") tries++; // yalnizca gercek islem denemeleri sayilir
       } catch (e) {
@@ -1059,6 +1322,14 @@ async function scan() {
         stats.lastError = e.message;
         log(`HATA ${short(v)} #${o.id}: ${e.message}`);
       }
+    };
+    for (let i = 0; i < orders.length; i += width) {
+      if (ctx.net >= MAX_ORDERS_PER_VAULT) break; // network-checked orders per vault per scan
+      if (tries >= MAX_FILLS_PER_VAULT) {
+        log(`${short(v)}: bu turda ${MAX_FILLS_PER_VAULT} islem denendi, kalanlar sonraki tura`);
+        break;
+      }
+      await Promise.all(orders.slice(i, i + width).map(one));
     }
   });
   for (const v of vaults) open += book.get(v)?.open.length ?? 0; // every vault, including the ones not read this scan
@@ -1084,6 +1355,9 @@ async function scan() {
           toplam_ucret_xlm: fmt(stats.feesStroop),
           son_hata: stats.lastError,
           keeper_bakiyesi_xlm: balance,
+          gonderen_hesap: signers.length,
+          toplu_dolum: BATCH ? `${batchFills} emir / ${batchTxs} islem` : "kapali",
+          yerel_hesapla_gecilen: localSkips,
           son_ttl: lastTtl ? new Date(lastTtl).toISOString() : null,
         },
         null,
@@ -1106,6 +1380,12 @@ async function main() {
     if (DO_TTL && last) await extendTtlAll(last.vaults);
     return;
   }
+  if (WORKERS > 0) {
+    await ensureWorkers();
+    log(`gonderen hesap sayisi: ${signers.length} (ana hesap + ${signers.length - 1} yardimci)`);
+    log(BATCH ? `toplu dolum acik: islem basina en cok ${BATCH_SIZE} emir, sozlesme ${short(BATCH)}` : "toplu dolum kapali (testnet/batch.env yok)");
+  }
+  let workersAt = Date.now();
   const prevTtl = Date.parse(readStatus().son_ttl || "");
   if (Number.isFinite(prevTtl)) lastTtl = prevTtl;
   let ttlJobs = [];
@@ -1118,6 +1398,11 @@ async function main() {
   for (;;) {
     try {
       const s = await scan();
+      // Worker balances are checked once an hour.
+      if (WORKERS > 0 && Date.now() - workersAt > 3600_000) {
+        workersAt = Date.now();
+        await ensureWorkers();
+      }
       // TTL bakimi taramayi bekletmesin: gunde bir is listesi hazirlanir ve dolum olmayan
       // turlarda birer birer yapilir.
       if (DO_TTL && s.filled === 0) {

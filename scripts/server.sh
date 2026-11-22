@@ -22,7 +22,7 @@ CMD="${1:-}"
 copy_code() {
   # durum.json (keeper state) is sent only on setup so a later push never overwrites the server's state.
   local skip_state="$1" files=(keeper)
-  for f in addr factory factory-sell eski-fabrikalar markets; do
+  for f in addr factory factory-sell eski-fabrikalar markets batch; do
     [ -f "testnet/$f.env" ] && files+=("testnet/$f.env")
   done
   local ex=(--exclude=node_modules --exclude=keeper.log)

@@ -47,4 +47,5 @@ testnet/*
 !testnet/eski-fabrikalar.env
 !testnet/nesiller.env
 !testnet/markets.env
+!testnet/batch.env
 !testnet/pairs.env
