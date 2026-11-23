@@ -1,4 +1,11 @@
-//! Iora vault, version 8: ONE multi-asset vault per user.
+//! Iora vault, version 10: ONE multi-asset vault per user.
+//!
+//! New in version 10 (on top of version 9): an order can be filled WITHOUT a pool.
+//! - `take`: anyone pays the bought token straight into the vault and receives the sold token. The vault checks the
+//!   payment itself, so the order's limit holds exactly as in a swap.
+//! - `cross`: two opposite orders in two Iora vaults fill each other in one transaction (this vault pays the other
+//!   one through its `take`). Neither side pays a pool fee or moves a pool's price; each owner still receives at
+//!   least what the limit promises, or nothing moves.
 //!
 //! New in version 8 (on top of version 7):
 //! - Orders may only use tokens on the factory's ALLOWED list (phishing protection: nobody can be
@@ -21,8 +28,8 @@
 //! - The fill fee (since version 5) is unchanged: whoever fills an order receives a fee only out of output above
 //!   the limit, up to a fixed cap per fill that depends on the bought token. The owner always gets the limit.
 //!
-//! Guarantees that do not change: only the owner can withdraw; anyone can call `execute`, but the caller
-//! only chooses the order, the fill amount, the route and the address that receives the fee; the factory
+//! Guarantees that do not change: only the owner can withdraw; anyone can call `execute`, `take` or `cross`, but
+//! the caller only chooses the order, the fill amount, where the fill comes from and the address that receives the fee; the factory
 //! (guard) can only stop new orders. Withdrawals, cancellations and fills of existing orders always work.
 #![no_std]
 
@@ -148,6 +155,12 @@ pub trait SoroswapRouter {
 // Data types
 // ---------------------------------------------------------------------------
 
+/// Another Iora vault, as seen by `cross`: only its `take` is called.
+#[contractclient(name = "PeerClient")]
+pub trait Peer {
+    fn take(env: Env, payer: Address, order_id: u32, fill_amount: i128, pay_amount: i128, executor: Address) -> i128;
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -191,6 +204,8 @@ pub enum Error {
     InvalidPath = 28,
     /// `forget`: the vault still holds the token or an open order still sells it.
     TokenInUse = 29,
+    /// `take` / `cross`: a vault cannot pay itself.
+    SelfFill = 30,
 }
 
 #[contracttype]
@@ -586,31 +601,10 @@ impl Vault {
     /// Returns the amount of `buy` left for the owner (fee deducted).
     pub fn execute(env: Env, executor: Address, order_id: u32, fill_amount: i128, via: Option<Address>) -> i128 {
         let cfg = config(&env);
-        let mut order = load_order(&env, order_id);
-
-        if order.status != OrderStatus::Open {
-            panic_with_error!(&env, Error::OrderNotOpen);
-        }
-        if env.ledger().timestamp() > order.expiry {
-            panic_with_error!(&env, Error::OrderExpired);
-        }
-        let remaining = order.amount_in - order.filled_in;
-        if fill_amount <= 0 {
-            panic_with_error!(&env, Error::InvalidAmount);
-        }
-        if fill_amount > remaining {
-            panic_with_error!(&env, Error::FillTooLarge);
-        }
-        // Minimum fill rule: except for the fill that completes the order, every fill must be at least `min_fill`
-        // and may not leave a remainder smaller than `min_fill`.
-        let left = remaining - fill_amount;
-        if left != 0 && (fill_amount < order.min_fill || left < order.min_fill) {
-            panic_with_error!(&env, Error::FillTooSmall);
-        }
+        let order = open_for_fill(&env, order_id, fill_amount);
 
         let min_out = min_out_for(fill_amount, order.limit_price);
         let me = env.current_contract_address();
-        let sell = token::Client::new(&env, &order.sell);
         let buy = token::Client::new(&env, &order.buy);
         let router = RouterClient::new(&env, &cfg.router);
         let (path, first_hop) = match via {
@@ -627,24 +621,14 @@ impl Vault {
         };
 
         // 0a) Stop order: no fill until the oracle price reaches the trigger.
-        let oracle = if order.trigger_price > 0 {
-            Some(check_trigger(&env, &cfg, &order.sell, &order.buy, order.trigger_price))
-        } else {
-            None
-        };
+        let oracle = trigger_of(&env, &cfg, &order);
         // 0b) Price impact guard: stops a large fill from being pushed into a shallow pool.
         if order.max_impact_bps < BPS {
             check_impact(&env, &router, &path, fill_amount, order.max_impact_bps);
         }
 
         // 1) The sold token must be on hand: idle funds are used first, the rest is withdrawn from Blend.
-        let idle = sell.balance(&me);
-        if idle < fill_amount {
-            withdraw_from_pool(&env, &cfg, &order.sell, fill_amount - idle, &me);
-            if sell.balance(&me) < fill_amount {
-                panic_with_error!(&env, Error::PoolShortfall);
-            }
-        }
+        hold_sold(&env, &cfg, &order.sell, fill_amount);
 
         // 2) Swap on Soroswap. If the router cannot deliver the minimum output it fails and everything reverts.
         //    On a multi-hop route the router transfers only to the first pair; later hops move between pairs.
@@ -656,76 +640,91 @@ impl Vault {
         env.authorize_as_current_contract(vec![&env, transfer_auth(&env, &order.sell, &me, &pair, fill_amount)]);
         router.swap_exact_tokens_for_tokens(&fill_amount, &min_out, &path, &me, &deadline);
 
-        // 3) We also check the result ourselves instead of trusting the router.
+        // 3) We also check the result ourselves instead of trusting the router (first step of `settle`).
         let gross = buy.balance(&me) - buy_before;
-        if gross < min_out {
+        settle(&env, &cfg, order_id, order, fill_amount, gross, min_out, oracle, executor)
+    }
+
+    /// Direct fill, no pool: `payer` pays `pay_amount` of the order's bought token into the vault and receives
+    /// `fill_amount` of its sold token. Anyone can be the payer (it must authorize the payment).
+    /// The rules are those of `execute`: the order must be open, the fill sizes are the same, a stop order still
+    /// waits for its trigger and its oracle band, and the vault counts what actually arrived, which must be at
+    /// least what the limit promises for `fill_amount`. Otherwise nothing moves.
+    /// The fill fee works as in `execute`: only from payment above the limit, at most `fees[buy]`, to `executor`.
+    /// Returns the amount of `buy` left for the owner (fee deducted).
+    pub fn take(env: Env, payer: Address, order_id: u32, fill_amount: i128, pay_amount: i128, executor: Address) -> i128 {
+        payer.require_auth();
+        let cfg = config(&env);
+        let order = open_for_fill(&env, order_id, fill_amount);
+        let me = env.current_contract_address();
+        if payer == me {
+            panic_with_error!(&env, Error::SelfFill);
+        }
+        let min_out = min_out_for(fill_amount, order.limit_price);
+        if pay_amount < min_out {
             panic_with_error!(&env, Error::LimitNotMet);
         }
-        // The least the owner must receive: what the limit promises (and, for a stop order, the oracle band).
-        let mut floor = min_out;
-        // 3b) Stop order: the output may be below the oracle-fair amount by at most the chosen band.
-        if let Some((p_in, p_out)) = oracle {
-            let fair = fill_amount * p_in / p_out;
-            let band_min = fair * ((BPS - order.stop_band_bps) as i128);
-            if gross * (BPS as i128) < band_min {
-                panic_with_error!(&env, Error::PriceDeviation);
-            }
-            // Rounded up, so the band still holds after the fee is taken.
-            let band_floor = (band_min + (BPS as i128) - 1) / (BPS as i128);
-            if band_floor > floor {
-                floor = band_floor;
-            }
-        }
-        // 3c) Fill fee: only from the part above `floor`, at most `fees[buy]`. If the executor cannot receive it
-        //     (for example no trustline) the fill still goes through and the owner keeps the fee.
-        let cap = cfg.fees.get(order.buy.clone()).unwrap_or(0);
-        let mut fee = gross - floor;
-        if fee > cap {
-            fee = cap;
-        }
-        let mut out = gross;
-        if fee > 0 && executor != me && matches!(buy.try_transfer(&me, &executor, &fee), Ok(Ok(_))) {
-            out = gross - fee;
-            ExecFeePaid { order_id, executor, amount: fee }.publish(&env);
-        }
+        let oracle = trigger_of(&env, &cfg, &order);
 
-        // 4) Order accounting (the sold side).
-        order.filled_in += fill_amount;
-        order.filled_out += out;
-        if order.filled_in == order.amount_in {
-            order.status = OrderStatus::Filled;
-        }
-        save_order(&env, order_id, &order);
-        add_i128(&env, DataKey::Reserved(order.sell.clone()), -fill_amount);
-        reduce_principal(&env, &order.sell, fill_amount);
-        update_stats(&env, &order.sell, |st| st.total_spent += fill_amount);
-        update_stats(&env, &order.buy, |st| st.total_received += out);
+        // 1) The payment comes in first; the vault counts it itself.
+        let sell = token::Client::new(&env, &order.sell);
+        let buy = token::Client::new(&env, &order.buy);
+        let buy_before = buy.balance(&me);
+        buy.transfer(&payer, &me, &pay_amount);
+        let gross = buy.balance(&me) - buy_before;
 
-        // 5) The output either stays in the vault (supplied to Blend if it is a reserve) or goes to the owner's wallet.
-        //    If the wallet cannot receive it (for example no trustline) it waits in the vault as the owner's balance; the fill does not stop.
-        let follow: Option<FollowUp> = env.storage().persistent().get(&DataKey::FollowUp(order_id));
-        let mut kept = order.keep || follow.is_some();
-        if !kept && !matches!(buy.try_transfer(&me, &cfg.owner, &out), Ok(Ok(_))) {
-            kept = true;
-            Held { order_id, amount: out }.publish(&env);
-        }
-        if kept {
-            // The owner may have taken the token off the list with `forget` while this order was open.
-            ensure_listed(&env, &order.buy);
-            if reserve_of(&env, &cfg, &order.buy).is_some() {
-                // If the supply fails (for example the reserve is disabled) the fill does not stop; the token waits idle in the vault.
-                try_supply_to_pool(&env, &cfg, &order.buy, out);
-            }
-            add_i128(&env, DataKey::Deposited(order.buy.clone()), out);
-            if let Some(f) = follow {
-                env.storage().persistent().extend_ttl(&DataKey::FollowUp(order_id), BUMP_THRESHOLD, BUMP_TO);
-                open_follow(&env, &cfg, order_id, &order.buy, &order.sell, out, &f);
-            }
-        }
-        bump_instance(&env);
+        // 2) The sold token leaves: idle funds first, the rest is withdrawn from Blend.
+        hold_sold(&env, &cfg, &order.sell, fill_amount);
+        sell.transfer(&me, &payer, &fill_amount);
 
-        OrderFilled { order_id, amount_in: fill_amount, amount_out: out, kept }.publish(&env);
-        out
+        // 3) Limit check on what arrived, fee, accounting, output (same as a swap).
+        settle(&env, &cfg, order_id, order, fill_amount, gross, min_out, oracle, executor)
+    }
+
+    /// Fills this vault's order against an opposite order in another Iora vault, with no pool in between: this
+    /// vault pays `fill_amount` of its sold token into `other` through that vault's `take` and receives
+    /// `other_fill` of the token it buys. Anyone can call this; the caller chooses the two orders, the two
+    /// amounts and the address that receives the fill fees.
+    /// Both limits hold: `other` accepts the payment only if it meets its own order's limit, and this vault
+    /// counts what it received and requires at least what its own limit promises. If either check fails the
+    /// whole transaction is undone. `other` needs no trust: this vault authorizes exactly one transfer (the
+    /// payment, to `other`) and still checks the result itself.
+    /// Returns the amount of `buy` left for this vault's owner (fee deducted).
+    #[allow(clippy::too_many_arguments)]
+    pub fn cross(
+        env: Env,
+        executor: Address,
+        order_id: u32,
+        fill_amount: i128,
+        other: Address,
+        other_order: u32,
+        other_fill: i128,
+    ) -> i128 {
+        let cfg = config(&env);
+        let order = open_for_fill(&env, order_id, fill_amount);
+        let me = env.current_contract_address();
+        if other == me {
+            panic_with_error!(&env, Error::SelfFill);
+        }
+        let min_out = min_out_for(fill_amount, order.limit_price);
+        if other_fill < min_out {
+            panic_with_error!(&env, Error::LimitNotMet);
+        }
+        let oracle = trigger_of(&env, &cfg, &order);
+
+        // 1) The sold token must be on hand: idle funds first, the rest is withdrawn from Blend.
+        hold_sold(&env, &cfg, &order.sell, fill_amount);
+
+        // 2) Pay the other vault's order. This authorization matches exactly one transfer (this vault -> `other`,
+        //    this amount of the sold token) and expires when this call frame ends.
+        let buy = token::Client::new(&env, &order.buy);
+        let buy_before = buy.balance(&me);
+        env.authorize_as_current_contract(vec![&env, transfer_auth(&env, &order.sell, &me, &other, fill_amount)]);
+        PeerClient::new(&env, &other).take(&me, &other_order, &other_fill, &fill_amount, &executor);
+
+        // 3) Count what arrived instead of trusting `other`; then fee, accounting and output as in a swap.
+        let gross = buy.balance(&me) - buy_before;
+        settle(&env, &cfg, order_id, order, fill_amount, gross, min_out, oracle, executor)
     }
 
     /// Sends the rewards Blend distributes (BLND) straight to the owner's wallet.
@@ -793,7 +792,7 @@ impl Vault {
 
     /// Version of the vault code (keepers pick the `execute` signature from it).
     pub fn version(_env: Env) -> u32 {
-        9
+        10
     }
 
     /// The owner takes a token off the vault's list, freeing one of its MAX_TOKENS places. Only a token the
@@ -839,6 +838,141 @@ impl Vault {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The checks every fill starts with: the order is open and not expired, and the fill size is allowed.
+fn open_for_fill(env: &Env, order_id: u32, fill_amount: i128) -> Order {
+    let order = load_order(env, order_id);
+    if order.status != OrderStatus::Open {
+        panic_with_error!(env, Error::OrderNotOpen);
+    }
+    if env.ledger().timestamp() > order.expiry {
+        panic_with_error!(env, Error::OrderExpired);
+    }
+    let remaining = order.amount_in - order.filled_in;
+    if fill_amount <= 0 {
+        panic_with_error!(env, Error::InvalidAmount);
+    }
+    if fill_amount > remaining {
+        panic_with_error!(env, Error::FillTooLarge);
+    }
+    // Minimum fill rule: except for the fill that completes the order, every fill must be at least `min_fill`
+    // and may not leave a remainder smaller than `min_fill`.
+    let left = remaining - fill_amount;
+    if left != 0 && (fill_amount < order.min_fill || left < order.min_fill) {
+        panic_with_error!(env, Error::FillTooSmall);
+    }
+    order
+}
+
+/// Stop order: no fill until the oracle price reaches the trigger. Returns the oracle prices for the band check
+/// (None for a plain order).
+fn trigger_of(env: &Env, cfg: &Config, order: &Order) -> Option<(i128, i128)> {
+    if order.trigger_price > 0 {
+        Some(check_trigger(env, cfg, &order.sell, &order.buy, order.trigger_price))
+    } else {
+        None
+    }
+}
+
+/// Makes `amount` of the sold token available in the vault: idle funds are used first, the rest is withdrawn from Blend.
+fn hold_sold(env: &Env, cfg: &Config, token: &Address, amount: i128) {
+    let me = env.current_contract_address();
+    let t = token::Client::new(env, token);
+    let idle = t.balance(&me);
+    if idle < amount {
+        withdraw_from_pool(env, cfg, token, amount - idle, &me);
+        if t.balance(&me) < amount {
+            panic_with_error!(env, Error::PoolShortfall);
+        }
+    }
+}
+
+/// Second half of every fill, whatever delivered the bought token (a swap, a payer, another vault): checks that
+/// `gross` meets the limit, pays the fill fee, updates the order and hands the output on.
+/// Returns the amount of `buy` left for the owner (fee deducted).
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    env: &Env,
+    cfg: &Config,
+    order_id: u32,
+    mut order: Order,
+    fill_amount: i128,
+    gross: i128,
+    min_out: i128,
+    oracle: Option<(i128, i128)>,
+    executor: Address,
+) -> i128 {
+    let me = env.current_contract_address();
+    let buy = token::Client::new(env, &order.buy);
+    if gross < min_out {
+        panic_with_error!(env, Error::LimitNotMet);
+    }
+    // The least the owner must receive: what the limit promises (and, for a stop order, the oracle band).
+    let mut floor = min_out;
+    // Stop order: the output may be below the oracle-fair amount by at most the chosen band.
+    if let Some((p_in, p_out)) = oracle {
+        let fair = fill_amount * p_in / p_out;
+        let band_min = fair * ((BPS - order.stop_band_bps) as i128);
+        if gross * (BPS as i128) < band_min {
+            panic_with_error!(env, Error::PriceDeviation);
+        }
+        // Rounded up, so the band still holds after the fee is taken.
+        let band_floor = (band_min + (BPS as i128) - 1) / (BPS as i128);
+        if band_floor > floor {
+            floor = band_floor;
+        }
+    }
+    // Fill fee: only from the part above `floor`, at most `fees[buy]`. If the executor cannot receive it
+    // (for example no trustline) the fill still goes through and the owner keeps the fee.
+    let cap = cfg.fees.get(order.buy.clone()).unwrap_or(0);
+    let mut fee = gross - floor;
+    if fee > cap {
+        fee = cap;
+    }
+    let mut out = gross;
+    if fee > 0 && executor != me && matches!(buy.try_transfer(&me, &executor, &fee), Ok(Ok(_))) {
+        out = gross - fee;
+        ExecFeePaid { order_id, executor, amount: fee }.publish(env);
+    }
+
+    // Order accounting (the sold side).
+    order.filled_in += fill_amount;
+    order.filled_out += out;
+    if order.filled_in == order.amount_in {
+        order.status = OrderStatus::Filled;
+    }
+    save_order(env, order_id, &order);
+    add_i128(env, DataKey::Reserved(order.sell.clone()), -fill_amount);
+    reduce_principal(env, &order.sell, fill_amount);
+    update_stats(env, &order.sell, |st| st.total_spent += fill_amount);
+    update_stats(env, &order.buy, |st| st.total_received += out);
+
+    // The output either stays in the vault (supplied to Blend if it is a reserve) or goes to the owner's wallet.
+    // If the wallet cannot receive it (for example no trustline) it waits in the vault as the owner's balance; the fill does not stop.
+    let follow: Option<FollowUp> = env.storage().persistent().get(&DataKey::FollowUp(order_id));
+    let mut kept = order.keep || follow.is_some();
+    if !kept && !matches!(buy.try_transfer(&me, &cfg.owner, &out), Ok(Ok(_))) {
+        kept = true;
+        Held { order_id, amount: out }.publish(env);
+    }
+    if kept {
+        // The owner may have taken the token off the list with `forget` while this order was open.
+        ensure_listed(env, &order.buy);
+        if reserve_of(env, cfg, &order.buy).is_some() {
+            // If the supply fails (for example the reserve is disabled) the fill does not stop; the token waits idle in the vault.
+            try_supply_to_pool(env, cfg, &order.buy, out);
+        }
+        add_i128(env, DataKey::Deposited(order.buy.clone()), out);
+        if let Some(f) = follow {
+            env.storage().persistent().extend_ttl(&DataKey::FollowUp(order_id), BUMP_THRESHOLD, BUMP_TO);
+            open_follow(env, cfg, order_id, &order.buy, &order.sell, out, &f);
+        }
+    }
+    bump_instance(env);
+
+    OrderFilled { order_id, amount_in: fill_amount, amount_out: out, kept }.publish(env);
+    out
+}
 
 /// Minimum output at the limit price (rounded up, so the user never receives less).
 pub fn min_out_for(amount_in: i128, limit_price: i128) -> i128 {

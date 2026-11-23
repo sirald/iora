@@ -875,7 +875,7 @@ fn fill_through_an_intermediate_token() {
 #[test]
 fn version_is_reported() {
     let s = setup();
-    assert_eq!(s.v.version(), 9);
+    assert_eq!(s.v.version(), 10);
 }
 
 #[test]
@@ -917,4 +917,154 @@ fn forget_frees_a_place_on_the_token_list() {
     // Only the owner can remove a token.
     s.env.set_auths(&[]);
     assert!(s.v.try_forget(&btc_id).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Fills without a pool: `take` (a payer) and `cross` (two vaults)
+// ---------------------------------------------------------------------------
+
+/// A second user's vault on the same pool, router and guard, with 10,000 of each token in that user's wallet.
+fn second_vault(s: &S, fee_xlm: i128, fee_usdc: i128) -> (VaultClient<'static>, Address) {
+    let owner2 = Address::generate(&s.env);
+    let mut fees: Map<Address, i128> = Map::new(&s.env);
+    if fee_xlm > 0 {
+        fees.set(s.xlm.address.clone(), fee_xlm);
+    }
+    if fee_usdc > 0 {
+        fees.set(s.usdc.address.clone(), fee_usdc);
+    }
+    let id = s.env.register(Vault, (owner2.clone(), s.pool.address.clone(), s.router.address.clone(), s.guard.address.clone(), fees));
+    StellarAssetClient::new(&s.env, &s.usdc.address).mint(&owner2, &(10_000 * U));
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&owner2, &(10_000 * U));
+    (VaultClient::new(&s.env, &id), owner2)
+}
+
+#[test]
+fn take_fills_an_order_without_a_pool() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // Sells 100 USDC for XLM at 0.20: the owner must receive at least 500 XLM.
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    let taker = Address::generate(&s.env);
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&taker, &(600 * U));
+    let router_usdc = s.usdc.balance(&s.router.address);
+    let router_xlm = s.xlm.balance(&s.router.address);
+
+    // One stroop under the limit is refused and nothing moves.
+    assert_eq!(s.v.try_take(&taker, &id, &(100 * U), &(500 * U - 1), &s.filler), Err(Ok(ce(Error::LimitNotMet))));
+    assert_eq!(s.xlm.balance(&taker), 600 * U);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Open);
+
+    let got = s.v.take(&taker, &id, &(100 * U), &(500 * U), &s.filler);
+    assert_eq!(got, 500 * U);
+    assert_eq!(s.usdc.balance(&taker), 100 * U);
+    assert_eq!(s.xlm.balance(&taker), 100 * U);
+    let o = s.v.get_order(&id);
+    assert_eq!(o.status, OrderStatus::Filled);
+    assert_eq!(o.filled_out, 500 * U);
+    // The XLM stays in the vault and earns; the USDC left the vault's balance.
+    assert_eq!(s.v.balance(&s.xlm.address), 500 * U);
+    assert_eq!(s.v.balance(&s.usdc.address), 900 * U);
+    assert_eq!(s.v.reserved(&s.usdc.address), 0);
+    // The pool was not touched.
+    assert_eq!(s.usdc.balance(&s.router.address), router_usdc);
+    assert_eq!(s.xlm.balance(&s.router.address), router_xlm);
+
+    // A vault cannot be its own payer, and a payer must authorize the payment.
+    let id2 = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    assert_eq!(s.v.try_take(&s.v.address, &id2, &(100 * U), &(500 * U), &s.filler), Err(Ok(ce(Error::SelfFill))));
+    s.env.set_auths(&[]);
+    assert!(s.v.try_take(&taker, &id2, &(100 * U), &(500 * U), &s.filler).is_err());
+}
+
+#[test]
+fn two_vaults_cross_without_a_pool() {
+    let s = setup();
+    let (b, owner2) = second_vault(&s, 0, 0);
+    // A sells 100 USDC for XLM at 0.20 (wants at least 500 XLM); the XLM stays in A's vault.
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let ida = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    // B sells 500 XLM for USDC at 5 XLM per USDC (wants at least 100 USDC); the USDC goes to B's wallet.
+    b.deposit(&s.xlm.address, &(1_000 * U));
+    let idb = b.place_order(&s.xlm.address, &s.usdc.address, &(500 * U), &(5 * U), &(500 * U), &IMPACT, &(NOW + DAY), &false);
+    let router_usdc = s.usdc.balance(&s.router.address);
+    let router_xlm = s.xlm.balance(&s.router.address);
+    let b_wallet = s.usdc.balance(&owner2);
+
+    let got = s.v.cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(500 * U));
+    assert_eq!(got, 500 * U);
+    assert_eq!(s.v.get_order(&ida).status, OrderStatus::Filled);
+    assert_eq!(b.get_order(&idb).status, OrderStatus::Filled);
+    assert_eq!(b.get_order(&idb).filled_out, 100 * U);
+    // A: 100 USDC less, 500 XLM more, still earning on Blend.
+    assert_eq!(s.v.balance(&s.usdc.address), 900 * U);
+    assert_eq!(s.v.balance(&s.xlm.address), 500 * U);
+    assert_eq!(s.xlm.balance(&s.v.address), 0);
+    // B: 500 XLM less, 100 USDC in the owner's wallet.
+    assert_eq!(b.balance(&s.xlm.address), 500 * U);
+    assert_eq!(s.usdc.balance(&owner2), b_wallet + 100 * U);
+    assert_eq!(s.v.reserved(&s.usdc.address), 0);
+    assert_eq!(b.reserved(&s.xlm.address), 0);
+    // No pool took part and nobody was paid a fee.
+    assert_eq!(s.usdc.balance(&s.router.address), router_usdc);
+    assert_eq!(s.xlm.balance(&s.router.address), router_xlm);
+    assert_eq!(s.xlm.balance(&s.filler), 0);
+    assert_eq!(s.usdc.balance(&s.filler), 0);
+}
+
+#[test]
+fn cross_shares_the_overlap_and_pays_the_fee_from_it() {
+    let s = setup_with(FEE, FEE);
+    let (b, _owner2) = second_vault(&s, FEE, FEE);
+    // A pays up to 0.20 USDC per XLM: 100 USDC must bring at least 500 XLM.
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let ida = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    // B gives up to 5.2 XLM per USDC: 510 XLM must bring at least 98.0769231 USDC.
+    b.deposit(&s.xlm.address, &(1_000 * U));
+    let idb = b.place_order(&s.xlm.address, &s.usdc.address, &(510 * U), &52_000_000, &(510 * U), &IMPACT, &(NOW + DAY), &true);
+
+    // The caller settles inside the overlap: 100 USDC against 510 XLM. Both sides do better than their limits.
+    let got = s.v.cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(510 * U));
+    // A: 10 XLM above the limit, of which the fee cap (0.1 XLM) goes to the filler.
+    assert_eq!(got, 510 * U - FEE);
+    assert_eq!(s.xlm.balance(&s.filler), FEE);
+    // B: 100 USDC against a limit of 98.0769231, of which the fee cap (0.1 USDC) goes to the filler.
+    assert_eq!(b.get_order(&idb).filled_out, 100 * U - FEE);
+    assert_eq!(s.usdc.balance(&s.filler), FEE);
+    assert_eq!(s.v.balance(&s.xlm.address), 510 * U - FEE);
+    assert_eq!(b.balance(&s.usdc.address), 100 * U - FEE);
+}
+
+#[test]
+fn cross_cannot_break_either_limit() {
+    let s = setup();
+    let (b, owner2) = second_vault(&s, 0, 0);
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // A may fill in pieces of 10 USDC or more.
+    let ida = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(10 * U), &IMPACT, &(NOW + DAY), &true);
+    b.deposit(&s.xlm.address, &(1_000 * U));
+    let idb = b.place_order(&s.xlm.address, &s.usdc.address, &(500 * U), &(5 * U), &(500 * U), &IMPACT, &(NOW + DAY), &false);
+    let b_wallet = s.usdc.balance(&owner2);
+
+    // A would receive less than its limit promises: refused by A before anything moves.
+    assert_eq!(s.v.try_cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(500 * U - 1)), Err(Ok(ce(Error::LimitNotMet))));
+    // B would receive less than its limit promises (90 USDC for 500 XLM): refused by B, and A's side is undone with it.
+    assert!(s.v.try_cross(&s.filler, &ida, &(90 * U), &b.address, &idb, &(500 * U)).is_err());
+    // A vault cannot cross with itself.
+    assert_eq!(s.v.try_cross(&s.filler, &ida, &(100 * U), &s.v.address, &ida, &(500 * U)), Err(Ok(ce(Error::SelfFill))));
+
+    // Nothing moved and both orders are still open, with their full amounts reserved.
+    assert_eq!(s.v.get_order(&ida).status, OrderStatus::Open);
+    assert_eq!(s.v.get_order(&ida).filled_in, 0);
+    assert_eq!(b.get_order(&idb).status, OrderStatus::Open);
+    assert_eq!(s.v.balance(&s.usdc.address), 1_000 * U);
+    assert_eq!(s.v.balance(&s.xlm.address), 0);
+    assert_eq!(b.balance(&s.xlm.address), 1_000 * U);
+    assert_eq!(s.usdc.balance(&owner2), b_wallet);
+    assert_eq!(s.v.reserved(&s.usdc.address), 100 * U);
+    assert_eq!(b.reserved(&s.xlm.address), 500 * U);
+
+    // An expired order cannot be crossed.
+    s.env.ledger().set_timestamp(NOW + DAY + 1);
+    assert_eq!(s.v.try_cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(500 * U)), Err(Ok(ce(Error::OrderExpired))));
 }

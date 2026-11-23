@@ -126,6 +126,9 @@ const WORKERS = Math.max(0, Math.min(50, Number(cfg.KEEPER_WORKERS ?? 9)));
 const BATCH = (cfg.BATCH || "").trim();
 const BATCH_SIZE = Math.max(1, Math.min(6, Number(cfg.BATCH_SIZE || 5)));
 const BATCH_WAIT_MS = Number(cfg.BATCH_WAIT_MS || 400);
+// ----- crossing: two opposite orders in version 10 vaults fill each other, with no pool in between -----
+// CROSS=off in the settings file switches it off; every order is then filled through the pool as before.
+const CROSS = String(cfg.CROSS || "on").toLowerCase() !== "off";
 const WORKER_START_XLM = String(cfg.WORKER_START_XLM || "10");
 const WORKER_MIN_XLM = Number(cfg.WORKER_MIN_XLM || 3);
 const workerKey = (i) =>
@@ -166,6 +169,7 @@ const ERR = {
   22: "UnknownToken",
   23: "BadDecimals",
   24: "InvalidBand",
+  30: "SelfFill",
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -699,14 +703,17 @@ async function pair(vault) {
   const fees = r.value.fees;
   // Version 8: `execute` takes a fourth argument (the intermediate token, or none). `version` reports the vault
   // version; version 7 vaults do not have this function.
+  // Version 10: the vault also has `take` and `cross` (fills without a pool).
   let v8 = false;
+  let v10 = false;
   if (fees !== undefined) {
     const ver = await read(vault, "version");
     v8 = ver.ok && Number(ver.value) >= 8;
+    v10 = ver.ok && Number(ver.value) >= 10;
   }
   const p =
     fees !== undefined
-      ? { v7: true, v5: true, v8, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
+      ? { v7: true, v5: true, v8, v10, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
       : { tin: String(r.value.usdc), tout: String(r.value.xlm), v5: fee !== undefined, fee: fee !== undefined ? BigInt(fee) : 0n };
   pairOf.set(vault, p);
   return p;
@@ -1140,6 +1147,193 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
 }
 
 // ---------------------------------------------------------------------------
+// Crossing (version 10 vaults): an order that sells X for Y and an order in another vault that sells Y for X fill
+// each other in one transaction (`cross`). No pool fee and no price impact for either side. The contract only
+// guarantees the two limits; the price inside the overlap is chosen here:
+//  - the pool's own middle price for these amounts (the average of what each side would get there), kept inside
+//    the overlap of the two limits; without a pool quote, the middle of the two limits;
+//  - a cross is sent only if each side receives at least what the pool would give it now. Otherwise the orders are
+//    left to the pool pass, which follows the best pool price.
+// Stop orders are not crossed (they wait for their oracle trigger and band; the pool pass handles them).
+// ---------------------------------------------------------------------------
+
+const crossedNow = new Set(); // "vault:id" filled by a cross in this scan; the pool pass leaves them alone
+let crossFills = 0;
+
+/** A fill size the contract accepts for this order: all that is left, or a piece that respects the minimum fill on both sides. */
+function fillAllowed(x, fill) {
+  if (fill <= 0n || fill > x.remaining) return false;
+  if (fill === x.remaining) return true;
+  return fill >= x.minFill && x.remaining - fill >= x.minFill && fill >= minFillFor(x.tin);
+}
+
+/**
+ * Amounts for crossing `a` (sells X for Y) with `b` (sells Y for X) at price `p` (X per 1 Y, 7 decimals):
+ * { x: what a pays, y: what b pays }, the largest the two orders allow. Null if no amounts satisfy both limits and
+ * both minimum-fill rules.
+ */
+function crossAmounts(a, b, p) {
+  if (p <= 0n) return null;
+  let x;
+  let y;
+  if ((a.remaining * SCALE) / p < b.remaining) {
+    // a is the smaller side: it fills completely
+    x = a.remaining;
+    y = (x * SCALE + p - 1n) / p;
+    if (y > b.remaining) y = b.remaining;
+  } else {
+    // b is the smaller side: it fills completely
+    y = b.remaining;
+    x = (y * p) / SCALE;
+    if (x > a.remaining) x = a.remaining;
+  }
+  const ok = (x, y) => x > 0n && y > 0n && y >= minOut(x, a.limit) && x >= minOut(y, b.limit) && fillAllowed(a, x) && fillAllowed(b, y);
+  if (ok(x, y)) return { x, y };
+  // Nearly equal orders: the piece left over on the larger side would be below its minimum fill. Both fill
+  // completely instead, if both limits still hold at those amounts.
+  if (ok(a.remaining, b.remaining)) return { x: a.remaining, y: b.remaining };
+  return null;
+}
+
+async function tryCross(a, b) {
+  const lo = (SCALE * SCALE + b.limit - 1n) / b.limit; // the least X per Y that b accepts
+  const hi = a.limit; // the most X per Y that a pays
+  if (lo > hi) return "no";
+  let amt = crossAmounts(a, b, (lo + hi) / 2n);
+  if (!amt) return "no";
+  // What would the pool give each side for these amounts?
+  let qa = await quote(amt.x, a.tin, a.tout);
+  let qb = await quote(amt.y, b.tin, b.tout);
+  if (qa !== null && qb !== null && qa > 0n && qb > 0n) {
+    let mid = ((amt.x * SCALE) / qa + (qb * SCALE) / amt.y) / 2n; // the pool's middle price for these amounts
+    if (mid < lo) mid = lo;
+    if (mid > hi) mid = hi;
+    const again = crossAmounts(a, b, mid);
+    if (again && (again.x !== amt.x || again.y !== amt.y)) {
+      amt = again;
+      qa = await quote(amt.x, a.tin, a.tout);
+      qb = await quote(amt.y, b.tin, b.tout);
+    }
+    // Each side must do at least as well as in the pool; if not, the pool pass fills it at the better price.
+    if ((qa !== null && amt.y < qa) || (qb !== null && amt.x < qb)) return "pool";
+  }
+  // Same rule as a pool fill: the transaction must earn at least one whole fill fee, paid only out of what a side
+  // receives above its limit. Otherwise many tiny crosses could drain the keeper's balance.
+  const capA = a.fees[a.tout] ?? 0n;
+  const capB = b.fees[b.tout] ?? 0n;
+  const overA = amt.y - minOut(amt.x, a.limit);
+  const overB = amt.x - minOut(amt.y, b.limit);
+  if ((capA > 0n || capB > 0n) && !((capA > 0n && overA >= capA) || (capB > 0n && overB >= capB))) return "fee";
+
+  const tag = `${short(a.vault)} #${a.o.id} x ${short(b.vault)} #${b.o.id}`;
+  const args = [
+    new Address(kp.publicKey()).toScVal(),
+    u32(a.o.id),
+    i128(amt.x),
+    new Address(b.vault).toScVal(),
+    u32(b.o.id),
+    i128(amt.y),
+  ];
+  const r = await write(a.vault, "cross", args, true);
+  dirty.add(a.vault); // whatever happened, read both vaults' orders again on the next scan
+  dirty.add(b.vault);
+  if (r.ok) {
+    stats.fills += 2;
+    crossFills++;
+    if (r.fee !== null) stats.feesStroop += r.fee;
+    crossedNow.add(a.key);
+    crossedNow.add(b.key);
+    stuck.delete(`x:${a.key}|${b.key}`);
+    log(
+      `CROSSED ${tag}: ${fmt(amt.x)} ${sym(a.tin)} <-> ${fmt(amt.y)} ${sym(a.tout)}` +
+        (qa !== null ? ` (the pool would give ${fmt(qa)} ${sym(a.tout)}${qb !== null ? ` / ${fmt(qb)} ${sym(a.tin)}` : ""})` : "") +
+        ` fee=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`,
+    );
+    await notify(
+      `Two orders filled each other, no pool: ${tag}\n${fmt(amt.x)} ${sym(a.tin)} <-> ${fmt(amt.y)} ${sym(a.tout)}` +
+        `\nhttps://stellar.expert/explorer/testnet/tx/${r.hash}`,
+    );
+    return "crossed";
+  }
+  if (r.retry) {
+    log(`cross ${tag}: ${r.error}; it will be tried again on the next ledger`);
+    return "busy";
+  }
+  if (r.code === 4 || r.code === 5) return "no"; // one of the two orders is no longer open; both vaults are read again
+  stats.failures++;
+  stats.lastError = `cross ${tag}: ${errText(r)}`;
+  // Rested like a stuck order (1, 2, 4 ... at most 60 rounds), so a pair the contract keeps rejecting does not burn fees.
+  const k = `x:${a.key}|${b.key}`;
+  const n = (stuck.get(k)?.n || 0) + 1;
+  const rest = Math.min(2 ** (n - 1), 60);
+  stuck.set(k, { n, until: scanNo + rest });
+  log(`cross ${tag} rejected: ${errText(r)}; this pair is tried again in ${rest} round(s)`);
+  return "error";
+}
+
+/** Looks for opposite orders that can fill each other and sends the crosses. Returns how many crosses went through. */
+async function crossPass(vaults) {
+  crossedNow.clear();
+  if (!CROSS) return 0;
+  const now = Math.floor(Date.now() / 1000);
+  const list = [];
+  for (const v of vaults) {
+    const st = book.get(v);
+    if (!st || !st.open.length || !st.orders) continue;
+    let pc;
+    try {
+      pc = await pair(v);
+    } catch {
+      continue;
+    }
+    if (!pc.v10) continue;
+    for (const id of st.open) {
+      const o = st.orders.get(id);
+      const key = `${v}:${id}`;
+      if (!o || closed.has(key)) continue;
+      if (BigInt(o.trigger_price ?? 0) > 0n) continue; // stop orders are left to the pool pass
+      if (now > Number(o.expiry)) continue;
+      const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
+      if (remaining <= 0n) continue;
+      list.push({ vault: v, o, key, tin: String(o.sell), tout: String(o.buy), remaining, limit: BigInt(o.limit_price), minFill: BigInt(o.min_fill), fees: pc.fees });
+    }
+  }
+  if (list.length < 2) return 0;
+  const used = new Set();
+  const tried = new Set();
+  let done = 0;
+  for (const a of list) {
+    if (used.has(a.key)) continue;
+    // Opposite orders in other vaults whose limit overlaps a's (a.limit * b.limit >= 1 in 7-decimal units), the most generous first.
+    const opposite = list
+      .filter((b) => !used.has(b.key) && b.vault !== a.vault && b.tin === a.tout && b.tout === a.tin && a.limit * b.limit >= SCALE * SCALE)
+      .sort((p, q) => (q.limit > p.limit ? 1 : q.limit < p.limit ? -1 : 0));
+    for (const b of opposite) {
+      const pk = a.key < b.key ? `${a.key}|${b.key}` : `${b.key}|${a.key}`;
+      if (tried.has(pk)) continue;
+      tried.add(pk);
+      const held = stuck.get(`x:${a.key}|${b.key}`) || stuck.get(`x:${b.key}|${a.key}`);
+      if (held && scanNo < held.until) continue;
+      let res;
+      try {
+        res = await tryCross(a, b);
+      } catch (e) {
+        log(`ERROR cross ${short(a.vault)} #${a.o.id} x ${short(b.vault)} #${b.o.id}: ${e.message}`);
+        continue;
+      }
+      if (res === "crossed") {
+        used.add(a.key);
+        used.add(b.key);
+        done++;
+        break;
+      }
+      if (res === "busy") break;
+    }
+  }
+  return done;
+}
+
+// ---------------------------------------------------------------------------
 // TTL upkeep: so that entries left untouched for a long time are not archived
 // ---------------------------------------------------------------------------
 
@@ -1289,7 +1483,13 @@ async function scan() {
     seenVaults.add(v);
     dirty.delete(v);
   });
-  // 2) Check every open order against this scan's prices, from the cached copies. Fills run in parallel, one per
+  // 2) Opposite orders that can fill each other are crossed first (version 10 vaults), with no pool in between.
+  try {
+    filled += 2 * (await crossPass(vaults));
+  } catch (e) {
+    log(`ERROR crossing: ${e.message}`);
+  }
+  // 3) Check every open order against this scan's prices, from the cached copies. Fills run in parallel, one per
   //    sending account at a time.
   reservesNow.clear();
   const active = vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0);
@@ -1312,6 +1512,7 @@ async function scan() {
         dirty.add(v); // the cached copy is out of date: read the vault again on the next scan
         return;
       }
+      if (crossedNow.has(`${v}:${o.id}`)) return; // just filled by a cross; its cached copy is stale until the next scan
       if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // dust orders (not the last small piece of a larger order)
       try {
         const res = await tryOrder(v, o, ctx);
@@ -1357,6 +1558,7 @@ async function scan() {
           keeper_balance_xlm: balance,
           sending_accounts: signers.length,
           batch_fills: BATCH ? `${batchFills} orders / ${batchTxs} transactions` : "off",
+          crosses: CROSS ? crossFills : "off",
           skipped_by_local_estimate: localSkips,
           last_ttl: lastTtl ? new Date(lastTtl).toISOString() : null,
         },
