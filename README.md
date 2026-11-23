@@ -55,7 +55,7 @@ The app has **Markets**, **Trade** (limit, market and scaled orders, buy and sel
 | `contracts/factory` | The factory: deploys one vault per owner, pause switch, allowed token list, vault list (one chain per bucket, no cap) |
 | `contracts/order-vault`, `contracts/vault-factory` | Earlier two-vault design. Still deployed on testnet and still filled by the keeper; not used for new vaults |
 | `keeper/` | Node.js keeper: scans vaults, quotes Soroswap routes, fills orders, extends storage TTL |
-| `web/` | Website, docs and app (Vite, vanilla JS, Freighter) |
+| `web/` | Website, docs and app (Vite, vanilla JS, Varial wallet, formerly Freighter) |
 | `web/api/` | Serverless functions for the beta sign-up form and the invite gate |
 | `scripts/` | Build, test, deploy and measurement scripts |
 | `docs/THREAT_MODEL.md` | Threat model |

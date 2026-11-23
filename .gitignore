@@ -18,6 +18,7 @@ erisim.env
 yedek/
 # Internal notes (plans, open weaknesses): stay on the local machine
 NOTLAR.md
+KOMUTLAR.txt
 # Build output: regenerated on every deploy
 web/dist/
 berthly.sh

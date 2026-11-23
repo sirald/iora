@@ -734,7 +734,7 @@ function connected(address, networkOk, name) {
   mark("freighter", true);
   mark("connect", true);
   mark("testnet", networkOk);
-  walletName = walletName || "Freighter";
+  walletName = walletName || "Varial";
   setWalletButton();
   document.body.classList.add("connected");
   window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
@@ -767,7 +767,7 @@ async function connect() {
   }
   const inst = await isConnected();
   if (inst.error || !inst.isConnected) {
-    log('Freighter not found. Install it from <a href="https://www.freighter.app" target="_blank" rel="noopener">freighter.app</a>.', "err");
+    log('No supported wallet found. The testnet beta works with Varial (formerly Freighter): install it from <a href="https://varialwallet.com" target="_blank" rel="noopener">varialwallet.com</a>, then reload this page. On a phone or tablet there is no wallet extension, so please use a computer (Chrome, Brave or Firefox). LOBSTR and other wallets are not supported during the testnet beta.', "err");
     return;
   }
   const acc = await requestAccess();
@@ -781,7 +781,7 @@ async function connect() {
   mark("connect", true);
   mark("testnet", net.network === "TESTNET");
   netGuard(net.network === "TESTNET", net.network);
-  walletName = walletName || "Freighter";
+  walletName = walletName || "Varial";
   setWalletButton();
   document.body.classList.add("connected");
   window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
@@ -804,7 +804,7 @@ async function tryAutoConnect() {
     const net = await getNetwork();
     mark("testnet", net.network === "TESTNET");
     netGuard(net.network === "TESTNET", net.network);
-    walletName = "Freighter";
+    walletName = "Varial";
     setWalletButton();
     document.body.classList.add("connected");
     window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
@@ -1641,6 +1641,7 @@ async function refreshBuy() {
   walletNative = xlmBal.ok ? BigInt(xlmBal.value) : 0n;
   // walletXlm = islem goren coinin cuzdandaki bakiyesi (XLM ciftinde XLM'in kendisi)
   walletXlm = XB ? (baseBal && baseBal.ok ? BigInt(baseBal.value) : 0n) : walletNative;
+  renderWalletHints();
   renderFaucet(true, hasTrust);
   quoteSwap();
 
@@ -2058,6 +2059,7 @@ async function placeOrder({ single = false } = {}) {
   const limit = toUnitsSafe($("olimit").value);
   if (amount === null || limit === null) return;
   if (amount < MIN_ORDER) return log("The smallest order is 0.1 USDC.", "err");
+  if (freeUnits !== null && amount > freeUnits && offerDeposit("dep", amount - freeUnits, "USDC")) return;
   amount = fitRoom(amount, freeUnits, buyRoom());
   if (!poolGuard("USDC", amount, "order")) return;
   let minFill = $("ominfill").value.trim() ? toUnitsSafe($("ominfill").value) : amount / 4n > 0n ? amount / 4n : amount;
@@ -2191,6 +2193,52 @@ $("max-wd").onclick = () => {
 $("max-dep").onclick = () => {
   if (walletUsdc !== null) $("depamount").value = toPlain(walletUsdc);
 };
+
+// ---------------------------------------------------------------------------
+// Wallet -> vault: an order can only use what is in the vault. When the coin is still in the wallet the ticket
+// shows it ("In your wallet") and an order that needs it leads to the Deposit tab with the amount filled in.
+// ---------------------------------------------------------------------------
+/** What the wallet can move into the vault: "dep" = USDC, "sv-dep" = the traded coin (XLM keeps a reserve for fees). */
+function walletDepositable(which) {
+  const bal = which === "dep" ? walletUsdc : walletXlm;
+  if (bal === null || bal === undefined) return 0n;
+  const v = which === "dep" ? bal : bal - BASE_KEEP;
+  return v > 0n ? v : 0n;
+}
+/** Opens the vault's Deposit tab on the Portfolio page; with an amount, fills it in. */
+function openDeposit(which, amount = null) {
+  location.hash = "portfolio"; // kasa kartlari (bakiye, yatirma, cekme) Portfolio sayfasinda
+  setTimeout(() => {
+    const tab = document.querySelector(`.vtabs [data-tab="${which}"]`);
+    if (!tab) return;
+    tab.click();
+    tab.closest(".overview").scrollIntoView({ block: "center", behavior: "smooth" });
+    const input = $(which === "dep" ? "depamount" : "sv-dep");
+    if (amount !== null && amount > 0n) input.value = toPlain(amount);
+    input.focus({ preventScroll: true });
+  }, 60);
+}
+/** The order needs `missing` more than the vault has. If the wallet holds it, go to Deposit and say so. */
+function offerDeposit(which, missing, sym) {
+  const can = walletDepositable(which);
+  if (can <= 0n) return false;
+  const amt = missing < can ? missing : can;
+  openDeposit(which, amt);
+  log(
+    `Your ${esc(sym)} is still in your wallet. An order uses what is in your vault, so deposit ${fmt(amt, 2)} ${esc(sym)} first` +
+      (amt < missing ? ` (that is all your wallet can add; lower the order to match)` : "") +
+      `, then place the order again.`,
+    "err",
+  );
+  return true;
+}
+function renderWalletHints() {
+  for (const [which, row, out] of [["dep", "buy-walrow", "buy-wal2"], ["sv-dep", "sv-walrow", "sv-wal2"]]) {
+    const can = walletDepositable(which);
+    $(out).textContent = fmt(can, 2);
+    $(row).style.display = me && can >= MIN_ORDER ? "" : "none";
+  }
+}
 $("oamount").addEventListener("input", updateTicket);
 $("olimit").addEventListener("input", updateTicket);
 
@@ -3367,6 +3415,7 @@ async function refreshSell() {
     $("sv-size").textContent = `of ${pool.supplied.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${BS} is borrowed`;
   }
   $("sv-wallet").textContent = walletXlm !== null ? fmt(walletXlm, 2) : "—";
+  renderWalletHints();
   $("sv-walletbox").innerHTML = `<dl>
       <dt>Address</dt><dd><a href="${EXPLORER}/account/${me}" target="_blank" rel="noopener">${short(me)}</a></dd>
       <dt>XLM</dt><dd>${walletNative !== null ? fmt(walletNative, 2) : "—"}</dd>${XB ? `
@@ -3688,7 +3737,10 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
   const price = toUnitsSafe($("sv-px").value);
   if (amount === null || price === null) return;
   if (XB ? (amount * price) / U < MIN_ORDER : amount < MIN_ORDER) return log(XB ? "The smallest order is worth 0.1 USDC." : `The smallest order is 0.1 ${BS}.`, "err");
-  if (SV.free !== null && amount > SV.free) return log(`You can sell up to ${fmt(SV.free, 4)} ${BS}. Deposit more ${BS} first.`, "err");
+  if (SV.free !== null && amount > SV.free) {
+    if (offerDeposit("sv-dep", amount - SV.free, BS)) return;
+    return log(`You can sell up to ${fmt(SV.free, 4)} ${BS}. Deposit more ${BS} first.`, "err");
+  }
   amount = fitRoom(amount, SV.free, sellRoom());
   if (!poolGuard(BS, amount, "order")) return;
   if (SVT.type === "sl") return placeStopLoss(amount, price, impactBps);
@@ -4723,17 +4775,9 @@ function ticketExtras() {
 }
 for (const id of ["avail-buy", "sv-free2", "market", "sv-mkt"]) new MutationObserver(ticketExtras).observe($(id), { childList: true, characterData: true, subtree: true });
 // "+" : kasa kartindaki Deposit sekmesi
-for (const b of document.querySelectorAll("[data-open-dep]")) {
-  b.onclick = () => {
-    location.hash = "portfolio"; // kasa kartlari (bakiye, yatirma, cekme) Portfolio sayfasinda
-    setTimeout(() => {
-      const tab = document.querySelector(`.vtabs [data-tab="${b.dataset.openDep}"]`);
-      tab.click();
-      tab.closest(".overview").scrollIntoView({ block: "center", behavior: "smooth" });
-      $(b.dataset.openDep === "dep" ? "depamount" : "sv-dep").focus({ preventScroll: true });
-    }, 60);
-  };
-}
+for (const b of document.querySelectorAll("[data-open-dep]")) b.onclick = () => openDeposit(b.dataset.openDep);
+$("buy-wal-dep").onclick = () => openDeposit("dep", walletDepositable("dep"));
+$("sv-wal-dep").onclick = () => openDeposit("sv-dep", walletDepositable("sv-dep"));
 // Kar al onay kutusu: isaret kalkinca fiyat silinir (kar al kapanir)
 $("tp-on").onchange = () => {
   const on = $("tp-on").checked;
