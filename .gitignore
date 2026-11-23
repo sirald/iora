@@ -1,43 +1,39 @@
 target/
 wasm/
-sonuc.txt
-deps.txt
 .stellar/
 .soroban/
 node_modules/
 .env
 *.local
 keeper/keeper.log
-keeper/durum.json
+keeper/status.json
 contracts/*/test_snapshots/
-testnet/err.txt
-testnet/*.xdr
-erisim.env
 
-# Old names and local backups are not published
-yedek/
-# Internal notes (plans, open weaknesses): stay on the local machine
-NOTLAR.md
-KOMUTLAR.txt
-# Build output: regenerated on every deploy
-web/dist/
+# Local files in the project root (secrets, notes, command sheets, old outputs) are not published.
+# Only the files listed here are: everything else at the top level with these extensions stays local.
+/*.env
+/*.env*
+/*.txt
+/*.md
+!/README.md
+
+# Local backups and old launcher scripts
+backups/
 berthly.sh
 moor.sh
 
+# Build output: regenerated on every deploy
+web/dist/
+
 # Temporary copies of secret files, lock and state files
-erisim.env*
 *.tmp
 keeper/.env*
 
-# Test output and one-off historical scripts
-test-result.txt
+# One-off historical scripts
 scripts/archive/
 
 # Discord bot lives in its own repository
 discord-bot/
-
-# Server address for scripts/server.sh
-server.env
 
 # testnet/: only the settings the scripts read are published. Run logs, trial outputs and backups of earlier
 # settings stay on the local machine.
@@ -45,8 +41,8 @@ testnet/*
 !testnet/addr.env
 !testnet/factory.env
 !testnet/factory-sell.env
-!testnet/eski-fabrikalar.env
-!testnet/nesiller.env
+!testnet/old-factories.env
+!testnet/generations.env
 !testnet/markets.env
 !testnet/batch.env
 !testnet/pairs.env

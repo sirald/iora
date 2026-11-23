@@ -1,14 +1,14 @@
-// Iora keeper botu.
+// Iora keeper bot.
 //
-// Fabrikalardaki tum kasalari tarar (alim: USDC -> XLM, satis: XLM -> USDC), acik emirleri bulur,
-// piyasa limiti karsiladiginda
-// `execute` cagirir. Keeper hicbir zaman alici, tutar veya limit belirleyemez; yalnizca
-// "simdi dene" der ve dolum miktarini secer. Kotu bir keeper en fazla gecikmeye yol acar.
+// Scans every vault in the factories (buy: USDC -> XLM, sell: XLM -> USDC), finds the open orders and,
+// when the market meets the limit,
+// calls `execute`. The keeper can never choose the recipient, the amount or the limit; it only
+// says "try now" and picks the fill size. A bad keeper can cause a delay at most.
 //
-// Kullanim:
-//   node keeper.js            surekli calisir: her yeni ledger'da (~5 sn) tarar (SCAN_MODE=interval ile INTERVAL_SEC aralikla)
-//   node keeper.js --once     bir kez tarar (birkac tur), cikar
-//   node keeper.js --ttl      ayrica kayitlarin suresini uzatir (surekli modda bos ledger'larda, parca parca)
+// Usage:
+//   node keeper.js            runs continuously: scans on every new ledger (~5 s) (every INTERVAL_SEC with SCAN_MODE=interval)
+//   node keeper.js --once     scans once (a few rounds) and exits
+//   node keeper.js --ttl      also extends the lifetime of entries (in continuous mode on idle ledgers, bit by bit)
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -31,7 +31,7 @@ import {
 } from "@stellar/stellar-sdk";
 
 // ---------------------------------------------------------------------------
-// Ayarlar
+// Settings
 // ---------------------------------------------------------------------------
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,41 +51,41 @@ const cfg = {
   ...readEnv(path.join(root, "testnet/addr.env")),
   ...readEnv(path.join(root, "testnet/factory.env")),
   ...readEnv(path.join(root, "testnet/factory-sell.env")),
-  ...readEnv(path.join(root, "testnet/eski-fabrikalar.env")),
+  ...readEnv(path.join(root, "testnet/old-factories.env")),
   ...readEnv(path.join(root, "testnet/markets.env")),
   ...readEnv(path.join(root, "testnet/batch.env")),
   ...readEnv(path.join(here, ".env")),
   ...process.env,
 };
 const PASSPHRASE = cfg.NETWORK_PASSPHRASE || Networks.TESTNET;
-// Testnet'te hizli herkese acik RPC once, Stellar'in kendi RPC'si yedek (8.11.2026 olcumu: Gateway ~0,15 sn,
-// soroban-testnet.stellar.org 1,5-5 sn). Mainnet'te yalnizca RPC_URL / RPC_FALLBACK kullanilir; testnet
-// adreslerine asla dusulmez.
+// On testnet the fast public RPC comes first and Stellar's own RPC is the fallback (measured 8 Nov 2026: Gateway
+// ~0.15 s, soroban-testnet.stellar.org 1.5-5 s). On mainnet only RPC_URL / RPC_FALLBACK are used; it never falls
+// back to testnet addresses.
 const TESTNET_RPCS = ["https://soroban-rpc.testnet.stellar.gateway.fm", "https://soroban-testnet.stellar.org"];
 const RPC_URLS = [...new Set([cfg.RPC_URL, cfg.RPC_FALLBACK, ...(PASSPHRASE === Networks.TESTNET ? TESTNET_RPCS : [])].filter(Boolean))];
 if (RPC_URLS.length === 0) {
-  console.error("Eksik ayar: RPC_URL");
+  console.error("Missing setting: RPC_URL");
   process.exit(1);
 }
 const RPC_URL = RPC_URLS[0];
 const INTERVAL_SEC = Number(cfg.INTERVAL_SEC || 30);
-// "ledger": Stellar her ~5 sn'de bir ledger kapatir; fiyat ancak o zaman degisir. Keeper her yeni ledger'da tarar.
-// "interval": eski davranis, INTERVAL_SEC aralikla.
+// "ledger": Stellar closes a ledger about every 5 s; the price only changes then. The keeper scans on every new ledger.
+// "interval": the old behaviour, every INTERVAL_SEC.
 const SCAN_MODE = (cfg.SCAN_MODE || "ledger").toLowerCase();
-const VAULT_LIST_TTL_MS = 60_000; // kasa listesi her taramada degil, dakikada bir yenilenir
-// Kotuye kullanima karsi butceler (binlerce minik emirle keeper'i mesgul edip digerlerini geciktiremesin):
-// - bir kasa bir turda en fazla MAX_FILLS_PER_VAULT gercek islem denemesi alir,
-// - bir kasada bir turda en fazla MAX_ORDERS_PER_VAULT acik emir incelenir (fazlasi sonraki turlarda sirayla),
-// - bir kasada bir turda en fazla MAX_NEW_IDS_PER_SCAN yeni emir kesfedilir,
-// - MIN_FILL_UNITS altindaki dolumlar denenmez (ucret, dolumun kendisinden pahali olmasin). Birim: 7 ondalik.
+const VAULT_LIST_TTL_MS = 60_000; // the vault list is refreshed once a minute, not on every scan
+// Budgets against abuse (thousands of tiny orders must not keep the keeper busy and delay everyone else):
+// - a vault gets at most MAX_FILLS_PER_VAULT real transaction attempts per round,
+// - at most MAX_ORDERS_PER_VAULT open orders of a vault are checked per round (the rest in later rounds, in turn),
+// - at most MAX_NEW_IDS_PER_SCAN new orders are discovered per vault per round,
+// - fills below MIN_FILL_UNITS are not tried (the fee must not cost more than the fill). Unit: 7 decimals.
 const MAX_FILLS_PER_VAULT = Number(cfg.MAX_FILLS_PER_VAULT || 5);
 const MAX_ORDERS_PER_VAULT = Number(cfg.MAX_ORDERS_PER_VAULT || 12);
 const MAX_NEW_IDS_PER_SCAN = Number(cfg.MAX_NEW_IDS_PER_SCAN || 50);
-const MIN_FILL_UNITS = BigInt(cfg.MIN_FILL_UNITS || 1_000_000); // 0,1 token
-// USDC ve XLM disindaki coinlerde (or. BTC) 0,1 token cok buyuk bir tutardir; onlarda esik cok daha kucuktur.
+const MIN_FILL_UNITS = BigInt(cfg.MIN_FILL_UNITS || 1_000_000); // 0.1 token
+// For coins other than USDC and XLM (e.g. BTC) 0.1 token is a very large amount; their threshold is much smaller.
 const MIN_FILL_OTHER_UNITS = BigInt(cfg.MIN_FILL_OTHER_UNITS || 100);
 const minFillFor = (token) => (!token || token === USDC || token === XLM ? MIN_FILL_UNITS : MIN_FILL_OTHER_UNITS);
-// Kasalar ayni anda en fazla bu kadar paralel okunur; islemler (imza + gonderim) her zaman tek tek gider.
+// At most this many vaults are read in parallel; transactions (sign + send) always go one at a time per account.
 const SCAN_CONCURRENCY = Math.max(1, Number(cfg.SCAN_CONCURRENCY || 4));
 // Vaults with no open order are not read on every scan (thousands of empty vaults would otherwise slow every
 // scan down). They are read when an order_placed event names them, and in a rotating sweep of this many per scan.
@@ -96,14 +96,14 @@ const TTL_EVERY_SEC = 24 * 3600;
 const LOW_BALANCE_XLM = 100;
 for (const k of ["FACTORY", "USDC", "XLM", "ROUTER", "KEEPER_SECRET"]) {
   if (!cfg[k]) {
-    console.error(`Eksik ayar: ${k}`);
+    console.error(`Missing setting: ${k}`);
     process.exit(1);
   }
 }
 const { FACTORY, USDC, XLM, ROUTER } = cfg;
-// Alim fabrikasi her zaman; satis fabrikasi (XLM yatirilir, USDC alinir) kuruluysa.
-// Kontrat surumu yukseltilince eski fabrikalardaki acik emirler de doldurulmaya devam eder.
-// Ek pazarlar (testnet/markets.env): MARKETS=SEMBOL:token:fabrika,...
+// The buy factory always; the sell factory (XLM is deposited, USDC is bought) if it is deployed.
+// When the contract version is upgraded, open orders in the old factories keep being filled.
+// Extra markets (testnet/markets.env): MARKETS=SYMBOL:token:factory,...
 const MARKET_FACTORIES = String(cfg.MARKETS || "").split(",").map((x) => x.split(":")[2]).filter(Boolean);
 const FACTORIES = [...new Set([FACTORY, cfg.FACTORY_SELL, ...MARKET_FACTORIES, ...String(cfg.OLD_FACTORIES || "").split(",")].filter(Boolean).map((s) => s.trim()).filter(Boolean))];
 const SYM = { [USDC]: "USDC", [XLM]: "XLM" };
@@ -141,10 +141,10 @@ const TG_TOKEN = cfg.TELEGRAM_BOT_TOKEN || "";
 const TG_CHAT = cfg.TELEGRAM_CHAT_ID || "";
 
 const LOG_FILE = path.join(here, "keeper.log");
-const STATUS_FILE = path.join(here, "durum.json");
+const STATUS_FILE = path.join(here, "status.json");
 
 // ---------------------------------------------------------------------------
-// Yardimcilar
+// Helpers
 // ---------------------------------------------------------------------------
 
 const SCALE = 10_000_000n;
@@ -171,10 +171,10 @@ const ERR = {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (a) => `${a.slice(0, 4)}..${a.slice(-4)}`;
 const fmt = (v) => (Number(BigInt(v)) / 1e7).toFixed(4);
-// SDK 17'de XDR alanlari ozellik, eski surumlerde fonksiyon: ikisini de oku.
+// XDR fields are properties in SDK 17 and functions in older versions: read both.
 const get = (o, k) => (o != null && typeof o[k] === "function" ? o[k]() : o?.[k]);
 
-// Kayit dosyasina yazilamamasi (or. Windows klasorunde anlik EBUSY) keeper'i asla durdurmamali.
+// Failing to write the log file (e.g. a momentary EBUSY in a Windows folder) must never stop the keeper.
 function log(...parts) {
   const line = `${new Date().toISOString()} ${parts.join(" ")}`;
   console.log(line);
@@ -184,12 +184,12 @@ function log(...parts) {
 }
 
 // ---------------------------------------------------------------------------
-// RPC: ilk sunucu ag hatasi/429/5xx verir ya da RPC_TIMEOUT_MS icinde cevap vermezse ayni cagri siradakinde
-// tekrarlanir; bir dakika sonra yeniden ilk sunucu denenir. Sozlesme hatalari gercek cevaptir, tekrarlanmaz.
+// RPC: if the first server gives a network error/429/5xx or does not answer within RPC_TIMEOUT_MS, the same call is
+// repeated on the next one; a minute later the first server is tried again. Contract errors are real answers and are not repeated.
 // ---------------------------------------------------------------------------
 
-// Node'un "fetch failed" hatasi asil sebebi (DNS, baglanti reddi, zaman asimi, sertifika...) e.cause'da tutar;
-// SDK bu bilgiyi atar. Sebep mesaja eklenir ki kayitta ve Telegram uyarisinda gorunsun.
+// Node's "fetch failed" error keeps the real cause (DNS, connection refused, timeout, certificate...) in e.cause;
+// the SDK drops it. The cause is added to the message so that it shows in the log and in the Telegram alert.
 if (typeof globalThis.fetch === "function" && !globalThis.__ioraFetchCause) {
   const origFetch = globalThis.fetch;
   globalThis.__ioraFetchCause = true;
@@ -212,11 +212,11 @@ if (typeof globalThis.fetch === "function" && !globalThis.__ioraFetchCause) {
 function transientRpc(e) {
   const status = e && e.response && e.response.status;
   if (status === 429 || (status >= 500 && status < 600)) return true;
-  return /fetch failed|network|timeout|timed out|aborted|ECONN|socket|EAI_AGAIN|ENOTFOUND|yanit vermedi/i.test(String((e && e.message) || e));
+  return /fetch failed|network|timeout|timed out|aborted|ECONN|socket|EAI_AGAIN|ENOTFOUND|did not answer/i.test(String((e && e.message) || e));
 }
 
-// SDK'nin getAccount'u ag hatasini da "Account not found" diye bildirir; bu yuzden ilk sunucu coktugunde yedege
-// gecilemez ve hicbir dolum gonderilemezdi. Ayni okuma getLedgerEntries ile yapilir (ag hatasi yedekte denenir).
+// The SDK's getAccount reports a network error as "Account not found" too; so when the first server went down there
+// was no falling back and no fill could be sent. The same read is done with getLedgerEntries (a network error is retried on the fallback).
 function accountKey(address) {
   return xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrPublicKey() }));
 }
@@ -236,14 +236,14 @@ function makeServer(urls) {
       try {
         const res = await Promise.race([
           servers[idx][name](...args),
-          new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("RPC yanit vermedi")), RPC_TIMEOUT_MS))),
+          new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("the RPC did not answer")), RPC_TIMEOUT_MS))),
         ]);
         if (idx !== cur) {
           cur = idx;
           switchedAt = Date.now();
           if (Date.now() - loggedAt > 10 * 60_000) {
             loggedAt = Date.now();
-            log(`RPC yedek sunucuya gecildi: ${urls[idx]} (ilk sunucu cevap vermiyor; dakikada bir yeniden denenir)`);
+            log(`switched to the fallback RPC: ${urls[idx]} (the first server is not answering; it is retried once a minute)`);
           }
         }
         return res;
@@ -278,12 +278,12 @@ function makeServer(urls) {
 }
 
 // ---------------------------------------------------------------------------
-// Telegram bildirimleri (ayar yoksa sessizce atlanir)
+// Telegram notifications (skipped silently when not configured)
 // ---------------------------------------------------------------------------
 
-const lastSent = new Map(); // konu -> zaman (ayni uyariyi tekrar tekrar gondermemek icin)
+const lastSent = new Map(); // topic -> time (so that the same alert is not sent again and again)
 
-/** Gonderildiyse true; ayni konu yakin zamanda gonderildiyse false. Telegram takilirsa en fazla 8 sn bekler. */
+/** True if it was sent; false if the same topic was sent recently. Waits at most 8 s if Telegram hangs. */
 async function notify(text, { topic = null, everySec = 0 } = {}) {
   if (topic && everySec > 0) {
     const prev = lastSent.get(topic) || 0;
@@ -298,9 +298,9 @@ async function notify(text, { topic = null, everySec = 0 } = {}) {
       body: JSON.stringify({ chat_id: TG_CHAT, text: `[Iora] ${text}`, disable_web_page_preview: true }),
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) console.error(`telegram hatasi: ${res.status}`);
+    if (!res.ok) console.error(`telegram error: ${res.status}`);
   } catch (e) {
-    console.error(`telegram gonderilemedi: ${e.message}`);
+    console.error(`telegram message could not be sent: ${e.message}`);
   }
   return true;
 }
@@ -330,8 +330,8 @@ function statusOf(s) {
 // ---------------------------------------------------------------------------
 
 /**
- * Okuma (simulasyon) icin islem: hesabin sira numarasi gerekmez, bu yuzden her okumada ayrica
- * getAccount cagrilmaz (RPC cagrisi yariya iner ve "Account not found" aksakliklari okumalari durdurmaz).
+ * Transaction for a read (simulation): the account's sequence number is not needed, so getAccount is not called
+ * on every read (halves the RPC calls, and "Account not found" hiccups do not stop reads).
  */
 function readTx(contractId, method, callArgs) {
   return new TransactionBuilder(new Account(kp.publicKey(), "0"), { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
@@ -340,7 +340,7 @@ function readTx(contractId, method, callArgs) {
     .build();
 }
 
-/** Gonderilecek islem: guncel sira numarasiyla. */
+/** Transaction to be sent: with the current sequence number. */
 async function liveTx(contractId, method, callArgs, signer = kp) {
   const account = await server.getAccount(signer.publicKey());
   return new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
@@ -349,7 +349,7 @@ async function liveTx(contractId, method, callArgs, signer = kp) {
     .build();
 }
 
-/** Yalnizca simulasyon: ucretsiz okuma. */
+/** Simulation only: a free read. */
 async function read(contractId, method, callArgs = []) {
   const sim = await server.simulateTransaction(readTx(contractId, method, callArgs));
   if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
@@ -357,9 +357,9 @@ async function read(contractId, method, callArgs = []) {
 }
 
 /**
- * Imzalar, gonderir ve sonucu bekler. Islem, gecerlilik suresi (TX_TIMEOUT_SEC) bitene kadar izlenir:
- * "zaman asimi" donerse islem kesinlikle zincire yazilmamistir ve tekrar denemek guvenlidir.
- * retry=true: ag islemi hic kabul etmedi (yogunluk, ayni hesapta bekleyen islem); sonraki ledger'da denenir.
+ * Signs, sends and waits for the result. The transaction is followed until its validity (TX_TIMEOUT_SEC) ends:
+ * if it returns "timed out", the transaction was definitely not written to the chain and trying again is safe.
+ * retry=true: the network did not accept the transaction at all (congestion, a pending transaction on the same account); it is tried on the next ledger.
  */
 async function submit(tx, signer = kp) {
   tx.sign(signer);
@@ -367,18 +367,18 @@ async function submit(tx, signer = kp) {
   try {
     sent = await server.sendTransaction(tx);
   } catch (e) {
-    return { ok: false, retry: true, error: `gonderilemedi: ${e.message}` };
+    return { ok: false, retry: true, error: `could not be sent: ${e.message}` };
   }
-  if (sent.status === "TRY_AGAIN_LATER") return { ok: false, retry: true, error: "ag islemi simdi almadi (TRY_AGAIN_LATER)" };
+  if (sent.status === "TRY_AGAIN_LATER") return { ok: false, retry: true, error: "the network did not take the transaction now (TRY_AGAIN_LATER)" };
   if (sent.status === "ERROR") {
     let name = "";
     try {
       const res = get(get(sent, "errorResult"), "result");
       name = res.type || get(res, "switch")?.name || "";
     } catch {}
-    return { ok: false, error: `gonderim hatasi ${name}`.trim() };
+    return { ok: false, error: `send error ${name}`.trim() };
   }
-  // PENDING veya DUPLICATE: islem kuyrukta
+  // PENDING or DUPLICATE: the transaction is queued
   const deadline = Date.now() + (TX_TIMEOUT_SEC + 15) * 1000;
   while (Date.now() < deadline) {
     await sleep(2000);
@@ -386,7 +386,7 @@ async function submit(tx, signer = kp) {
     try {
       r = await server.getTransaction(sent.hash);
     } catch {
-      continue; // gecici RPC hatasi: islemi birakmadan izlemeye devam
+      continue; // temporary RPC error: keep following the transaction
     }
     if (r.status === "SUCCESS") {
       let fee = null;
@@ -395,15 +395,15 @@ async function submit(tx, signer = kp) {
       } catch {}
       return { ok: true, hash: sent.hash, fee, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
     }
-    if (r.status === "FAILED") return { ok: false, hash: sent.hash, error: "islem agda basarisiz" };
+    if (r.status === "FAILED") return { ok: false, hash: sent.hash, error: "the transaction failed on the network" };
   }
-  return { ok: false, hash: sent.hash, error: "zaman asimi (islemin suresi doldu, zincire yazilmadi)" };
+  return { ok: false, hash: sent.hash, error: "timed out (the transaction expired and was not written to the chain)" };
 }
 
 /**
- * Simulasyonun kaynak tahminine pay ekler: Blend her ledger'da faiz isledigi icin islem zincire
- * yazilana kadar gereken kaynak artabilir; pay olmadan dolum "resource limit exceeded" ile reddedilir
- * ve keeper ucreti bosa oder. (Arayuzdeki padSim ile ayni.)
+ * Adds a margin to the simulation's resource estimate: Blend accrues interest on every ledger, so the resources
+ * needed can grow before the transaction is written; without a margin the fill is rejected with "resource limit
+ * exceeded" and the keeper pays the fee for nothing. (Same as padSim in the app.)
  */
 function padSim(sim) {
   try {
@@ -418,13 +418,13 @@ function padSim(sim) {
     const fee = BigInt(String(get(d, "resourceFee")));
     b.setResourceFee(Number((fee * 3n) / 2n + 20_000n));
   } catch (e) {
-    log(`kaynak payi eklenemedi: ${e.message}`);
+    log(`could not add the resource margin: ${e.message}`);
   }
   return sim;
 }
 
-// Ayni hesaptan ayni anda tek islem: her gonderen hesabin kendi sirasi vardir. Is, sirasi en kisa olan hesaba verilir;
-// boylece birden fazla hesap varsa ayni ledger'da birden fazla islem gider.
+// One transaction at a time per account: every sending account has its own queue. A job goes to the account with the
+// shortest queue, so with more than one account several transactions go out in the same ledger.
 function serialized(fn, s = signers[0]) {
   s.queued++;
   const run = () => fn(s.kp);
@@ -438,7 +438,7 @@ function serialized(fn, s = signers[0]) {
 }
 const freeSigner = () => signers.reduce((a, b) => (b.queued < a.queued ? b : a));
 
-/** Simule et, basariliysa imzala ve gonder. anySigner: dolumlar icin bos olan hesap secilir; digerleri ana hesaptan gider. */
+/** Simulate and, if it succeeds, sign and send. anySigner: fills pick a free account; everything else goes from the main account. */
 function write(contractId, method, callArgs, anySigner = false) {
   return serialized(
     async (signer) => {
@@ -506,14 +506,14 @@ async function sendBatch(items) {
     return;
   }
   if (!r.ok || !Array.isArray(r.value)) {
-    log(`toplu dolum (${items.length} emir) olmadi: ${errText(r)}; emirler tek tek denenecek`);
+    log(`batch fill (${items.length} orders) did not go through: ${errText(r)}; the orders will be tried one by one`);
     await Promise.all(items.map(alone));
     return;
   }
   const done = items.filter((_, i) => BigInt(r.value[i] ?? 0) > 0n).length;
   batchTxs++;
   batchFills += done;
-  log(`TOPLU ${done}/${items.length} emir tek islemde doldu ucret=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`);
+  log(`BATCH ${done}/${items.length} orders filled in one transaction fee=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`);
   const share = r.fee !== null && done > 0 ? r.fee / BigInt(done) : null;
   await Promise.all(
     items.map((it, i) => {
@@ -551,19 +551,19 @@ async function ensureWorkers() {
           return submit(tx, signer);
         });
         if (!r.ok) {
-          log(`yardimci hesap ${i + 1} hazirlanamadi: ${r.error}`);
+          log(`worker account ${i + 1} could not be prepared: ${r.error}`);
           continue;
         }
-        log(`yardimci hesap ${i + 1} ${exists ? "takviye edildi" : "olusturuldu"}: ${short(pub)} (+${WORKER_START_XLM} XLM)`);
+        log(`worker account ${i + 1} ${exists ? "topped up" : "created"}: ${short(pub)} (+${WORKER_START_XLM} XLM)`);
       }
       if (!signers.some((s) => s.kp.publicKey() === pub)) signers.push({ kp: w, chain: Promise.resolve(), queued: 0 });
     } catch (e) {
-      log(`yardimci hesap ${i + 1} kontrol edilemedi: ${e.message || e}`);
+      log(`worker account ${i + 1} could not be checked: ${e.message || e}`);
     }
   }
 }
 
-/** Sinirli paralellik: en fazla n is ayni anda. */
+/** Bounded parallelism: at most n jobs at a time. */
 async function pool(items, n, fn) {
   let i = 0;
   const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
@@ -573,24 +573,24 @@ async function pool(items, n, fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Kasalar ve emirler
+// Vaults and orders
 // ---------------------------------------------------------------------------
 
-const closed = new Set(); // "kasa:no" (dolmus/iptal/kesin suresi dolmus)
-const book = new Map(); // kasa -> { next: siradaki emir no, open: acik olabilecek emir nolari, cursor: sira }
+const closed = new Set(); // "vault:id" (filled/cancelled/definitely expired)
+const book = new Map(); // vault -> { next: next order id, open: ids of orders that may be open, cursor: position }
 
-/** Fabrikanin kova sayisi; sira numarali eski fabrikalarda 0 (fonksiyon yok). Fabrika basina bir kez sorulur. */
+/** The factory's bucket count; 0 in old factories that list by sequence number (no such function). Asked once per factory. */
 const bucketCache = new Map();
 async function bucketsOf(f) {
   if (bucketCache.has(f)) return bucketCache.get(f);
   const r = await read(f, "bucket_count");
-  // Simulasyon hatasi = fonksiyon yok (eski fabrika). Ag hatasi istisna firlatir ve buraya gelmez.
+  // A simulation error means the function does not exist (old factory). A network error throws and never gets here.
   const n = r.ok ? Number(r.value) : 0;
   bucketCache.set(f, n);
   return n;
 }
-/** Kovali fabrikanin son okunan listesi: kasa sayisi degismedikce 16 okuma yerine tek okuma yeter. */
-const bucketLists = new Map(); // fabrika -> { count, vaults }
+/** The last list read from a bucketed factory: while the vault count is unchanged, one read is enough instead of 16. */
+const bucketLists = new Map(); // factory -> { count, vaults }
 
 // Version 9 factories keep each bucket as a chain (newest vault first, each entry pointing to the one before).
 const optAddr = (a) => (a ? new Address(String(a)).toScVal() : xdr.ScVal.scvVoid());
@@ -640,12 +640,12 @@ async function listChained(f) {
 }
 
 async function listVaults() {
-  // Bir fabrika okunamazsa digerlerinin emirleri yine doldurulur; hepsi okunamazsa hata verilir.
+  // If one factory cannot be read, the others' orders are still filled; if none can be read, it is an error.
   const out = [];
   const fails = [];
   for (const f of FACTORIES) {
     try {
-      // Surum 6 fabrikalari kasalari kovalarda tutar (sira numarasi yok): 16'sar kova okunur.
+      // Version 6 factories keep vaults in buckets (no sequence number): buckets are read 16 at a time.
       const buckets = await bucketsOf(f);
       if (buckets > 0 && (await isChained(f))) {
         out.push(...(await listChained(f)));
@@ -669,7 +669,7 @@ async function listVaults() {
         out.push(...vaults);
         continue;
       }
-      // Eski fabrikalar en fazla 50'lik sayfa dondurur (daha eskiler 100); 50 ikisinde de calisir.
+      // Old factories return pages of at most 50 (older ones 100); 50 works with both.
       for (let start = 0; ; start += 50) {
         const r = await read(f, "vaults", [u32(start), u32(50)]);
         if (!r.ok) throw new Error(errText(r));
@@ -678,27 +678,27 @@ async function listVaults() {
       }
     } catch (e) {
       fails.push(`${short(f)}: ${e.message || e}`);
-      log(`kasa listesi okunamadi (${short(f)}): ${e.message || e}`);
+      log(`could not read the vault list (${short(f)}): ${e.message || e}`);
     }
   }
-  if (fails.length === FACTORIES.length) throw new Error(`kasa listesi okunamadi (${fails.join("; ")})`);
+  if (fails.length === FACTORIES.length) throw new Error(`could not read the vault list (${fails.join("; ")})`);
   return out;
 }
 
-/** Kasanin token cifti: "usdc" alani yatirilan/harcanan token, "xlm" alani alinan token. */
+/** The vault's token pair: the "usdc" field is the token deposited/spent, the "xlm" field is the token bought. */
 const pairOf = new Map();
 async function pair(vault) {
   if (pairOf.has(vault)) return pairOf.get(vault);
   const r = await read(vault, "get_config");
-  if (!r.ok) throw new Error(`${short(vault)} ayarlari okunamadi: ${errText(r)}`);
-  // Surum 5 kasalari: `execute` dolumu yapanin adresini alir ve ona limitten iyi gelen kisimdan en fazla
-  // `exec_fee` (alinan token) oder. Eski kasalarda bu alan yoktur; eski imza kullanilir.
+  if (!r.ok) throw new Error(`could not read the settings of ${short(vault)}: ${errText(r)}`);
+  // Version 5 vaults: `execute` takes the filler's address and pays it at most `exec_fee` (in the token bought) out of
+  // what comes in above the limit. Older vaults do not have this field; the old signature is used.
   const fee = r.value.exec_fee;
-  // Surum 7 (tek, cok varlikli kasa): tokenlar kasada degil EMIRDE yazar (sell/buy); dolum ucreti ust siniri
-  // alinan tokene gore `fees` tablosundan okunur. `execute` imzasi surum 5 ile aynidir.
+  // Version 7 (one multi-asset vault): the tokens are in the ORDER, not in the vault (sell/buy); the fill fee cap is
+  // read from the `fees` table by the token bought. The `execute` signature is the same as in version 5.
   const fees = r.value.fees;
-  // Surum 8: `execute` dorduncu bir arguman alir (ara token, yoksa bos). Kasa surumunu `version` bildirir;
-  // surum 7 kasalarinda bu fonksiyon yoktur.
+  // Version 8: `execute` takes a fourth argument (the intermediate token, or none). `version` reports the vault
+  // version; version 7 vaults do not have this function.
   let v8 = false;
   if (fees !== undefined) {
     const ver = await read(vault, "version");
@@ -713,9 +713,9 @@ async function pair(vault) {
 }
 
 /**
- * Bu turda incelenecek acik emirler. Yeni emirler OrderNotFound gelene kadar kesfedilir (turda en fazla
- * MAX_NEW_IDS_PER_SCAN); acik emirlerden en fazla MAX_ORDERS_PER_VAULT tanesi sirayla incelenir, boylece
- * cok emirli bir kasa digerlerini bekletmez ve tum emirleri birkac turda bir mutlaka bakilir.
+ * Open orders to check in this round. New orders are discovered until OrderNotFound comes back (at most
+ * MAX_NEW_IDS_PER_SCAN per round); at most MAX_ORDERS_PER_VAULT open orders are checked in turn, so that
+ * a vault with many orders does not hold up the others and every order is looked at within a few rounds.
  */
 // ----- which vaults to read on this scan -----
 const seenVaults = new Set(); // read at least once since start
@@ -763,7 +763,7 @@ async function collectPlaced(known) {
     eventsOk = false;
     if (Date.now() - eventLogAt > 10 * 60_000) {
       eventLogAt = Date.now();
-      log(`emir olaylari okunamadi (bos kasalar sirayla taranmaya devam eder): ${e.message || e}`);
+      log(`could not read order events (empty vaults keep being scanned in turn): ${e.message || e}`);
     }
   }
 }
@@ -800,7 +800,7 @@ async function ordersToCheck(vault) {
         st.more = false;
         break;
       }
-      throw new Error(`${short(vault)} emir ${st.next} okunamadi: ${errText(r)}`);
+      throw new Error(`could not read order ${st.next} of ${short(vault)}: ${errText(r)}`);
     }
     if (statusOf(r.value.status) === "Open") {
       fresh.set(st.next, r.value);
@@ -903,8 +903,8 @@ async function quotePath(amount, path) {
 const quote = (amount, tin, tout) => quotePath(amount, [tin, tout]);
 const pathOf = (tin, tout, via) => (via ? [tin, via, tout] : [tin, tout]);
 /**
- * Surum 8 kasalarinda dolum tek bir ara token uzerinden de yapilabilir (or. USDC -> XLM -> BTC). Verilen
- * miktar icin en cok cikis veren yolu secer: { q, via } (via null = dogrudan cift). Hicbir yol yoksa null.
+ * In version 8 vaults a fill can also go through one intermediate token (e.g. USDC -> XLM -> BTC). Picks the
+ * route that gives the most output for the amount: { q, via } (via null = the direct pair). Null if there is no route.
  */
 async function bestRoute(amount, tin, tout, vias) {
   let best = null;
@@ -917,7 +917,7 @@ async function bestRoute(amount, tin, tout, vias) {
 
 const minOut = (fill, limit) => (fill * SCALE + limit - 1n) / limit;
 
-/** Sozlesmedeki fiyat etkisi hesabinin aynisi. */
+/** Same as the contract's price impact calculation. */
 async function impactBps(fill, tin, tout, via = null) {
   const probe = fill / 100n;
   if (probe === 0n) return 0n;
@@ -930,9 +930,9 @@ async function impactBps(fill, tin, tout, via = null) {
 }
 
 /**
- * Denenecek dolum miktarlari: kalanin tamami, sonra yarilarak alt sinira kadar (buyukten kucuge).
- * Kontrat (surum 4) kismi dolumun geride asgari dolumdan kucuk bir kalan birakmasini reddeder
- * (FillTooSmall); o boyutlar hic denenmez.
+ * Fill sizes to try: everything that is left, then halved down to the floor (largest first).
+ * The contract (version 4) rejects a partial fill that would leave less than the minimum fill behind
+ * (FillTooSmall); those sizes are never tried.
  */
 function candidates(remaining, floor, minFill = 0n) {
   const list = [];
@@ -946,14 +946,14 @@ function candidates(remaining, floor, minFill = 0n) {
 
 const stats = { fills: 0, failures: 0, lastError: null, feesStroop: 0n };
 const lastNote = new Map();
-// "kasa:no" -> { n, until }: on kontrolleri gecip kontrattan surekli ret alan emir. Her ret serisinde
-// bekleme ikiye katlanir (1, 2, 4 ... en fazla 60 tur); boylece takili bir emir RPC'yi ve kaydi bosa harcamaz.
+// "vault:id" -> { n, until }: an order that passes the pre-checks but keeps being rejected by the contract. The wait
+// doubles with each run of rejections (1, 2, 4 ... at most 60 rounds), so a stuck order does not waste RPC calls and log space.
 const stuck = new Map();
 let scanNo = 0;
 
 function waiting(vault, o, tag, remaining, tin, reason) {
-  // Her ledger'da taranirken kayit dosyasi sismesin: bekleme nedeni degismedikce tekrar yazilmaz.
-  const note = `${tag} bekliyor (kalan ${fmt(remaining)} ${sym(tin)}): ${reason || "uygun dolum yok"}`;
+  // The log file must not bloat when scanning on every ledger: it is written again only when the reason for waiting changes.
+  const note = `${tag} waiting (${fmt(remaining)} ${sym(tin)} left): ${reason || "no suitable fill"}`;
   const key = `${vault}:${o.id}`;
   const shape = note.replace(/[\d.]+(?= <| >| USDC| XLM| bps)/g, "");
   const prev = lastNote.get(key);
@@ -965,10 +965,10 @@ function waiting(vault, o, tag, remaining, tin, reason) {
 }
 
 function priceNoteFor(tin, tout, fill, q, limit) {
-  if (tin === USDC) return `piyasa ${(Number(fill) / Number(q)).toFixed(4)} > limit ${fmt(limit)} USDC/XLM`;
-  // Satis: limit "1 USDC icin en fazla kac XLM"; kullaniciya "1 XLM icin en az kac USDC" gosterilir.
+  if (tin === USDC) return `market ${(Number(fill) / Number(q)).toFixed(4)} > limit ${fmt(limit)} USDC/XLM`;
+  // Sell: the limit is "at most how many XLM for 1 USDC"; the user is shown "at least how many USDC for 1 XLM".
   const target = 1e7 / Number(limit);
-  return `piyasa ${(Number(q) / Number(fill)).toFixed(4)} < hedef ${target.toFixed(4)} ${sym(tout)}/${sym(tin)}`;
+  return `market ${(Number(q) / Number(fill)).toFixed(4)} < target ${target.toFixed(4)} ${sym(tout)}/${sym(tin)}`;
 }
 
 async function tryOrder(vault, o, ctx = { net: 0 }) {
@@ -977,7 +977,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   const tout = pc.v7 ? String(o.buy) : pc.tout;
   const v5 = pc.v5;
   const fee = pc.v7 ? (pc.fees[tout] ?? 0n) : pc.fee;
-  // Ara token adaylari: yalnizca surum 8 ve cift XLM/USDC degilse (ikisi de fabrikanin izinli listesindedir).
+  // Intermediate token candidates: only in version 8 and when the pair is not XLM/USDC (both are on the factory's allowed list).
   const vias = [null, ...(pc.v8 ? [XLM, USDC].filter((t) => t !== tin && t !== tout) : [])];
   const execArgs = (amount, via = null) =>
     pc.v8
@@ -985,15 +985,15 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       : v5
         ? [new Address(kp.publicKey()).toScVal(), u32(o.id), i128(amount)]
         : [u32(o.id), i128(amount)];
-  const side = tin === USDC ? "alim" : "satis";
+  const side = tin === USDC ? "buy" : "sell";
   const tag = `${short(vault)} #${o.id} (${side})`;
   const key = `${vault}:${o.id}`;
   const now = Math.floor(Date.now() / 1000);
   const expiry = Number(o.expiry);
   if (now > expiry) {
-    // Bilgisayarin saati ileri olabilir: emir ancak 10 dakikalik paydan sonra kalici olarak kapatilir.
+    // The computer's clock may be fast: an order is closed for good only after a 10-minute margin.
     if (now > expiry + 600) closed.add(key);
-    return waiting(vault, o, tag, BigInt(o.amount_in) - BigInt(o.filled_in), tin, "suresi dolmus");
+    return waiting(vault, o, tag, BigInt(o.amount_in) - BigInt(o.filled_in), tin, "expired");
   }
   const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
   const held = stuck.get(key);
@@ -1016,20 +1016,20 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   }
   ctx.net++; // from here on the order costs network calls
 
-  // Tetikli emir (zarar kes): tetigi kontrat Blend oracle'indan kontrol eder. Once tek bir simulasyonla
-  // tetik sorulur; gelmediyse ("tetik yok" 16, "oracle yok" 19) fiyat sorgusu hic yapilmadan beklenir.
+  // Triggered order (stop loss): the contract checks the trigger against the Blend oracle. The trigger is asked first
+  // with a single simulation; if it has not come ("no trigger" 16, "no oracle" 19), it waits without any price query.
   if (trigger > 0n) {
     const pre = await read(vault, "execute", execArgs(smallest));
-    if (!pre.ok && pre.code === 16) return waiting(vault, o, tag, remaining, tin, "tetik fiyati (oracle) henuz gelmedi");
-    if (!pre.ok && pre.code === 19) return waiting(vault, o, tag, remaining, tin, "oracle fiyati alinamadi");
+    if (!pre.ok && pre.code === 16) return waiting(vault, o, tag, remaining, tin, "the trigger price (oracle) has not been reached yet");
+    if (!pre.ok && pre.code === 19) return waiting(vault, o, tag, remaining, tin, "no oracle price available");
   }
 
-  // En kucuk dolum bile limiti karsilamiyorsa buyukleri de karsilamaz (havuzda buyuk islem daha kotu
-  // fiyat alir): beklemedeki bir emir her ledger'da tek fiyat sorgusuna mal olur.
+  // If even the smallest fill does not meet the limit, larger ones will not either (a larger trade gets a worse price
+  // in the pool): a waiting order costs one price query per ledger.
   const rSmall = await bestRoute(smallest, tin, tout, vias);
   const qSmall = rSmall ? rSmall.q : null;
   if (qSmall === null) {
-    log(`${tag} fiyat alinamadi`);
+    log(`${tag} no price available`);
     return "error";
   }
   if (est !== null && !trusted) {
@@ -1039,36 +1039,36 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     if (diff <= tol) localCheck.set(lk, { okAt: Date.now() });
     else {
       localCheck.set(lk, { offUntil: Date.now() + LOCAL_RECHECK_MS });
-      log(`yerel fiyat hesabi ${sym(tin)}->${sym(tout)} icin tutmadi (yerel ${est}, ag ${qSmall}); bu cift 30 dk ag uzerinden sorulacak`);
+      log(`the local price estimate was off for ${sym(tin)}->${sym(tout)} (local ${est}, network ${qSmall}); this pair is quoted over the network for 30 min`);
     }
   }
   if (qSmall < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, qSmall, limit));
 
   let note = "";
-  let rejected = null; // kontratin reddettigi ilk dolum (ayni turda daha kucukler de denenir)
+  let rejected = null; // the first fill the contract rejected (smaller ones are tried in the same round)
   for (const fill of sizes) {
     const route = fill === smallest ? rSmall : await bestRoute(fill, tin, tout, vias);
     const q = route ? route.q : null;
     const via = route ? route.via : null;
     if (q === null) {
-      log(`${tag} fiyat alinamadi`);
+      log(`${tag} no price available`);
       return "error";
     }
     if (q < minOut(fill, limit)) {
       note = note || priceNoteFor(tin, tout, fill, q, limit);
       continue;
     }
-    // Dolum ucreti yalnizca limitten iyi gelen kisimdan odenir. O kisim ucretin tamamini karsilamiyorsa
-    // dolum ag masrafini cikarmaz: fiyat limiti biraz daha gecene kadar beklenir. Boylece cok sayida
-    // kucuk emirle keeper'in bakiyesi tuketilemez (asgari emir tutari gerekmeden).
+    // The fill fee is paid only out of what comes in above the limit. If that part does not cover the whole fee, the
+    // fill does not pay for its network cost: it waits until the price is a little further past the limit. That way
+    // the keeper's balance cannot be drained with many small orders (without needing a minimum order amount).
     if (fee > 0n && q - minOut(fill, limit) < fee) {
-      note = note || `limit karsilandi ama dolum ucreti (${fmt(fee)} ${sym(tout)}) henuz cikmiyor (dolum ${fmt(fill)})`;
+      note = note || `the limit is met but the fill fee (${fmt(fee)} ${sym(tout)}) is not covered yet (fill ${fmt(fill)})`;
       continue;
     }
     if (maxImpact < BPS) {
       const imp = await impactBps(fill, tin, tout, via);
       if (imp !== null && imp > maxImpact) {
-        note = `fiyat etkisi ${imp} bps > ${maxImpact} bps (dolum ${fmt(fill)})`;
+        note = `price impact ${imp} bps > ${maxImpact} bps (fill ${fmt(fill)})`;
         continue;
       }
     }
@@ -1080,56 +1080,56 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       stuck.delete(key);
       if (r.fee !== null) stats.feesStroop += r.fee;
       log(
-        `DOLDU ${tag} ${fmt(fill)} ${sym(tin)} -> ${via ? `${sym(via)} -> ` : ""}${fmt(r.value)} ${sym(tout)}` +
-          ` ucret=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`,
+        `FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${via ? `${sym(via)} -> ` : ""}${fmt(r.value)} ${sym(tout)}` +
+          ` fee=${r.fee !== null ? fmt(r.fee) : "?"} XLM tx=${r.hash}`,
       );
       const left = remaining - fill;
       await notify(
-        `${side === "alim" ? "Alim" : "Satis"} emri doldu: kasa ${short(vault)} #${o.id}\n` +
+        `${side === "buy" ? "Buy" : "Sell"} order filled: vault ${short(vault)} #${o.id}\n` +
           `${fmt(fill)} ${sym(tin)} -> ${fmt(r.value)} ${sym(tout)}` +
-          (left > 0n ? `\nKalan: ${fmt(left)} ${sym(tin)}` : "\nEmir tamamen doldu.") +
+          (left > 0n ? `\nLeft: ${fmt(left)} ${sym(tin)}` : "\nThe order is completely filled.") +
           `\nhttps://stellar.expert/explorer/testnet/tx/${r.hash}`,
       );
       return "filled";
     }
     if (r.retry) {
-      // Ag islemi kabul etmedi: ucret odenmedi, sonraki ledger'da yeniden denenir.
-      log(`${tag}: ${r.error}; sonraki ledger'da yeniden denenecek`);
+      // The network did not accept the transaction: no fee was paid, it is tried again on the next ledger.
+      log(`${tag}: ${r.error}; it will be tried again on the next ledger`);
       return "busy";
     }
-    if (r.code === 16) return waiting(vault, o, tag, remaining, tin, "tetik fiyati (oracle) henuz gelmedi");
-    if (r.code === 19) return waiting(vault, o, tag, remaining, tin, "oracle fiyati alinamadi");
+    if (r.code === 16) return waiting(vault, o, tag, remaining, tin, "the trigger price (oracle) has not been reached yet");
+    if (r.code === 19) return waiting(vault, o, tag, remaining, tin, "no oracle price available");
     if (r.code === 4 || r.code === 5) {
-      closed.add(key); // emir artik acik degil veya zincire gore suresi dolmus
+      closed.add(key); // the order is no longer open, or has expired according to the chain
       return "closed";
     }
     stats.failures++;
     stats.lastError = `${tag}: ${errText(r)}`;
     if ([8, 10, 13, 20].includes(r.code)) {
-      // Kendi fiyat ve etki kontrolumuz gecti ama kontrat reddetti: fiyat bu arada oynamis olabilir,
-      // daha kucuk dolum denenir.
+      // Our own price and impact checks passed but the contract rejected: the price may have moved in the meantime,
+      // a smaller fill is tried.
       rejected = rejected || { fill, r };
       continue;
     }
-    // Beklenmeyen hata (or. islem zincire girdi ama basarisiz oldu): ayni emir her turda yeniden
-    // denenip ucret yakmasin diye o da dinlendirilir (1, 2, 4 ... en fazla 60 tur).
+    // Unexpected error (e.g. the transaction got on-chain but failed): this order is rested too, so that it is not
+    // retried every round burning fees (1, 2, 4 ... at most 60 rounds).
     const n = (held?.n || 0) + 1;
     const rest = Math.min(2 ** (n - 1), 60);
     stuck.set(key, { n, until: scanNo + rest });
-    log(`${tag} dolum ${fmt(fill)} basarisiz: ${errText(r)}; ${rest} tur sonra yeniden denenecek`);
-    await notify(`Dolum hatasi ${tag}: ${errText(r)}`, { topic: `err:${tag}`, everySec: 3600 });
+    log(`${tag} fill ${fmt(fill)} failed: ${errText(r)}; it will be tried again in ${rest} round(s)`);
+    await notify(`Fill error ${tag}: ${errText(r)}`, { topic: `err:${tag}`, everySec: 3600 });
     return "error";
   }
   if (rejected) {
-    // Hicbir boyut gecmedi: emir bir sure dinlendirilir. Uzun sure boyle kalirsa (or. hata baska bir
-    // kontrattan geliyor, sahibinin trustline'i yok) bir kez haber verilir.
+    // No size went through: the order is rested for a while. If it stays that way for long (e.g. the error comes from
+    // another contract, the owner has no trustline) a notice is sent once.
     const n = (held?.n || 0) + 1;
     const rest = Math.min(2 ** (n - 1), 60);
     stuck.set(key, { n, until: scanNo + rest });
-    log(`${tag} dolum ${fmt(rejected.fill)} kontrat reddetti: ${errText(rejected.r)}; ${rest} tur sonra yeniden denenecek`);
+    log(`${tag} fill ${fmt(rejected.fill)} rejected by the contract: ${errText(rejected.r)}; it will be tried again in ${rest} round(s)`);
     if (n === 7) {
       await notify(
-        `Emir ${tag} on kontrolleri geciyor ama kontrat surekli reddediyor (${errText(rejected.r)}). Kontrol edin: ` +
+        `Order ${tag} passes the pre-checks but the contract keeps rejecting it (${errText(rejected.r)}). Please check: ` +
           String(rejected.r.error).split("\n")[0].slice(0, 200),
         { topic: `stuck:${key}`, everySec: 6 * 3600 },
       );
@@ -1140,15 +1140,15 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
 }
 
 // ---------------------------------------------------------------------------
-// TTL bakimi: uzun sure dokunulmayan kayitlarin arsive dusmemesi icin
+// TTL upkeep: so that entries left untouched for a long time are not archived
 // ---------------------------------------------------------------------------
 
-/** Bir okuma cagrisinin simulasyonundan, dokundugu kayitlarin anahtarlarini alir. */
+/** Takes the keys of the entries a read call touches, from its simulation. */
 async function footprintOf(contractId, method, callArgs) {
   const sim = await server.simulateTransaction(readTx(contractId, method, callArgs));
   if (rpc.Api.isSimulationError(sim)) return [];
   const d = sim.transactionData;
-  // SDK surumleri arasinda farkli erisim bicimleri olabildigi icin iki yol da denenir.
+  // Access differs between SDK versions, so both ways are tried.
   if (typeof d.getReadOnly === "function") return [...d.getReadOnly(), ...d.getReadWrite()];
   const fp = get(get(d.build(), "resources"), "footprint");
   return [...get(fp, "readOnly"), ...get(fp, "readWrite")];
@@ -1159,7 +1159,7 @@ function keyId(k) {
   return JSON.stringify(k, (_, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
-/** Bir fabrikanin kayitlari: sayfa sayfa is listesi. */
+/** One factory's entries: a job list, page by page. */
 async function factoryTtlJobs() {
   const jobs = [];
   for (const f of FACTORIES) {
@@ -1184,7 +1184,7 @@ async function factoryTtlJobs() {
       continue;
     }
     if (buckets > 0) {
-      // Surum 6: bos olmayan her kova icin, icindeki sahip kayitlari 40'ar 40'ar.
+      // Version 6: for every non-empty bucket, the owner entries in it, 40 at a time.
       for (let b = 0; b < buckets; b++) {
         const list = await read(f, "bucket", [u32(b)]);
         if (!list.ok || !list.value.length) continue;
@@ -1207,19 +1207,19 @@ async function runTtlJob(job) {
         ? [u32(job.start), u32(40)]
         : [u32(job.bucket), u32(job.start), u32(40)];
     const r = await write(job.f, "extend_ttl", args);
-    const where = job.chain ? (job.from ? short(job.from) : "bas") : job.start;
-    log(`TTL fabrika ${short(job.f)} ${job.bucket === undefined ? "" : `kova ${job.bucket} `}${where}..: ${r.ok ? "tamam" : errText(r)}`);
+    const where = job.chain ? (job.from ? short(job.from) : "head") : job.start;
+    log(`TTL factory ${short(job.f)} ${job.bucket === undefined ? "" : `bucket ${job.bucket} `}${where}..: ${r.ok ? "ok" : errText(r)}`);
     return;
   }
   const v = job.vault;
   try {
-    // Kasa sozlesmesi, kodu ve acik emir kayitlari (get_order'in dokundugu kayitlar).
+    // The vault contract, its code and its open order entries (the entries get_order touches).
     const seen = new Map();
     const sources = [["get_config", []]];
     for (const id of book.get(v)?.open || []) {
       if (closed.has(`${v}:${id}`)) continue;
       sources.push(["get_order", [u32(id)]]);
-      // Zincirleme emir ayari varsa onun kaydi da (eski kasalarda fonksiyon yok, okuma basarisiz olur).
+      // If there is a follow-up order setting, its entry too (older vaults have no such function; the read fails).
       const fu = await read(v, "get_follow_up", [u32(id)]);
       if (fu.ok && fu.value) sources.push(["get_follow_up", [u32(id)]]);
     }
@@ -1237,20 +1237,20 @@ async function runTtlJob(job) {
         .build();
       return submit(await server.prepareTransaction(tx));
     });
-    log(`TTL ${short(v)} (${keys.length} kayit): ${r.ok ? `tamam, ucret ${r.fee !== null ? fmt(r.fee) : "?"} XLM` : r.error}`);
+    log(`TTL ${short(v)} (${keys.length} entries): ${r.ok ? `ok, fee ${r.fee !== null ? fmt(r.fee) : "?"} XLM` : r.error}`);
   } catch (e) {
-    log(`TTL ${short(v)} hatasi: ${e.message}`);
+    log(`TTL ${short(v)} error: ${e.message}`);
   }
 }
 
-/** --once modu (GitHub Actions): hepsini bir seferde. */
+/** --once mode (GitHub Actions): everything in one go. */
 async function extendTtlAll(vaults) {
   for (const job of await factoryTtlJobs()) await runTtlJob(job);
   for (const vault of vaults) await runTtlJob({ kind: "vault", vault });
 }
 
 // ---------------------------------------------------------------------------
-// Ana dongu
+// Main loop
 // ---------------------------------------------------------------------------
 
 async function keeperBalance() {
@@ -1270,7 +1270,7 @@ function readStatus() {
   }
 }
 
-let lastTtl = 0; // son tam TTL turunun bittigi an (ms); yeniden baslatmada durum.json'dan okunur
+let lastTtl = 0; // when the last full TTL round finished (ms); read from status.json on restart
 let vaultCache = { at: 0, list: [] };
 async function scan() {
   scanNo++;
@@ -1283,7 +1283,7 @@ async function scan() {
     try {
       await ordersToCheck(v);
     } catch (e) {
-      log(`HATA ${e.message}`);
+      log(`ERROR ${e.message}`);
       return;
     }
     seenVaults.add(v);
@@ -1312,21 +1312,21 @@ async function scan() {
         dirty.add(v); // the cached copy is out of date: read the vault again on the next scan
         return;
       }
-      if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // toz emirler (buyuk emrin son kucuk parcasi degil)
+      if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // dust orders (not the last small piece of a larger order)
       try {
         const res = await tryOrder(v, o, ctx);
         if (res === "filled") filled++;
-        if (res === "filled" || res === "error" || res === "busy") tries++; // yalnizca gercek islem denemeleri sayilir
+        if (res === "filled" || res === "error" || res === "busy") tries++; // only real transaction attempts are counted
       } catch (e) {
         stats.failures++;
         stats.lastError = e.message;
-        log(`HATA ${short(v)} #${o.id}: ${e.message}`);
+        log(`ERROR ${short(v)} #${o.id}: ${e.message}`);
       }
     };
     for (let i = 0; i < orders.length; i += width) {
       if (ctx.net >= MAX_ORDERS_PER_VAULT) break; // network-checked orders per vault per scan
       if (tries >= MAX_FILLS_PER_VAULT) {
-        log(`${short(v)}: bu turda ${MAX_FILLS_PER_VAULT} islem denendi, kalanlar sonraki tura`);
+        log(`${short(v)}: ${MAX_FILLS_PER_VAULT} transactions tried in this round, the rest in the next one`);
         break;
       }
       await Promise.all(orders.slice(i, i + width).map(one));
@@ -1335,30 +1335,30 @@ async function scan() {
   for (const v of vaults) open += book.get(v)?.open.length ?? 0; // every vault, including the ones not read this scan
   const balance = await keeperBalance();
   if (balance !== null && balance < LOW_BALANCE_XLM) {
-    const sent = await notify(`Keeper bakiyesi dusuk: ${balance.toFixed(2)} XLM. Islem ucretleri icin XLM ekleyin.`, {
+    const sent = await notify(`The keeper balance is low: ${balance.toFixed(2)} XLM. Add XLM for transaction fees.`, {
       topic: "low-balance",
       everySec: 6 * 3600,
     });
-    if (sent) log(`UYARI keeper bakiyesi dusuk: ${balance} XLM`);
+    if (sent) log(`WARNING the keeper balance is low: ${balance} XLM`);
   }
   try {
     fs.writeFileSync(
       STATUS_FILE,
       JSON.stringify(
         {
-          son_tarama: new Date().toISOString(),
-          kasa_sayisi: vaults.length,
-          acik_emir: open,
-          bu_turda_dolum: filled,
-          toplam_dolum: stats.fills,
-          toplam_basarisiz: stats.failures,
-          toplam_ucret_xlm: fmt(stats.feesStroop),
-          son_hata: stats.lastError,
-          keeper_bakiyesi_xlm: balance,
-          gonderen_hesap: signers.length,
-          toplu_dolum: BATCH ? `${batchFills} emir / ${batchTxs} islem` : "kapali",
-          yerel_hesapla_gecilen: localSkips,
-          son_ttl: lastTtl ? new Date(lastTtl).toISOString() : null,
+          last_scan: new Date().toISOString(),
+          vaults: vaults.length,
+          open_orders: open,
+          fills_this_round: filled,
+          total_fills: stats.fills,
+          total_failures: stats.failures,
+          total_fees_xlm: fmt(stats.feesStroop),
+          last_error: stats.lastError,
+          keeper_balance_xlm: balance,
+          sending_accounts: signers.length,
+          batch_fills: BATCH ? `${batchFills} orders / ${batchTxs} transactions` : "off",
+          skipped_by_local_estimate: localSkips,
+          last_ttl: lastTtl ? new Date(lastTtl).toISOString() : null,
         },
         null,
         2,
@@ -1369,12 +1369,12 @@ async function scan() {
 }
 
 async function main() {
-  log(`keeper basladi: ${kp.publicKey()} fabrikalar=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
+  log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   if (ONCE) {
     let last;
     for (let round = 1; round <= 4; round++) {
       last = await scan();
-      log(`tur ${round}: ${last.vaults.length} kasa, ${last.open} acik emir, ${last.filled} dolum`);
+      log(`round ${round}: ${last.vaults.length} vaults, ${last.open} open orders, ${last.filled} fills`);
       if (last.filled === 0) break;
     }
     if (DO_TTL && last) await extendTtlAll(last.vaults);
@@ -1382,17 +1382,17 @@ async function main() {
   }
   if (WORKERS > 0) {
     await ensureWorkers();
-    log(`gonderen hesap sayisi: ${signers.length} (ana hesap + ${signers.length - 1} yardimci)`);
-    log(BATCH ? `toplu dolum acik: islem basina en cok ${BATCH_SIZE} emir, sozlesme ${short(BATCH)}` : "toplu dolum kapali (testnet/batch.env yok)");
+    log(`sending accounts: ${signers.length} (main account + ${signers.length - 1} workers)`);
+    log(BATCH ? `batch fills on: at most ${BATCH_SIZE} orders per transaction, contract ${short(BATCH)}` : "batch fills off (no testnet/batch.env)");
   }
   let workersAt = Date.now();
-  const prevTtl = Date.parse(readStatus().son_ttl || "");
+  const prevTtl = Date.parse(readStatus().last_ttl || "");
   if (Number.isFinite(prevTtl)) lastTtl = prevTtl;
   let ttlJobs = [];
   let failedScans = 0;
   await notify(
-    `Basladi. ${FACTORIES.length > 1 ? "Alim ve satis fabrikalari" : "Alim fabrikasi"}, ` +
-      (SCAN_MODE === "ledger" ? "her yeni ledger'da (~5 sn) tarama." : `tarama araligi ${INTERVAL_SEC} sn.`),
+    `Started. ${FACTORIES.length > 1 ? "Several factories" : "One factory"}, ` +
+      (SCAN_MODE === "ledger" ? "scanning on every new ledger (~5 s)." : `scanning every ${INTERVAL_SEC} s.`),
   );
   let lastLedger = 0;
   for (;;) {
@@ -1403,8 +1403,8 @@ async function main() {
         workersAt = Date.now();
         await ensureWorkers();
       }
-      // TTL bakimi taramayi bekletmesin: gunde bir is listesi hazirlanir ve dolum olmayan
-      // turlarda birer birer yapilir.
+      // TTL upkeep must not hold up scanning: a job list is prepared once a day and worked through
+      // one job at a time in rounds without a fill.
       if (DO_TTL && s.filled === 0) {
         if (ttlJobs.length === 0 && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
           ttlJobs = [...(await factoryTtlJobs()), ...s.vaults.map((vault) => ({ kind: "vault", vault }))];
@@ -1418,16 +1418,16 @@ async function main() {
     } catch (e) {
       stats.lastError = e.message;
       failedScans++;
-      log(`HATA tarama: ${e.message}`);
+      log(`ERROR scan: ${e.message}`);
       if (failedScans >= 3) {
-        await notify(`Ust uste ${failedScans} tarama basarisiz: ${e.message}`, { topic: "scan", everySec: 3600 });
+        await notify(`${failedScans} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
       }
     }
     if (SCAN_MODE !== "ledger") {
       await sleep(INTERVAL_SEC * 1000);
       continue;
     }
-    // Yeni ledger gelene kadar saniyede bir bak (en fazla INTERVAL_SEC bekle)
+    // Look once a second until a new ledger arrives (wait INTERVAL_SEC at most)
     const t0 = Date.now();
     for (;;) {
       await sleep(1000);
@@ -1443,22 +1443,22 @@ async function main() {
   }
 }
 
-// Ctrl+C ile durdurulunca bir kez haber ver (sinyal hem pencereden hem iora.sh'den gelebilir).
+// Say so once when stopped with Ctrl+C (the signal can come from both the window and iora.sh).
 let stopping = false;
 async function stop(sig) {
   if (stopping) return;
   stopping = true;
-  log(`keeper durduruldu (${sig})`);
-  await notify("Durduruldu (Ctrl+C). Emirler artik otomatik doldurulmuyor.");
+  log(`keeper stopped (${sig})`);
+  await notify("Stopped (Ctrl+C). Orders are no longer filled automatically.");
   process.exit(0);
 }
 process.on("SIGINT", () => stop("Ctrl+C"));
 process.on("SIGTERM", () => stop("SIGTERM"));
-// Beklenmeyen bir hata keeper'i sessizce durdurmasin: kaydedilir, tarama devam eder.
-process.on("unhandledRejection", (e) => log(`HATA (yakalanmamis): ${(e && e.message) || e}`));
+// An unexpected error must not stop the keeper silently: it is logged and scanning continues.
+process.on("unhandledRejection", (e) => log(`ERROR (unhandled): ${(e && e.message) || e}`));
 
 main().catch(async (e) => {
-  log(`KRITIK HATA: ${e.stack || e.message}`);
-  await notify(`KRITIK HATA, keeper durdu: ${e.message}`);
+  log(`FATAL ERROR: ${e.stack || e.message}`);
+  await notify(`FATAL ERROR, the keeper stopped: ${e.message}`);
   process.exit(1);
 });

@@ -6,7 +6,7 @@
 #   bash scripts/server.sh stop
 #   bash scripts/trial-keeper-batch.sh
 #   bash scripts/server.sh push
-#   bash scripts/server.sh logs        (look for "TOPLU")
+#   bash scripts/server.sh logs        (look for "BATCH")
 # Each run uses about 0.6 USDC (dev) and 6 XLM (keeper); what the orders buy stays in the two vaults.
 # Usage: bash scripts/trial-keeper-batch.sh
 cd "$(dirname "$0")/.." || exit 1

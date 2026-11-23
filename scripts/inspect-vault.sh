@@ -6,7 +6,7 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 N="--network testnet"
 source testnet/addr.env
 source testnet/factory.env
-[ -f testnet/nesiller.env ] && source testnet/nesiller.env
+[ -f testnet/generations.env ] && source testnet/generations.env
 [ -f testnet/pairs.env ] && source testnet/pairs.env
 WHO="$1"
 [[ "$WHO" =~ ^G[A-Z2-7]{55}$ ]] || { echo "Usage: bash scripts/inspect-vault.sh G...WALLET_ADDRESS"; exit 1; }

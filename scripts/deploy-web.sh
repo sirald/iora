@@ -39,13 +39,13 @@ else
 fi
 
 # Testnet access list (invite codes, allowed wallets) -> Vercel secret environment variables
-[ -f "$ROOT/erisim.env" ] || (cd "$ROOT" && bash scripts/access.sh list > /dev/null)
+[ -f "$ROOT/access.env" ] || (cd "$ROOT" && bash scripts/access.sh list > /dev/null)
 for KEY in IORA_ACCESS_CODES IORA_ALLOWED_WALLETS IORA_ACCESS_SECRET; do
-  VAL=$(grep -E "^$KEY=" "$ROOT/erisim.env" | head -1 | cut -d= -f2- | tr -d '\r')
+  VAL=$(grep -E "^$KEY=" "$ROOT/access.env" | head -1 | cut -d= -f2- | tr -d '\r')
   $V env rm "$KEY" production --yes > /dev/null 2>&1
   [ -n "$VAL" ] && { printf "%s" "$VAL" | $V env add "$KEY" production > /dev/null 2>&1 || echo "WARNING: $KEY could not be set"; }
 done
-echo "Testnet access list updated ($(grep -E '^IORA_ACCESS_CODES=' "$ROOT/erisim.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') codes, $(grep -E '^IORA_ALLOWED_WALLETS=' "$ROOT/erisim.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') wallets)."
+echo "Testnet access list updated ($(grep -E '^IORA_ACCESS_CODES=' "$ROOT/access.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') codes, $(grep -E '^IORA_ALLOWED_WALLETS=' "$ROOT/access.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') wallets)."
 
 echo "Publishing..."
 OUT=$($V deploy --prod --yes 2>&1)

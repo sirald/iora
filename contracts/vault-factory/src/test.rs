@@ -1,4 +1,4 @@
-//! Fabrika testleri. Gercek kasa wasm'i kullanilir (once `stellar contract build`).
+//! Factory tests. The real vault wasm is used (run `stellar contract build` first).
 extern crate std;
 
 use super::*;
@@ -13,7 +13,7 @@ fn ce(code: u32) -> soroban_sdk::Error {
 }
 
 const VAULT_PAUSED: u32 = 15;
-/// Fabrikanin kasalara aktardigi dolum ucreti (alinan token, dolum basina azami).
+/// Fill fee the factory passes to vaults (in the token bought, maximum per fill).
 const FEE: i128 = 500_000;
 
 struct S {
@@ -27,7 +27,7 @@ fn setup() -> S {
     env.mock_all_auths();
     let hash = env.deployer().upload_contract_wasm(vault::WASM);
     let guardian = Address::generate(&env);
-    // Kasa kurulurken tokenlarin ondaligini okur: gercek token sozlesmeleri gerekir.
+    // The vault reads the tokens' decimals when it is set up: real token contracts are needed.
     let usdc = env.register_stellar_asset_contract_v2(guardian.clone()).address();
     let xlm = env.register_stellar_asset_contract_v2(guardian.clone()).address();
     let pool = Address::generate(&env);
@@ -96,8 +96,8 @@ fn pause_stops_new_vaults_and_new_orders() {
     );
 
     s.factory.set_paused(&false);
-    // Duraklatma kalkti: emir artik duraklatma yuzunden reddedilmez
-    // (bu testte gercek havuz olmadigi icin baska bir nedenle basarisiz olur).
+    // Pause lifted: the order is no longer rejected because of the pause
+    // (it fails for another reason, since there is no real pool in this test).
     assert_ne!(
         vc.try_place_order(&100, &2_000_000, &100, &300, &1_000),
         Err(Ok(ce(VAULT_PAUSED)))
@@ -121,7 +121,7 @@ fn guardian_change_needs_acceptance() {
     let new = Address::generate(&s.env);
     assert_eq!(s.factory.try_accept_guardian(), Err(Ok(ce(Error::NoPendingGuardian as u32))));
     s.factory.propose_guardian(&new);
-    // Kabul edilene kadar eski guardian yetkili
+    // The old guardian stays in charge until the new one accepts
     assert_eq!(s.factory.get_guardian(), old);
     s.factory.accept_guardian();
     assert_eq!(s.factory.get_guardian(), new);
@@ -130,7 +130,7 @@ fn guardian_change_needs_acceptance() {
 
 #[test]
 fn listing_and_ttl() {
-    // Liste kovalarla tutulur: her kasa, sahibinin adresinden turetilen kovada tam bir kez gorunur.
+    // The list is kept in buckets: each vault appears exactly once, in the bucket derived from its owner's address.
     let s = setup();
     let mut made = std::vec::Vec::new();
     for _ in 0..5 {
@@ -166,11 +166,11 @@ fn sibling_is_set_once_by_guardian() {
     let s = setup();
     let other = Address::generate(&s.env);
     assert_eq!(s.factory.sibling(), None);
-    // Kendisi kardesi olamaz.
+    // It cannot be its own sibling.
     assert_eq!(s.factory.try_set_sibling(&s.factory.address), Err(Ok(ce(Error::InvalidSibling as u32))));
     s.factory.set_sibling(&other);
     assert_eq!(s.factory.sibling(), Some(other.clone()));
-    // Sonradan degistirilemez.
+    // It cannot be changed later.
     let third = Address::generate(&s.env);
     assert_eq!(s.factory.try_set_sibling(&third), Err(Ok(ce(Error::SiblingAlreadySet as u32))));
     assert_eq!(s.factory.sibling(), Some(other));

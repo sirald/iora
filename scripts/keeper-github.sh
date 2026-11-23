@@ -52,8 +52,8 @@ if [ "$VIS" != "PUBLIC" ] && [ "${HISTLEAK:-0}" != "0" ]; then
   VIS=PUBLIC_SKIP
 fi
 # If internal notes are in the history, this script does not open the repository: prepare a clean one without history first.
-if [ "$VIS" != "PUBLIC" ] && [ -n "$(git log --all --oneline -- NOTLAR.md 2>/dev/null | head -1)" ]; then
-  echo "The repository history contains internal notes (NOTLAR.md); it must not be opened like this."
+if [ "$VIS" != "PUBLIC" ] && [ -n "$(git log --all --oneline -- NOTES.md 2>/dev/null | head -1)" ]; then
+  echo "The repository history contains internal notes (NOTES.md); it must not be opened like this."
   echo "First:  bash scripts/github-publish.sh   (prepares a clean repository without history), then run this script again."
   VIS=PUBLIC_SKIP
 fi

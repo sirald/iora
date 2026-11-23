@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Backs up what is deliberately kept OUT of the main repository to a separate PRIVATE GitHub repository
-# ("iora-private"): the internal notes (NOTLAR.md). Run again to push new changes.
+# ("iora-private"): the internal notes (NOTES.md). Run again to push new changes.
 # (The Discord bot is a separate project with its own backup.sh; an older copy of it here is removed.)
 # Secrets are never included: .env files, node_modules and key files are left out, and the push stops if a
 # file looks like it contains a key or token.
@@ -31,11 +31,11 @@ if [ -d discord-bot ]; then
   # .env.example carries no secret and documents the settings
   [ -f discord-bot/.env.example ] && cp discord-bot/.env.example "$DIR/discord-bot/.env.example"
 fi
-[ -f NOTLAR.md ] && cp NOTLAR.md "$DIR/NOTLAR.md"
+[ -f NOTES.md ] && cp NOTES.md "$DIR/NOTES.md"
 cat > "$DIR/README.md" <<'TXT'
 # Iora: private files
 
-Kept out of the public repository on purpose: the internal notes (`NOTLAR.md`).
+Kept out of the public repository on purpose: the internal notes (`NOTES.md`).
 No secrets are stored here. Updated with `bash scripts/github-private.sh` from the main project folder.
 TXT
 
@@ -43,7 +43,7 @@ TXT
 cd "$DIR"
 git add -A
 LEAK=$(git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 -r grep -lIE 'S[A-Z2-7]{55}|[0-9]{8,10}:[A-Za-z0-9_-]{35}|TELEGRAM_BOT_TOKEN=[0-9]|IORA_ACCESS_SECRET=[A-Za-z0-9]{8,}|KEEPER_SECRET=[S]|DISCORD_TOKEN=[A-Za-z0-9]|[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}' 2> /dev/null || true)
-LEAK="$LEAK$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(\.env|\.env\.[^/]*|erisim\.env[^/]*|server\.env|[^/]*\.(pem|key))$' | grep -v '\.env\.example$' || true)"
+LEAK="$LEAK$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(\.env|\.env\.[^/]*|access\.env[^/]*|server\.env|[^/]*\.(pem|key))$' | grep -v '\.env\.example$' || true)"
 if [ -n "$LEAK" ]; then
   echo "STOPPED: these files may contain a secret; nothing was pushed:"
   echo "$LEAK"

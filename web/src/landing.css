@@ -1,6 +1,6 @@
 @import "./base.css";
 
-/* Gece limani: ustten inen soluk isik huzmeleri ve haritanin es-derinlik egrileri */
+/* Night harbour: faint beams of light from above and the chart's depth contours */
 body.landing {
   margin: 0;
   color: var(--text);
@@ -22,7 +22,7 @@ h1, h2 {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  /* g, y, p gibi harflerin kuyrugu kesilmesin (gradyan yazi kutunun disina tasmaz) */
+  /* Do not clip the tails of letters such as g, y, p (gradient text does not spill out of its box) */
   padding-bottom: 0.12em;
 }
 h1 { font-size: clamp(40px, 5.4vw, 68px); line-height: 1.04; letter-spacing: -0.035em; max-width: 15ch; }
@@ -37,7 +37,7 @@ p { max-width: 62ch; }
 .lede { font-size: 18px; margin: 24px 0 32px; color: var(--muted); max-width: 46ch; }
 .cta { display: flex; gap: 12px; flex-wrap: wrap; }
 
-/* Guven seridi: dogrulanabilir gercekler */
+/* Trust strip: facts that can be verified */
 .facts {
   grid-column: 1 / -1;
   display: grid;
@@ -52,7 +52,7 @@ p { max-width: 62ch; }
 .built { grid-column: 1 / -1; max-width: none; display: flex; gap: 10px 26px; flex-wrap: wrap; align-items: center; margin: 22px 0 0; font-size: 13.5px; color: var(--muted); }
 .built b { color: var(--text); font-weight: 500; }
 
-/* Canli simulasyon */
+/* Live simulation */
 .sim { margin: 0; position: relative; }
 .sim::before {
   content: "";
@@ -126,7 +126,7 @@ p { max-width: 62ch; }
 }
 @keyframes blink { 50% { opacity: 0.35; } }
 
-/* ---------- Adimlar (gercek bir sira) ---------- */
+/* ---------- Steps (a real sequence) ---------- */
 .steps ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; counter-reset: step; }
 .steps li {
   counter-increment: step;
@@ -164,7 +164,7 @@ p { max-width: 62ch; }
   .reveal .steps.in li:nth-child(4) { transition-delay: 0.75s; }
 }
 
-/* ---------- Kontrol: guvenin kaniti ---------- */
+/* ---------- Control: proof of trust ---------- */
 .control { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 56px; align-items: start; }
 .control-head { position: sticky; top: 32px; }
 .control-head p { color: var(--muted); font-size: 17px; margin: 0; }
@@ -188,7 +188,7 @@ p { max-width: 62ch; }
 .risks ul { margin: 0; padding-left: 18px; color: var(--muted); }
 .risks li { margin: 7px 0; font-size: 15px; }
 
-/* ---------- Maliyet ---------- */
+/* ---------- Cost ---------- */
 .costs-lede { color: var(--muted); margin: 0 0 28px; }
 .costs table { border-collapse: collapse; width: min(520px, 100%); font-variant-numeric: tabular-nums; }
 .costs th, .costs td { padding: 14px 0; border-bottom: 1px solid var(--line); text-align: left; font-weight: 400; }
@@ -218,7 +218,7 @@ p { max-width: 62ch; }
 .formmsg.ok { color: var(--ok); }
 .formmsg.err { color: var(--err); }
 
-/* ---------- Mobil ---------- */
+/* ---------- Mobile ---------- */
 @media (max-width: 900px) {
   .hero, .beta, .control { grid-template-columns: 1fr; gap: 36px; }
   .control-head { position: static; }
@@ -241,7 +241,7 @@ p { max-width: 62ch; }
   .rules div::before { left: 20px; top: 23px; }
 }
 
-/* ---------- Bekleme maliyeti hesaplayicisi ---------- */
+/* ---------- Cost-of-waiting calculator ---------- */
 .why { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; }
 .calc { display: grid; gap: 22px; margin-top: 8px; }
 .calc label { display: grid; grid-template-columns: 1fr auto; gap: 10px; font-size: 14.5px; color: var(--muted); }
@@ -267,7 +267,7 @@ p { max-width: 62ch; }
 @media (prefers-reduced-motion: no-preference) { .bar.earn { transition: width 0.4s ease; } }
 .fine { margin: 0; font-size: 12.5px; color: var(--muted); }
 
-/* ---------- Kullanim alanlari ---------- */
+/* ---------- Use cases ---------- */
 .use-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 12px; }
 .use-grid article { padding: 28px 24px; border-radius: 20px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
 .use-grid p { margin: 0; color: var(--muted); font-size: 15px; }
@@ -276,7 +276,7 @@ p { max-width: 62ch; }
 .more:hover { text-decoration: underline; text-underline-offset: 4px; }
 .control-head .more { margin-top: 22px; }
 
-/* ---------- Karsilastirma ---------- */
+/* ---------- Comparison ---------- */
 .table-wrap { overflow-x: auto; max-width: 100%; min-width: 0; -webkit-overflow-scrolling: touch; }
 .compare { min-width: 0; }
 .cmp { width: 100%; min-width: 560px; border-collapse: separate; border-spacing: 0; font-size: 15px; }
@@ -287,10 +287,10 @@ p { max-width: 62ch; }
 .cmp .us { color: var(--text); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .cmp thead .us { border-radius: 14px 14px 0 0; box-shadow: inset 0 2px 0 var(--signal); }
 
-/* ---------- Maliyet ---------- */
+/* ---------- Cost ---------- */
 .costs { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
 
-/* ---------- Yol haritasi ---------- */
+/* ---------- Roadmap ---------- */
 .road-h { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, 1fr); position: relative; }
 .road-h::before { content: ""; position: absolute; left: 8px; right: 8px; top: 7px; border-top: 1px dashed var(--line-2); }
 .road-h li { position: relative; padding: 32px 16px 0 0; }
@@ -299,7 +299,7 @@ p { max-width: 62ch; }
 .road-h b { display: block; font: 500 17px var(--display); color: var(--text); }
 .road-h span { font-size: 14px; color: var(--muted); }
 
-/* ---------- SSS ---------- */
+/* ---------- FAQ ---------- */
 .faq-list { max-width: 820px; }
 .faq details { border-bottom: 1px solid var(--line); padding: 18px 0; }
 .faq summary { cursor: pointer; font-size: 17px; color: var(--text); list-style: none; display: flex; justify-content: space-between; gap: 16px; }
@@ -312,7 +312,7 @@ p { max-width: 62ch; }
 .beta-points li { padding-left: 26px; position: relative; }
 .beta-points li::before { content: ""; position: absolute; left: 0; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 10px color-mix(in srgb, var(--signal) 60%, transparent); }
 
-/* ---------- Alt bilgi ---------- */
+/* ---------- Footer ---------- */
 .site-foot { max-width: 1180px; margin: 40px auto 0; padding: 48px 24px 40px; border-top: 1px solid var(--line); }
 .foot-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.2fr; gap: 32px; }
 .beta-contact { margin-top: 18px; font-size: 14.5px; color: var(--muted); }
@@ -338,14 +338,14 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
 .road-h li.goal b { color: var(--accent); }
 .road-note { margin: 28px 0 0; max-width: 70ch; color: var(--muted); font-size: 15px; }
 
-/* Ag rozeti: projenin Stellar uzerinde oldugunu ilk bakista soyler */
+/* Network badge: says at first glance that the project is on Stellar */
 .chain-pill { display: inline-flex; align-items: center; gap: 9px; margin: 0 0 22px; padding: 6px 14px 6px 10px; border-radius: 999px; font-size: 13.5px; font-weight: 500; color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-2); }
 .chain-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 #betaform .hint { display: block; margin-top: 6px; font-size: 12.5px; font-weight: 400; color: var(--muted); }
 
-/* ================= Hareket katmani (motion.js) ================= */
+/* ================= Motion layer (motion.js) ================= */
 @media (prefers-reduced-motion: no-preference) {
-  /* Acilis: kahraman bolumu sirayla gelir */
+  /* Intro: the hero section comes in step by step */
   .hero-text > * { animation: rise 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
   .hero-text > :nth-child(1) { animation-delay: 0.05s; }
   .hero-text > :nth-child(2) { animation-delay: 0.15s; }
@@ -355,7 +355,7 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
   .hero .facts, .hero .built { animation: rise 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.55s both; }
   .chain-dot { animation: pulse-dot 2.4s ease-in-out infinite; }
 
-  /* Kahramanin arkasinda yavasca suzulen tek isik bulutu (fareyi takip etmez) */
+  /* A single cloud of light drifting slowly behind the hero (it does not follow the mouse) */
   .hero { position: relative; isolation: isolate; }
   :root[data-theme="dark"] .hero { --orb-a: 20%; --orb-b: 12%; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .hero { --orb-a: 20%; --orb-b: 12%; } }
@@ -366,13 +366,13 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
     animation: drift 22s ease-in-out -6s infinite alternate-reverse;
   }
 
-  /* Kaydirinca belirme */
+  /* Reveal on scroll */
   .motion .rv { opacity: 0; transform: translateY(22px); transition: opacity 0.8s ease, transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1); transition-delay: var(--d, 0ms); }
   .motion .rv.rv-in { opacity: 1; transform: none; }
   .motion h2.rv { transform: translateY(16px); filter: blur(6px); transition-property: opacity, transform, filter; }
   .motion h2.rv.rv-in { filter: none; }
 
-  /* Yol haritasi: cizgi "simdi"ye kadar dolar, siradaki hedef nabiz atar */
+  /* Roadmap: the line fills up to "now", the next goal pulses */
   .road-h::after {
     content: ""; position: absolute; left: 8px; top: 7px; height: 2px; width: calc(100% / 6 - 8px); margin-top: -0.5px;
     background: linear-gradient(90deg, var(--signal), color-mix(in srgb, var(--signal) 20%, transparent));
@@ -384,7 +384,7 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 60%, transparent); animation: ring 2.4s ease-out infinite;
   }
 
-  /* Karsilastirma: Iora sutunu bir kez parlar */
+  /* Comparison: the Iora column lights up once */
   .cmp .us { position: relative; overflow: hidden; }
   .cmp.lit tbody .us::after {
     content: ""; position: absolute; inset: 0; pointer-events: none;
@@ -392,14 +392,14 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
     transform: translateX(-120%); animation: sweep 1.4s ease 0.4s 1 both;
   }
 
-  /* Kartlar: fareyi izleyen isik + yumusak kalkis */
+  /* Cards: a light that follows the mouse + a soft lift */
   .glow, .lift { position: relative; transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.35s ease; will-change: transform; }
   .glow::after {
     content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity 0.35s ease;
     background: radial-gradient(260px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%);
   }
   .glow:hover::after { opacity: 1; }
-  /* Adim kartlarinin ::after'i kesikli cizgi oldugu icin isik arka plana cizilir */
+  /* The step cards' ::after is the dashed line, so the light is drawn on the background */
   .lift:hover {
     background:
       radial-gradient(260px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
@@ -407,7 +407,7 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
   }
   .glow:hover, .lift:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, var(--line)), 0 18px 40px -22px color-mix(in srgb, var(--accent) 45%, transparent); }
 
-  /* Butonlar: hafif kalkis ve parlama gecisi */
+  /* Buttons: a slight lift and a glow transition */
   .btn { transition: transform 0.2s ease, box-shadow 0.25s ease, background 0.25s ease; }
   .btn:hover { transform: translateY(-1px); }
   .btn.primary { position: relative; overflow: hidden; }
@@ -418,7 +418,7 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
   }
   .btn.primary:hover::after { transform: translateX(130%); transition: transform 0.75s ease; }
 
-  /* Ortaklar seridi: isimler uzerinden yavas bir isik gecer */
+  /* Partners strip: a slow light passes over the names */
   .built b {
     background: linear-gradient(90deg, var(--text) 0 40%, var(--accent) 50%, var(--text) 60% 100%) 0 0 / 300% 100%;
     -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 6s linear infinite;
@@ -426,16 +426,16 @@ section > .section-lede, .steps > .section-lede { margin: 0 0 36px; }
   .built span:nth-child(2) b { animation-delay: -2s; }
   .built span:nth-child(3) b { animation-delay: -4s; }
 
-  /* SSS: acilan cevap kayarak gelir */
+  /* FAQ: the opened answer slides in */
   .faq details[open] > p { animation: rise 0.45s ease both; }
 }
 
-/* Ust ilerleme cizgisi ve kaydirinca belirginlesen ust bar */
+/* Top progress line and a top bar that becomes solid on scroll */
 .scroll-progress {
   position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 60; pointer-events: none;
   background: linear-gradient(90deg, var(--accent), var(--signal)); transform: scaleX(0); transform-origin: left;
 }
-/* Ust bar sayfayla birlikte kayar; asagi inince tam genislikte yari saydam bir zemin alir */
+/* The top bar scrolls with the page; further down it gets a full-width, semi-transparent background */
 body.landing:not(.docs) .top { position: sticky; top: 0; z-index: 50; }
 body.motion .top { transition: background 0.3s ease, box-shadow 0.3s ease; }
 body.motion.scrolled .top {
@@ -452,13 +452,13 @@ body.motion.scrolled .top {
 @keyframes sweep { to { transform: translateX(120%); } }
 @keyframes shine { to { background-position: -300% 0; } }
 
-/* Sabit ust bar baglantilarin basligini ortmesin */
+/* The fixed top bar must not cover the heading a link jumps to */
 html:has(body.landing:not(.docs)) { scroll-padding-top: 84px; }
 @media (prefers-reduced-motion: no-preference) { html:has(body.landing) { scroll-behavior: smooth; } }
-/* Isik bulutlari sayfayi yana tasirmasin (clip, yapiskan ust bari bozmaz) */
-body.landing { overflow-x: hidden; overflow-x: clip; } /* eski Safari icin hidden yedegi */
+/* Clouds of light must not make the page overflow sideways (clip does not break the sticky top bar) */
+body.landing { overflow-x: hidden; overflow-x: clip; } /* hidden fallback for old Safari */
 
-/* ---------- Canli testnet rakamlari ---------- */
+/* ---------- Live testnet numbers ---------- */
 .livestats { padding-top: 8px; padding-bottom: 8px; }
 .livestats-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; font-size: 13px; color: var(--muted); letter-spacing: 0.02em; }
 .livestats-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok, #1f9d55); box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok, #1f9d55) 60%, transparent); animation: live-ping 2s ease-out infinite; }

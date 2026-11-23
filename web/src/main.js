@@ -22,7 +22,7 @@ import { StellarWalletsKit } from "swk-sdk";
 import { defaultModules } from "swk-modules";
 
 // ---------------------------------------------------------------------------
-// Ayarlar (web/.env.local dosyasindan; web/dev.sh otomatik uretir)
+// Settings (from web/.env.local; web/dev.sh generates it)
 // ---------------------------------------------------------------------------
 const C = {
   rpc: import.meta.env.VITE_RPC_URL || RPC_PRIMARY,
@@ -34,39 +34,39 @@ const C = {
   pool: import.meta.env.VITE_POOL || "CCEBVDYM32YNYCVNRXQKDFFPISJJCV557CDZEIRBEE4NCV4KHPQ44HGF",
 };
 const PASS = Networks.TESTNET;
-// Hizli RPC once, sorun olursa yedegi (bkz. rpc.js)
+// The fast RPC first, the fallback if there is a problem (see rpc.js)
 const server = makeServer([C.rpc, import.meta.env.VITE_RPC_FALLBACK, RPC_PRIMARY, RPC_FALLBACK]);
 const U = 10_000_000n;
-// Havuz korumasi. Iora ayni zamanda al-sat yeri: emir dolarken para Blend'den cekilir, havuzun buyuk kismi
-// borctaysa cekim de dolum da bekler. Bu yuzden sinir, Blend'in kendi sinirindan (%95) dusuk tutulur.
-const UTIL_WARN = Number(import.meta.env.VITE_UTIL_WARN || 0.7); // bu kullanimin ustunde uyari
-const UTIL_STOP = Number(import.meta.env.VITE_UTIL_STOP || 0.8); // bu kullanimin ustunde yeni yatirma ve emir durur
-const UTIL_ENFORCE = import.meta.env.VITE_UTIL_ENFORCE === "1"; // kapaliyken (testnet) yalnizca uyarir
-const ORDER_SHARE = 0.25; // tek yatirma ya da emir, havuzda o an odenebilir tutarin en fazla dortte biri
-const POOLSTAT = {}; // sembol -> { u, avail } (loadPool doldurur)
+// Pool guard. Iora is also a place to trade: when an order fills, funds are withdrawn from Blend, and if most of
+// the pool is lent out both withdrawals and fills wait. So the limit is kept below Blend's own limit (95%).
+const UTIL_WARN = Number(import.meta.env.VITE_UTIL_WARN || 0.7); // warn above this utilisation
+const UTIL_STOP = Number(import.meta.env.VITE_UTIL_STOP || 0.8); // new deposits and orders stop above this utilisation
+const UTIL_ENFORCE = import.meta.env.VITE_UTIL_ENFORCE === "1"; // when off (testnet) it only warns
+const ORDER_SHARE = 0.25; // a single deposit or order is at most a quarter of what the pool can pay out at that moment
+const POOLSTAT = {}; // symbol -> { u, avail } (filled by loadPool)
 
-// Satis sayfasinin durumu. Sayfa acilisinda (showView) gerektigi icin en ustte tanimlanir.
+// State of the sell page. Defined at the top because showView needs it when the page opens.
 const SV = { factory: import.meta.env.VITE_FACTORY_SELL || "", vault: null, bal: null, free: null, apr: null, mkt: null, days: 365 };
-SV.home = SV.factory; // varsayilan satis pazari (XLM -> USDC)
-SV.out = { sym: "USDC", addr: C.usdc }; // bu sayfada alinan token
+SV.home = SV.factory; // default sell market (XLM -> USDC)
+SV.out = { sym: "USDC", addr: C.usdc }; // the token bought on this page
 
 // ---------------------------------------------------------------------------
-// Surum 7: tek, cok varlikli kasa
+// Version 7: one multi-asset vault
 // ---------------------------------------------------------------------------
-// Zincirde artik kullanici basina TEK kasa var; emirler "su tokeni sat, sunu al" seklinde ve yatirma/cekme
-// token secerek yapiliyor. Arayuzun geri kalani hala "alim tarafi" ve "satim tarafi" diye iki kasa gibi
-// dusunur. Aradaki ceviri tek yerde yapilir: surum 7 kasasi arayuzde bir "tutamac" olarak tasinir
-// (`<kasa adresi>~<satilan token>~<alinan token>`); `read` ve `call` tutamaci gorunce eski bicimdeki
-// cagriyi yeni kontratin cagrisina cevirir. Eski kasalar duz adresle tasinir ve hic degismeden calisir.
+// On-chain there is now ONE vault per user; orders say "sell this token, buy that one" and deposits/withdrawals
+// pick a token. The rest of the app still thinks of two vaults, a "buy side" and a "sell side". The translation
+// between the two happens in one place: a version 7 vault is carried in the app as a "handle"
+// (`<vault address>~<token sold>~<token bought>`); when `read` and `call` see a handle they turn the old-style
+// call into the new contract's call. Old vaults are carried as a plain address and work unchanged.
 const V7 = Number(import.meta.env.VITE_VAULT_V || 3) >= 7;
 if (V7) {
-  // Tek fabrika: alim ve satim tarafi ayni fabrikayi ve ayni kasayi kullanir.
+  // One factory: the buy side and the sell side use the same factory and the same vault.
   SV.factory = C.factory;
   SV.home = C.factory;
 }
-// Islem ciftleri: her zaman "<coin> / USDC". Varsayilan coin XLM; digerleri VITE_PAIRS=SEMBOL:token,... ile gelir
-// (yalnizca tek kasada). Secili coin sayfa acilirken sabitlenir; degisince sayfa yeniden yuklenir. Boylece
-// arayuzun "alim tarafi USDC, satim tarafi coin" duzeni her cift icin ayni kodla calisir.
+// Trading pairs: always "<coin> / USDC". The default coin is XLM; others come from VITE_PAIRS=SYMBOL:token,...
+// (single vault only). The selected coin is fixed when the page loads; changing it reloads the page. That way
+// the app's "buy side USDC, sell side coin" layout runs on the same code for every pair.
 const PAIRS = V7
   ? String(import.meta.env.VITE_PAIRS || "")
       .split(",")
@@ -83,9 +83,9 @@ const BASE = (() => {
   const p = PAIRS.find((x) => x.sym === want);
   return p ? { sym: p.sym, addr: p.token, extra: true } : { sym: "XLM", addr: C.xlm, extra: false };
 })();
-const BS = BASE.sym; // islem goren coinin sembolu
-const XB = BASE.extra; // XLM disinda bir coin: Blend havuzunda degil, kasada faiz kazanmaz, ag ucreti icin pay gerekmez
-const BASE_KEEP = XB ? 0n : 5n * U; // cuzdanda birakilan pay (yalnizca XLM'de: ag ucretleri)
+const BS = BASE.sym; // symbol of the traded coin
+const XB = BASE.extra; // a coin other than XLM: not in the Blend pool, earns no interest in the vault, needs no reserve for network fees
+const BASE_KEEP = XB ? 0n : 5n * U; // reserve left in the wallet (XLM only: network fees)
 function setBase(sym, hash) {
   try {
     if (sym === "XLM") localStorage.removeItem("iora-base");
@@ -94,7 +94,7 @@ function setBase(sym, hash) {
   if (hash) location.hash = hash;
   if (sym !== BS) location.reload();
 }
-/** Kucuk tutarlar (or. 0,0013 BTC) iki ondalikta sifir gorunmesin. */
+/** Small amounts (e.g. 0.0013 BTC) must not show as zero with two decimals. */
 const nfmt = (v, d = 2) =>
   XB && v !== 0 && Math.abs(v) < 1 ? v.toLocaleString("en-US", { maximumSignificantDigits: 4 }) : v.toLocaleString("en-US", { maximumFractionDigits: d });
 const H = (id, sell, buy) => `${id}~${sell}~${buy}`;
@@ -103,13 +103,13 @@ const sideOf = (h) => {
   const p = String(h || "").split("~");
   return p.length === 3 ? { id: p[0], s: p[1], b: p[2] } : null;
 };
-// Dolan emrin ciktisi kasada mi kalsin (Blend'de faiz kazanir) yoksa cuzdana mi gitsin? Varsayilan: kasada.
+// Should a filled order's output stay in the vault (earning on Blend) or go to the wallet? Default: in the vault.
 const KEEP = { on: true };
 try {
   KEEP.on = localStorage.getItem("iora-keep") !== "0";
 } catch {}
-// Dolum ucreti ust siniri (kasanin ayarindan okunur; eski, ucretsiz kasalarda 0). Emir onizlemesinde gosterilir.
-const feeCap = new Map(); // kasa (ya da tutamac) -> birim
+// Fill fee cap (read from the vault's settings; 0 in old vaults without a fee). Shown in the order preview.
+const feeCap = new Map(); // vault (or handle) -> units
 function loadFeeCap(v) {
   if (!v || feeCap.has(v)) return;
   feeCap.set(v, 0n);
@@ -123,10 +123,10 @@ const feeNote = (v, sym) => {
   const cap = feeCap.get(v) || 0n;
   return cap > 0n ? `If it fills at a better price than your limit, up to <b>${fmt(cap, 4)} ${sym}</b> of that extra goes to whoever filled it, to cover their network fee. You always get at least what your limit promises.` : "";
 };
-/** Emir onizlemelerinde: dolan emrin ciktisi nereye gider? */
+/** In order previews: where does a filled order's output go? */
 const outTo = (v) => (sideOf(v) && KEEP.on ? (XB ? "stays in your vault" : "stays in your vault and keeps earning on Blend") : "goes to your wallet");
 const outIn = (v) => (sideOf(v) && KEEP.on ? "in your vault, where it keeps earning" : "in your wallet");
-/** Eski bicimdeki kasa cagrisini surum 7 kontratinin cagrisina cevirir. Tutamac degilse dokunmaz. */
+/** Turns an old-style vault call into the version 7 contract's call. Leaves it alone if it is not a handle. */
 function v7Translate(contractId, method, args) {
   const h = sideOf(contractId);
   if (!h) return { id: contractId, method, args };
@@ -141,9 +141,9 @@ function v7Translate(contractId, method, args) {
     case "deposited":
       return { id: h.id, method, args: [S] };
     case "stats":
-      // Arayuz faizi "bakiye + cekilen + harcanan - yatirilan" diye hesaplar. Tek kasada emirle gelen (kasada
-      // kalan) tutar da anaparadir ama "yatirilan" toplamina girmez; duzeltilmezse faiz gibi gorunurdu. Kontratin
-      // tuttugu anapara (`deposited`) kullanilarak ayni formul dogru sonucu verir: faiz = bakiye - anapara.
+      // The app computes interest as "balance + withdrawn + spent - deposited". In a single vault the amount that
+      // comes in through an order (and stays in the vault) is principal too but is not in the "deposited" total; left
+      // uncorrected it would look like interest. With the principal the contract keeps (`deposited`) the same formula gives the right result: interest = balance - principal.
       return {
         custom: async () => {
           const [st, dep] = await Promise.all([rawRead(h.id, "stats", [S]), rawRead(h.id, "deposited", [S])]);
@@ -160,10 +160,10 @@ function v7Translate(contractId, method, args) {
     case "place_stop_order":
       return { id: h.id, method, args: [S, B, ...args, nativeToScVal(KEEP.on, { type: "bool" })] };
     case "place_order_then":
-      // Eski: (tutar, limit, asgari dolum, etki, sure, HEDEF KASA, sonraki limit, sonraki etki, sonraki sure)
+      // Old: (amount, limit, minimum fill, impact, lifetime, TARGET VAULT, next limit, next impact, next lifetime)
       return { id: h.id, method, args: [S, B, ...args.slice(0, 5), ...args.slice(6)] };
     case "get_order":
-      // Ayni kasada iki yonun emirleri birlikte durur; bu tarafa ait olmayan emir isaretlenir.
+      // Orders of both directions sit in the same vault; an order that does not belong to this side is marked.
       return { id: h.id, method, args, map: (o) => (o && String(o.sell) === h.s && String(o.buy) === h.b ? o : { ...o, foreign: true }) };
     case "get_follow_up":
       return { id: h.id, method, args, map: (f) => (f ? { ...f, vault: flip } : f) };
@@ -175,7 +175,7 @@ function v7Translate(contractId, method, args) {
         map: (c) => ({ owner: c.owner, usdc: h.s, xlm: h.b, pool: c.pool, router: c.router, guard: c.guard, exec_fee: BigInt((c.fees && c.fees[h.b]) || 0) }),
       };
     case "get_feeder":
-      // Tek kasada "besleyici" kavrami yok: ters taraf her zaman ayni kasadir.
+      // A single vault has no "feeder": the other side is always the same vault.
       return { done: { ok: true, value: flip } };
     case "set_feeder":
       return { done: { ok: true, skipped: true } };
@@ -183,29 +183,29 @@ function v7Translate(contractId, method, args) {
       return { id: h.id, method, args };
   }
 }
-// Ek pazarlar (gostermelik): XLM yatirilir, Soroswap'in test coinlerinden biri alinir. VITE_MARKETS=SEMBOL:token:fabrika,...
+// Extra markets (showcase): XLM is deposited, one of Soroswap's test coins is bought. VITE_MARKETS=SYMBOL:token:factory,...
 const EXTRA_MARKETS = String((!V7 && import.meta.env.VITE_MARKETS) || "")
   .split(",")
   .map((x) => x.trim().split(":"))
   .filter((p) => p.length === 3 && /^C[A-Z2-7]{55}$/.test(p[1]) && /^C[A-Z2-7]{55}$/.test(p[2]))
   .map(([sym, token, factory]) => ({ sym: sym.replace(/[^A-Za-z0-9]/g, "").slice(0, 12), token, factory }));
-// Islem ekrani durumu (grafik, derinlik). Sayfa acilirken showView bunu kullanir: en ustte tanimli olmali.
+// State of the trading screen (chart, depth). showView uses it when the page opens: it must be defined at the top.
 const TR = { key: null, quote: "USDC", pair: null, base0: true, pts: [], tf: 3600, hover: null, spot: null, res: null, lines: [], note: "", scanned: false };
-// Keeper bundan kucuk emirleri doldurmaz (toz emirlerle keeper'i mesgul etme saldirisina karsi)
+// The keeper does not fill orders smaller than this (against keeping the keeper busy with dust orders)
 const MIN_ORDER = 1_000_000n;
-/** Piyasadan kotu limit uyarisi (denetim Y-1): kontrat yalnizca limiti garanti eder, piyasa fiyatini degil. */
+/** Warning for a limit worse than the market (audit Y-1): the contract only guarantees the limit, not the market price. */
 const WORSE_BUY = (pct) =>
   `Your limit is ${pct > 0.05 ? `${pct.toFixed(1)}% above` : "at"} the market price. The order can fill right away, but only your limit is guaranteed, not the market price: whoever fills it can keep the difference. To buy at the market price now, use a Market order.`;
 const WORSE_SELL = (pct) =>
   `Your price is ${pct > 0.05 ? `${pct.toFixed(1)}% below` : "at"} the market price. The order can sell right away, but only your price is guaranteed, not the market price: whoever fills it can keep the difference. To sell at the market price now, use a Market order.`;
 const EXPLORER = "https://stellar.expert/explorer/testnet";
 
-let me = null; // bagli cuzdan adresi
-let vault = null; // kasa adresi
+let me = null; // connected wallet address
+let vault = null; // vault address
 let busy = false;
 
 // ---------------------------------------------------------------------------
-// Yardimcilar
+// Helpers
 // ---------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const short = (h) => {
@@ -214,7 +214,7 @@ const short = (h) => {
 };
 
 function toUnits(str) {
-  // "1,000" ekranda bin demek ama eskiden 1 diye okunuyordu: binlik ayracli giris tahmin edilmez, sorulur.
+  // "1,000" means a thousand on screen but used to be read as 1: input with a thousands separator is not guessed, the user is asked.
   if (/^[1-9]\d{0,2}(,\d{3})+(\.\d*)?$/.test(String(str).trim()))
     throw new Error(`Please type "${str}" without a thousands separator, for example 1000 or 1.5`);
   const s = String(str).trim().replace(",", ".");
@@ -264,12 +264,12 @@ const VAULT_ERRORS = {
   28: "Invalid swap route",
   29: "The vault still holds this coin, or an open order uses it",
 };
-// Kontrat surumu (testnet/factory.env VAULT_V). Surum 4 imzalari: zarar keste bant parametresi,
-// withdraw icin "tamamini cek" ozel degeri, kasada bekleyen ciktiyi alma (sweep).
+// Contract version (testnet/factory.env VAULT_V). Version 4 signatures: the band parameter for a stop loss,
+// the "withdraw everything" special value for withdraw, collecting output waiting in the vault (sweep).
 const V4 = Number(import.meta.env.VITE_VAULT_V || 3) >= 4;
 const I128_MAX = (1n << 127n) - 1n;
-const SL_BAND_BPS = 300; // zarar keste oracle fiyatindan azami sapma (%3)
-/** Kontrat kurali: emir en fazla 20 parcada dolar (min_fill >= tutar / 20, yukari yuvarlanir). */
+const SL_BAND_BPS = 300; // largest deviation from the oracle price for a stop loss (3%)
+/** Contract rule: an order fills in at most 20 pieces (min_fill >= amount / 20, rounded up). */
 const fillFloor = (amount, minFill) => {
   const lo = (amount - 1n) / 20n + 1n;
   return minFill < lo ? lo : minFill;
@@ -289,13 +289,13 @@ function log(msg, kind = "") {
   li.className = kind;
   li.innerHTML = `<time>${new Date().toLocaleTimeString("en-US")}</time> ${msg}`;
   $("log").prepend(li);
-  // Erisim kapisi kapaliyken cuzdan hatalari kapinin uzerinde gorunsun
+  // While the access gate is closed, wallet errors must show on the gate
   const gm = $("gate-msg");
   if (gm && kind === "err" && document.documentElement.classList.contains("app-closed")) {
     gm.innerHTML = msg;
     gm.className = "gate-msg";
   }
-  // Son mesaji ekranin altinda da goster; log kutusu kapali olabilir.
+  // Show the last message at the bottom of the screen too; the log box may be closed.
   const st = $("status");
   st.innerHTML = msg;
   st.className = `status show ${kind}`;
@@ -304,7 +304,7 @@ function log(msg, kind = "") {
 }
 
 // ---------------------------------------------------------------------------
-// Ag islemleri
+// Network calls
 // ---------------------------------------------------------------------------
 async function buildCall(contractId, method, args) {
   const account = await server.getAccount(me);
@@ -314,8 +314,8 @@ async function buildCall(contractId, method, args) {
     .build();
 }
 
-// Okumada hesabin sira numarasi gerekmez: her okumadan once getAccount cagrilmaz (RPC cagrisi yariya iner).
-// Cuzdan bagli degilken de okunabilsin diye her zaman var olan bir hesap (USDC ihraccisi) kullanilir.
+// A read does not need the account's sequence number: getAccount is not called before every read (halves the RPC calls).
+// An account that always exists (the USDC issuer) is used so that reads work without a connected wallet.
 const READ_SOURCE = import.meta.env.VITE_USDC_ISSUER || "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56";
 function readCall(contractId, method, args) {
   return new TransactionBuilder(new Account(me || READ_SOURCE, "0"), { fee: BASE_FEE, networkPassphrase: PASS })
@@ -324,7 +324,7 @@ function readCall(contractId, method, args) {
     .build();
 }
 
-/** Ucretsiz okuma (simulasyon). */
+/** A free read (simulation). */
 async function rawRead(contractId, method, args = []) {
   const sim = await server.simulateTransaction(readCall(contractId, method, args));
   if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error };
@@ -338,7 +338,7 @@ async function read(contractId, method, args = []) {
   return r.ok && t.map ? { ok: true, value: t.map(r.value) } : r;
 }
 
-// Cuzdan hic cevap vermezse (eklenti takildi) sayfa sonsuza kadar "islem suruyor"da kalmasin.
+// If the wallet never answers (the extension hung) the page must not stay on "transaction in progress" forever.
 function walletTimeout(p) {
   return Promise.race([
     p,
@@ -355,8 +355,8 @@ async function signAndSend(tx) {
       throw new Error((e && e.message) || "Signature rejected");
     }
   } else {
-    // Varial gibi cuzdanlar site iznini ag basina tutar: Test Net'e gecince site "bagli degil" gorunur.
-    // Imzadan once izin yoksa baglanti penceresi acilir, sonra imza istenir.
+    // Wallets such as Varial keep site permission per network: after switching to Test Net the site looks "not connected".
+    // If there is no permission before signing, the connection window opens first, then the signature is requested.
     try {
       const al = await isAllowed();
       if (!al.error && !al.isAllowed) {
@@ -374,8 +374,8 @@ async function signAndSend(tx) {
   const sent = await server.sendTransaction(ready);
   if (sent.status === "TRY_AGAIN_LATER") throw new Error("The network is busy and did not accept the transaction. Nothing was sent; try again in a moment.");
   if (sent.status === "ERROR") throw new Error("Could not submit the transaction");
-  // Islem 180 sn gecerli: o sure dolana kadar izlenir. Gecici bir RPC hatasi izlemeyi kesmez; boylece
-  // "zaman asimi" gorup tekrar deneyen kullanici ayni emri iki kez vermis olmaz.
+  // The transaction is valid for 180 s: it is followed until that time is up. A temporary RPC error does not stop
+  // the tracking, so a user who sees "timed out" and tries again does not place the same order twice.
   const link = `<a href="${EXPLORER}/tx/${sent.hash}" target="_blank" rel="noopener">${short(sent.hash)}</a>`;
   const deadline = Date.now() + 195_000;
   while (Date.now() < deadline) {
@@ -392,11 +392,11 @@ async function signAndSend(tx) {
   throw new Error(`Not confirmed in time; it expired without being applied, so it is safe to try again (${link})`);
 }
 
-/** Sozlesme cagrisi: simule et, onay al, imzala, gonder. */
+/** Contract call: simulate, get approval, sign, send. */
 /**
- * Simulasyonun kaynak tahminine pay ekler. Blend her ledger'da faiz isledigi icin islem zincire
- * yazilana kadar gereken islem gucu/okuma biraz artabilir; pay olmadan islem "resource limit exceeded"
- * ile reddedilir (ozellikle tamamini cekme gibi Blend'e dokunan islemlerde). Fazla odenen ucret iade edilir.
+ * Adds a margin to the simulation's resource estimate. Blend accrues interest on every ledger, so the
+ * instructions/reads needed can grow a little before the transaction is written; without a margin it is rejected
+ * with "resource limit exceeded" (especially calls that touch Blend, such as withdrawing everything). The overpaid fee is refunded.
  */
 function padSim(sim) {
   try {
@@ -417,14 +417,14 @@ function padSim(sim) {
   return sim;
 }
 
-// Kasa acma yarisi: fabrika her kasaya sira numarasi verir (VaultAt(n)). Islem, hazirlandigi andaki
-// numaraya yazma izniyle gider; kullanici cuzdanda onaylarken baskasi kasa acarsa numara kayar ve islem
-// zincirde reddedilir. Bu yuzden sonraki numaralar da yazma listesine eklenir: araya SPARE_VAULT_SLOTS
-// kisi girse bile islem gecer. Kullanilmayan numaralar yazilmaz; yalnizca kucuk bir ek ucret payi ayrilir.
+// Vault opening race: the factory gives each vault a sequence number (VaultAt(n)). The transaction goes out with
+// write access to the number it had when prepared; if someone else opens a vault while the user approves in the
+// wallet, the number shifts and the transaction is rejected on-chain. So the following numbers are added to the
+// write list too: it goes through even if SPARE_VAULT_SLOTS people get in first. Unused numbers are not written; only a small extra fee margin is set aside.
 const SPARE_VAULT_SLOTS = 12;
 function padVaultSlots(sim) {
   try {
-    // SDK surumleri XDR alanlarini ya ozellik ya da fonksiyon olarak verir; ikisi de okunur.
+    // SDK versions expose XDR fields either as properties or as functions; both are read.
     const g = (o, k) => (o && typeof o[k] === "function" ? o[k]() : o?.[k]);
     const kind = (o) => (o && typeof o.type === "string" ? o.type : o && typeof o.switch === "function" ? o.switch().name : "");
     const b = sim.transactionData;
@@ -449,7 +449,7 @@ function padVaultSlots(sim) {
         );
       }
       b.appendFootprint([], extra);
-      // Ek yazma kayitlari ve buyuyen islem icin ucret payi (kullanilmayan kismi ag geri verir).
+      // Fee margin for the extra write entries and the larger transaction (the network refunds what is not used).
       const fee = BigInt(String(g(b.build(), "resourceFee")));
       b.setResourceFee(Number(fee + BigInt(SPARE_VAULT_SLOTS) * 30_000n));
       return true;
@@ -460,8 +460,8 @@ function padVaultSlots(sim) {
   return false;
 }
 
-// Yeni surum yayinlandiysa acik kalan eski sayfa islem gondermez: eski sayfa eski kontrat adreslerini
-// kullanir (or. para eski kasaya gider). Derleme kimligi /version.json ile karsilastirilir.
+// If a new version was published, an old page left open sends no transactions: the old page uses the old contract
+// addresses (e.g. funds would go to the old vault). The build id is compared with /version.json.
 const BUILD_ID = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "";
 let staleSeen = false;
 async function staleBuild() {
@@ -476,7 +476,7 @@ async function staleBuild() {
       showStale();
     }
   } catch {
-    return false; // sorgu basarisizsa kullanici engellenmez
+    return false; // if the check fails the user is not blocked
   }
   return staleSeen;
 }
@@ -498,11 +498,11 @@ async function call(contractId, method, args, label, errors) {
     log(`${label}: this page is out of date. Reload it first (button at the top).`, "err");
     return null;
   }
-  // Cuzdan yanlis agdaysa imza istegi hic gonderilmez (cuzdan zaten reddeder); once uyari gosterilir.
+  // If the wallet is on the wrong network the signing request is not sent at all (the wallet would refuse anyway); a warning is shown first.
   if (me && setup.testnet === false) {
     const r = await currentNetworkOk();
-    // Bazi cuzdanlar agi degistirdikten sonra eski agi bildirmeye devam eder. Kullanicinin
-    // kilitlenmemesi icin ikinci denemede imza istegi yine de gonderilir; cuzdan son sozu soyler.
+    // Some wallets keep reporting the old network after it was changed. So that the user is not
+    // locked out, the signing request is sent anyway on the second attempt; the wallet has the last word.
     if (!r.ok && Date.now() - netBlockedAt > 90000) {
       netBlockedAt = Date.now();
       netGuard(false, r.name);
@@ -527,8 +527,8 @@ async function call(contractId, method, args, label, errors) {
     let tx = await buildCall(t.id, t.method, t.args);
     let sim = await server.simulateTransaction(tx);
     if (rpc.Api.isSimulationError(sim)) throw new Error(explain(sim.error, errors));
-    // Uzun sure dokunulmayan kayitlar ag tarafindan arsive alinir (denetim D-3). Simulasyon "once geri getir"
-    // diyorsa kullaniciya tek seferlik bir geri getirme islemi imzalatilir, sonra asil islem yeniden hazirlanir.
+    // Entries left untouched for a long time are archived by the network (audit D-3). If the simulation says "restore
+    // first", the user signs a one-off restore transaction, then the real transaction is prepared again.
     if (sim.restorePreamble && sim.restorePreamble.transactionData) {
       log(`${label}: this vault has not been used for a long time, so the network archived some of its records. First approve a one-time restore, then the ${esc(label.toLowerCase())} itself.`);
       const fee = String(Number(BASE_FEE) + Number(sim.restorePreamble.minResourceFee || 0));
@@ -550,7 +550,7 @@ async function call(contractId, method, args, label, errors) {
     return res;
   } catch (e) {
     const msg = String((e && e.message) || e);
-    // Kendi urettigimiz islem baglantisi korunur, geri kalan her sey kacislanir
+    // The transaction link we generate ourselves is kept; everything else is escaped
     const safe = esc(msg).replace(/&lt;a href=&quot;(https:\/\/stellar\.expert\/explorer\/[a-z]+\/tx\/[0-9a-f]{64})&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;([0-9a-f.…]+)&lt;\/a&gt;/g, '<a href="$1" target="_blank" rel="noopener">$2</a>');
     const hint = method === "create_vault" && !/reject|declin|cancel|Connect your wallet|busy/i.test(msg) ? " If many people open a vault at the same moment, one attempt can fail. Press the button again." : "";
     log(`${label}: ${safe}${hint}`, "err");
@@ -566,13 +566,13 @@ async function call(contractId, method, args, label, errors) {
   }
 }
 
-// Kullanicinin kurulum durumu (cuzdan, ag, bakiye...). Baska yerler buradan okur, or. setup.testnet.
+// The user's setup state (wallet, network, balance...). Other places read it from here, e.g. setup.testnet.
 const setup = {};
 function mark(key, done) {
   setup[key] = !!done;
 }
 
-// Rakam degisince eski degerden yenisine sayarak gecis
+// When a number changes, count from the old value to the new one
 const shown = {};
 function countTo(id, value, digits) {
   const node = $(id);
@@ -593,9 +593,9 @@ function countTo(id, value, digits) {
 }
 
 // ---------------------------------------------------------------------------
-// Cuzdan baglantisi
+// Wallet connection
 // ---------------------------------------------------------------------------
-// Coklu cuzdan: Stellar Wallets Kit kuruluysa xBull, Albedo, Lobstr, Freighter ve digerleri; yoksa yalnizca Freighter.
+// Multi-wallet: with Stellar Wallets Kit installed, xBull, Albedo, Lobstr, Varial and others; otherwise Varial (Freighter) only.
 let KIT = false;
 let useKit = false;
 if (StellarWalletsKit) {
@@ -609,7 +609,7 @@ if (StellarWalletsKit) {
 if (KIT) $("connect").textContent = "Connect wallet";
 
 // ---------------------------------------------------------------------------
-// Cuzdan menusu: sag ustteki adres butonuna tiklayinca profil ve "Disconnect"
+// Wallet menu: clicking the address button at the top right shows the profile and "Disconnect"
 // ---------------------------------------------------------------------------
 const DISC_KEY = "iora-disconnected";
 let walletName = "";
@@ -669,8 +669,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("wmenu") && !$("wmenu").hidden) toggleWalletMenu(false);
 });
 async function disconnectWallet() {
-  // Cuzdanlar sitelerin baglantiyi kendi tarafinda silmesine izin vermez; uygulama baglantiyi unutur
-  // ve kullanici tekrar "Connect" diyene kadar otomatik baglanmaz.
+  // Wallets do not let sites remove the connection on their side; the app forgets the connection
+  // and does not reconnect automatically until the user presses "Connect" again.
   try { localStorage.setItem(DISC_KEY, "1"); } catch {}
   try {
     if (useKit && StellarWalletsKit.disconnect) await StellarWalletsKit.disconnect();
@@ -680,8 +680,8 @@ async function disconnectWallet() {
 }
 
 // ---------------------------------------------------------------------------
-// Yanlis ag uyarisi: cuzdanlar sitelerin agi degistirmesine izin vermez (guvenlik kurali).
-// Bu yuzden buyuk bir uyari gosterilir ve kullanici Testnet'e gectigi an sayfa kendiliginden devam eder.
+// Wrong network warning: wallets do not let sites change the network (a security rule).
+// So a large warning is shown and the page continues by itself the moment the user switches to Testnet.
 // ---------------------------------------------------------------------------
 let netTimer = null;
 let netBlockedAt = 0;
@@ -792,7 +792,7 @@ async function connect() {
 }
 
 async function tryAutoConnect() {
-  // Kullanici "Disconnect" dediyse kendisi tekrar baglanana kadar otomatik baglanma
+  // If the user pressed "Disconnect", do not reconnect automatically until they connect again themselves
   try { if (localStorage.getItem(DISC_KEY)) return; } catch {}
   const inst = await isConnected();
   mark("freighter", !inst.error && inst.isConnected);
@@ -814,7 +814,7 @@ async function tryAutoConnect() {
   }
 }
 
-// Kullanici cuzdanda baska hesaba gecerse sayfa eski hesapla kalmasin (imza baska anahtarla istenirdi).
+// If the user switches to another account in the wallet the page must not stay on the old one (the signature would be requested from a different key).
 let accountTimer = null;
 function watchAccount() {
   if (accountTimer || useKit) return;
@@ -832,25 +832,25 @@ function watchAccount() {
 }
 
 // ---------------------------------------------------------------------------
-// Ekran yenileme
+// Screen refresh
 // ---------------------------------------------------------------------------
-let marketPrice = null; // 1 XLM kac USDC
-const LADDER = { on: false, n: 5, dist: "flat" }; // kademeli (scaled) alim: emir sayisi ve tutar dagilimi
-let freeUnits = null; // kasada kullanilabilir USDC (7 ondalik)
+let marketPrice = null; // how many USDC for 1 XLM
+const LADDER = { on: false, n: 5, dist: "flat" }; // scaled buy: number of orders and how the amount is spread
+let freeUnits = null; // USDC available in the vault (7 decimals)
 let reservedUnits = null;
 let balanceUnits = null;
 let openOrders = [];
-const orderTimes = {}; // emir no -> { placed, ended } (saniye)
-let waitEarned = 0; // emirlerin beklerken kazandigi tahmini faiz
-let supplyApr = null; // Blend USDC tahmini yillik faiz (0.05 = %5)
-let walletUsdc = null; // cuzdandaki USDC
-let walletXlm = null; // cuzdandaki islem coini (XLM ciftinde XLM)
-let walletNative = null; // cuzdandaki XLM (ag ucretleri)
+const orderTimes = {}; // order id -> { placed, ended } (seconds)
+let waitEarned = 0; // estimated interest the orders earned while waiting
+let supplyApr = null; // estimated yearly interest on Blend USDC (0.05 = 5%)
+let walletUsdc = null; // USDC in the wallet
+let walletXlm = null; // the traded coin in the wallet (XLM for the XLM pair)
+let walletNative = null; // XLM in the wallet (network fees)
 
-// 7 ondalikli tamsayiyi duz metne cevirir (input icin, binlik ayraci yok)
-// Kontrat, acik emir varken serbest bakiyeden 100 birimlik (0,00001) yuvarlama payi ayirir. Ilk emir
-// bakiyenin tamamini ayirirsa sonraki emir (or. kademeli emrin son adimi) bu kadar eksik kalip reddedilir;
-// bu yuzden emir icin "Max" ve kademeli emirler payi bastan birakir.
+// turns a 7-decimal integer into plain text (for inputs, no thousands separator)
+// With open orders the contract keeps a rounding margin of 100 units (0.00001) out of the free balance. If the
+// first order reserves the whole balance, the next one (e.g. the last step of a scaled order) falls short by that
+// much and is rejected; so "Max" for an order and scaled orders leave the margin from the start.
 const ROUNDING_BUFFER = 10_000n;
 function orderRoom(free, reservedNone) {
   if (free === null) return null;
@@ -858,7 +858,7 @@ function orderRoom(free, reservedNone) {
 }
 const buyRoom = () => orderRoom(freeUnits, reservedUnits === 0n);
 const sellRoom = () => orderRoom(SV.free, SV.bal !== null && SV.free === SV.bal);
-/** Tutar, kullanilabilir alanin en fazla payin kadar ustundeyse (Max ile girilmis) paya indirilir. */
+/** If the amount is above the usable room by at most the margin (entered with Max) it is lowered to the room. */
 const fitRoom = (amount, free, room) => (room !== null && free !== null && amount > room && amount <= free ? room : amount);
 
 function toPlain(units) {
@@ -880,7 +880,7 @@ function updateTicket() {
   $("receive").textContent = out ? out.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "0";
   if (document.activeElement !== $("oqty")) $("oqty").value = out ? String(Number(out.toFixed(XB && out < 1 ? 7 : 2))) : "";
   ticketExtras();
-  // Emir ozeti: duz dille ne olacak
+  // Order summary: what will happen, in plain language
   const box = $("preview");
   if (LADDER.on) {
     box.hidden = !scale;
@@ -942,12 +942,12 @@ function updateTicket() {
   $("preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
 }
 
-// Aciklama baloncugu
+// Tooltip
 function tip(text) {
   return `<i class="tip" tabindex="0" data-tip="${text.replace(/"/g, "&quot;")}">i</i>`;
 }
 
-// Paranin nerede durdugu: kullanilabilir / emirlerde, ve duz dille ozet
+// Where the money is: available / in orders, and a plain-language summary
 function renderAlloc() {
   const box = $("alloc");
   if (balanceUnits === null || freeUnits === null || reservedUnits === null || balanceUnits <= 0n) {
@@ -980,7 +980,7 @@ function renderAlloc() {
     (waitEarned > 0 ? ` While waiting for their price, your orders have earned about <b>${waitEarned.toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC</b> so far.` : "");
 }
 
-// Acik emirlerin fiyat cetvelindeki yeri
+// Where the open orders sit on the price scale
 function renderLadder() {
   const el = $("ladder");
   if (!openOrders.length || !marketPrice) {
@@ -1007,7 +1007,7 @@ function renderLadder() {
     <p class="fine">The shaded part is how far the price still has to fall. Orders fill from the top down as the price drops.</p>`;
 }
 
-// Blend havuzu: kullanim orani ve tahmini faiz (Blend faiz modeli)
+// Blend pool: utilisation and estimated interest (Blend's interest model)
 async function readPool() {
   try {
     const [r, pc] = await Promise.all([read(C.pool, "get_reserve", [addr(C.usdc)]), read(C.pool, "get_config")]);
@@ -1045,16 +1045,16 @@ function syncDays() {
   for (const c of document.querySelectorAll("#days-chips [data-days]")) c.setAttribute("aria-pressed", String(c.dataset.days === d));
 }
 
-// Cuzdan/alim kasasi ekranini yeniler; satis sayfasi aciksa onu da (cuzdan bakiyesi buradan gelir).
-// ---- Nesiller: kullanici parasinin durdugu kasada kalir ----
-// Yeni fabrika kuruldugunda eski kasalar calismaya devam eder. Parayi kullanicinin yerine kimse tasiyamaz
-// (kasadan yalnizca sahibi cekebilir), bu yuzden tasimaya zorlamak yerine uygulama kullanicinin parasinin
-// durdugu nesli kullanir: ayni cagri imzalarina sahip fabrika ciftleri VITE_GENERATIONS'ta (alim:satis,
-// yeniden eskiye) listelenir. Hicbir nesilde parasi olmayan kullanici en yeni nesilde baslar.
+// Refreshes the wallet/buy vault screen; and the sell page too if it is open (the wallet balance comes from here).
+// ---- Generations: the user stays in the vault where their funds are ----
+// When a new factory is deployed the old vaults keep working. Nobody can move the funds for the user (only the
+// owner can withdraw from a vault), so instead of forcing a move the app uses the generation where the user's
+// funds are: factory pairs with the same call signatures are listed in VITE_GENERATIONS (buy:sell,
+// newest first). A user with funds in no generation starts in the newest one.
 const GEN_LATEST = { buy: C.factory, sell: SV.factory };
-/** Surum 7'de fabrikadan okunan kasa adresi, tarafina gore tutamaca cevrilir (eski nesillerde duz adres kalir). */
-// Tek kasali fabrika: en yeni fabrika ya da nesiller listesinde alim ve satim adresi AYNI olan fabrika
-// (surum 7 birden fazla kez kurulduysa oncekiler de tek kasalidir ve ayni sekilde konusulur).
+/** In version 7 the vault address read from the factory is turned into a handle for its side (older generations keep the plain address). */
+// Single-vault factory: the newest factory, or one in the generations list whose buy and sell address are the SAME
+// (if version 7 was deployed more than once, the earlier ones are single-vault too and are spoken to the same way).
 const isV7Factory = (f) => V7 && !!f && (f === GEN_LATEST.buy || GENERATIONS.some((g) => g.buy === f && g.sell === f));
 const wrapBuy = (a, f = C.factory) => (!a ? null : isV7Factory(f) ? H(String(a), C.usdc, BASE.addr) : String(a));
 const wrapSell = (a, f = SV.factory) => (!a ? null : isV7Factory(f) ? H(String(a), BASE.addr, C.usdc) : String(a));
@@ -1093,12 +1093,12 @@ async function pickGeneration() {
       if (i > 0) pick = GENERATIONS[i];
     } catch (e) {
       console.warn("generation lookup failed", e);
-      return; // okunamadiysa bu turda varsayilan kalir, sonraki yenilemede yeniden denenir
+      return; // if it could not be read the default stays for this round and it is tried again on the next refresh
     }
   }
   if (who !== me) return;
   genFor = who;
-  // Parasi eski (iki kasali) nesilde duran kullanici yalnizca XLM / USDC islem yapabilir
+  // A user whose funds are in an old (two-vault) generation can only trade XLM / USDC
   if (XB && !isV7Factory(pick.buy)) return setBase("XLM");
   if (pick === GEN) return;
   const onHome = SV.factory === SV.home;
@@ -1108,7 +1108,7 @@ async function pickGeneration() {
   if (onHome) SV.factory = pick.sell;
 }
 
-// Surum 7: "satis kasasi ac" kutusu tek kasayi anlatir (ayni kasa alim tarafinda da kullanilir).
+// Version 7: the "open a sell vault" box describes the single vault (the same vault is used on the buy side too).
 if (V7) {
   const box = $("sv-none");
   const h = box && box.querySelector("h2");
@@ -1118,9 +1118,9 @@ if (V7) {
   const btn = $("sv-create");
   if (btn) btn.textContent = "Open my vault";
 }
-// Surum 7'de "alim kasasi" ve "satis kasasi" diye iki sey yok: tek kasa var. Arayuzun metinleri yillardir iki
-// kasaya gore yazildi ve onlarca yere dagilmis durumda; tek tek kosullamak yerine, tek kasa kullanilirken ekrana
-// yazilan her metinde "buy vault / sell vault" ifadesi "vault"a cevrilir (yeni eklenen metinler dahil).
+// Version 7 has no "buy vault" and "sell vault": there is one vault. The app's texts were written for two vaults
+// and are spread over dozens of places; instead of adding conditions one by one, while a single vault is in use
+// every text put on screen has "buy vault / sell vault" turned into "vault" (texts added later included).
 const ONE_VAULT_RE = /\b(?:sell|buy) vault/i;
 const oneVaultFix = (t) => t.replace(/\b(?:sell|buy) vault(s?)\b/g, "vault$1").replace(/\b(?:Sell|Buy) vault(s?)\b/g, "Vault$1");
 function oneVaultText(root) {
@@ -1140,7 +1140,7 @@ function oneVaultText(root) {
     }
   }
 }
-/** Kullanici tek kasali bir fabrikada mi? (Parasi eski, iki kasali bir nesilde duruyorsa metinler degismez.) */
+/** Is the user in a single-vault factory? (If their funds are in an old two-vault generation the texts do not change.) */
 const oneVault = () => V7 && isV7Factory(C.factory);
 if (V7) {
   new MutationObserver((muts) => {
@@ -1153,7 +1153,7 @@ if (V7) {
   if (oneVault()) oneVaultText(document.body);
 }
 
-// XLM disinda bir coin secili: sayfadaki sabit metinler o coine gore yazilir, Blend ile ilgili kutular gizlenir.
+// A coin other than XLM is selected: the fixed texts on the page are written for that coin and the Blend boxes are hidden.
 if (XB) {
   document.body.classList.add("xbase");
   const fix = (t) =>
@@ -1176,7 +1176,7 @@ if (XB) {
     }
     for (const c of root.querySelectorAll("i.coin.xlm")) c.className = "coin other";
   }
-  // Zarar kes Blend oracle'ina bakar; bu coinlerin oracle fiyati yok
+  // A stop loss looks at the Blend oracle; these coins have no oracle price
   const sl = document.querySelector('#sv-type [data-type="sl"]');
   if (sl) sl.hidden = true;
   for (const el of document.querySelectorAll('[data-view-pane="sell"] .tb-stat, [data-view-pane="sell"] .tb-earn')) {
@@ -1196,7 +1196,7 @@ if (XB) {
   }
 }
 
-/** Surum 7 gorunumu: tek kasa basliklari ve "cikti kasada kalsin" secenegi. */
+/** Version 7 look: single-vault headings and the "keep the output in the vault" option. */
 function v7Chrome() {
   const on = !!(sideOf(vault) || sideOf(SV.vault));
   document.body.classList.toggle("v7", on);
@@ -1219,7 +1219,7 @@ for (const id of ["keep-on", "keep-on-sell"]) {
         localStorage.setItem("iora-keep", KEEP.on ? "1" : "0");
       } catch {}
       v7Chrome();
-      // Onizlemeler "nereye gider" cumlesini yeniden yazsin
+      // Make the previews rewrite the "where it goes" sentence
       for (const f of ["olimit", "sv-px"]) $(f)?.dispatchEvent(new Event("input", { bubbles: true }));
     };
 }
@@ -1227,7 +1227,7 @@ for (const id of ["keep-on", "keep-on-sell"]) {
 async function refresh() {
   await pickGeneration();
   await refreshBuy();
-  if (location.hash === "#sell" || location.hash === "#portfolio") await refreshSell(); // Portfolio satis kasasi kartini da gosterir
+  if (location.hash === "#sell" || location.hash === "#portfolio") await refreshSell(); // Portfolio also shows the sell vault card
   if (vault && V3.buy === null) V3.buy = await isV3(vault);
   $("autosell-row").hidden = !(V3.buy && SV.factory);
   renderPortfolio();
@@ -1236,15 +1236,15 @@ async function refresh() {
 }
 
 // ---------------------------------------------------------------------------
-// Surum 3 kasalari: zarar kes (tetikli emir) ve "al, sonra otomatik sat" (zincirleme emir)
+// Version 3 vaults: stop loss (triggered order) and "buy, then sell automatically" (follow-up order)
 // ---------------------------------------------------------------------------
 const V3 = { buy: null, sell: null };
-/** Kasa surum 3 mu? (Eski kasalarda get_feeder yoktur, okuma basarisiz olur.) */
+/** Is the vault version 3? (Older vaults have no get_feeder; the read fails.) */
 async function isV3(v) {
   const r = await read(v, "get_feeder");
   return r.ok;
 }
-const AUTO = { px: 0n }; // kar al: alim dolunca satis kasasinda acilacak emrin fiyati (USDC, 7 ondalik); 0 = kapali
+const AUTO = { px: 0n }; // take profit: price of the order opened in the sell vault when the buy fills (USDC, 7 decimals); 0 = off
 $("tp-px").addEventListener("input", () => {
   let v = 0n;
   try {
@@ -1254,17 +1254,17 @@ $("tp-px").addEventListener("input", () => {
   updateTicket();
 });
 const AUTO_DAYS = 30;
-/** Kar al fiyati -> satis kasasindaki emrin limiti (satis kasasi birimi: 1 USDC icin XLM). */
+/** Take profit price -> limit of the order in the sell vault (sell vault unit: XLM for 1 USDC). */
 function autoSellLimit() {
   return { px: AUTO.px, lim: sellLimit(AUTO.px) };
 }
-/** Kar al fiyati alim fiyatinin ustunde mi? (Kontrat da ayni sarti arar.) Degilse nedenini soyler. */
+/** Is the take profit price above the buy price? (The contract requires the same.) If not, says why. */
 function autoOk(buyLimit) {
   if (!AUTO.px || AUTO.px > buyLimit) return true;
   log(`The take profit price must be above your buy price (${fmt(buyLimit)} USDC). Raise it or clear the field.`, "err");
   return false;
 }
-/** Satis kasasini hazirlar: yoksa acar, alim kasasindan gelen parayi kabul etmesi icin izin verir. */
+/** Prepares the sell vault: opens it if missing and allows it to accept funds from the buy vault. */
 async function ensureFeeder() {
   let sv = await sellVaultOf();
   if (!sv) {
@@ -1290,10 +1290,10 @@ function autoRows(limit) {
   return [["Take profit", `sell at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (+${up.toFixed(1)}%, ${AUTO_DAYS} days)`]];
 }
 
-// ---- Eski surum kasalar: kullanici parasini tek tikla cuzdanina alabilsin ----
+// ---- Old-version vaults: let the user take their funds to the wallet in one click ----
 const OLD_FACTORIES = String(import.meta.env.VITE_OLD_FACTORIES || "").split(",").map((s) => s.trim()).filter(Boolean);
-const LEGACY_DUST = 100_000n; // 0,01 token
-/** Portfolio: eski kasada duran para asagidaki toplamlara girmez; kullanici "param yok" sanmasin. */
+const LEGACY_DUST = 100_000n; // 0.01 token
+/** Portfolio: funds in an old vault are not in the totals below; the user must not think "my money is gone". */
 function pfLegacyNote(items) {
   const host = $("pfolio");
   if (!host) return;
@@ -1313,16 +1313,16 @@ function pfLegacyNote(items) {
 async function renderLegacy() {
   const box = $("legacy");
   if (!OLD_FACTORIES.length || !me) return ((box.innerHTML = ""), (box.hidden = true));
-  // Eski fabrikalar ayni anda sorulur (sirayla beklemek acilisi uzatir)
+  // Old factories are queried at the same time (waiting in turn makes opening slower)
   const found = await Promise.all(
-    // Kullanicinin su an kullandigi nesil "eski" sayilmaz
+    // The generation the user is using now does not count as "old"
     OLD_FACTORIES.filter((f) => f !== GEN.buy && f !== GEN.sell).map(async (f) => {
       const r = await read(f, "vault_of", [addr(me)]);
       if (!(r.ok && r.value)) return null;
       const v = String(r.value);
       const [cf, bal, open] = await Promise.all([read(v, "get_config"), read(v, "balance"), openOrdersIn(v)]);
       const b = bal.ok ? BigInt(bal.value) : 0n;
-      // Cekim ile islem arasinda birikmis kirinti faiz (0,01'in alti) gosterilmez
+      // Dust interest accrued between withdrawing and execution (below 0.01) is not shown
       if (b < LEGACY_DUST && !open.length) return null;
       const tok = cf.ok && String(cf.value.usdc) === C.xlm ? "XLM" : "USDC";
       return { v, b, open: open.length, tok };
@@ -1360,7 +1360,7 @@ async function renderLegacy() {
   for (const b of box.querySelectorAll("[data-migrate]")) b.onclick = () => migrateLegacy(b.dataset.migrate, b.dataset.tok);
 }
 
-/** Eski alim kasasi yalnizca Buy vault sekmesinde, eski satis kasasi yalnizca Sell vault sekmesinde gorunur. */
+/** The old buy vault shows only on the Buy vault tab, the old sell vault only on the Sell vault tab. */
 function syncLegacy() {
   const box = $("legacy");
   if (!box) return;
@@ -1373,7 +1373,7 @@ function syncLegacy() {
   box.hidden = shown === 0;
 }
 
-/** Eski kasa: emirleri iptal et + tamamini cek. Cuzdana gelen miktari dondurur (basarisizsa null). */
+/** Old vault: cancel the orders + withdraw everything. Returns the amount that reached the wallet (null on failure). */
 async function drainLegacy(v, tok) {
   for (const o of await openOrdersIn(v)) if (!(await call(v, "cancel_order", [u32(o.id)], `Cancel old order #${o.id}`, VAULT_ERRORS))) return null;
   const token = tok === "XLM" ? C.xlm : C.usdc;
@@ -1402,14 +1402,14 @@ async function emptyLegacy(v, tok) {
   await refresh();
 }
 
-/** Eski kasadan yeni kasaya: iptal + cek + (gerekirse yeni kasa ac) + yatir. */
+/** From the old vault to the new one: cancel + withdraw + (open a new vault if needed) + deposit. */
 async function migrateLegacy(v, tok) {
   const sell = tok === "XLM";
   const factory = sell ? SV.factory : C.factory;
   if (!factory) return log("The new vault is not available yet.", "err");
   const open = await openOrdersIn(v);
   const nowS = Math.floor(Date.now() / 1000);
-  const carry = open.filter((o) => o.expiry > nowS + 120); // suresi dolmus emirler tasinmaz
+  const carry = open.filter((o) => o.expiry > nowS + 120); // expired orders are not moved
   const bal = await read(v, "balance");
   const amt = bal.ok ? BigInt(bal.value) : 0n;
   const target = sell ? await sellVaultOf() : vault;
@@ -1448,7 +1448,7 @@ async function migrateLegacy(v, tok) {
     }
     if (sell) SV.vault = dest;
   }
-  // XLM'de cuzdanda ag ucretleri icin en az 5 XLM kalsin
+  // for XLM, leave at least 5 XLM in the wallet for network fees
   let dep = got;
   if (sell && walletXlm !== null) {
     const w = await read(C.xlm, "balance", [addr(me)]);
@@ -1458,7 +1458,7 @@ async function migrateLegacy(v, tok) {
   if (dep > 0n) {
     const ok = await call(dest, "deposit", [i128(dep)], `Deposit ${fmt(dep, 2)} ${tok} into your new vault`, sell ? SELL_ERRORS : VAULT_ERRORS);
     if (!ok) return refresh();
-    // Emirleri ayni fiyat, kalan tutar ve bitis tarihiyle yeni kasada yeniden ac
+    // Reopen the orders in the new vault with the same price, remaining amount and end date
     let placed = 0;
     for (const [i, o] of carry.entries()) {
       const room = (await roomIn(dest)) ?? o.leftU;
@@ -1484,9 +1484,9 @@ async function migrateLegacy(v, tok) {
   if (sell) await refreshSell();
 }
 
-// Portfoy ozeti: iki kasa birden varsa toplam bakiye, toplam faiz (USDC karsiligi) ve acik emirler
+// Portfolio summary: with both vaults, the total balance, total interest (in USDC) and open orders
 let homeSell = { me: null, v: null };
-/** Varsayilan (XLM -> USDC) satis kasasi; ek pazar acikken de bunu verir. */
+/** The default (XLM -> USDC) sell vault; returned even while an extra market is open. */
 async function homeSellVault() {
   if (!SV.home || !me) return null;
   if (homeSell.me === me && homeSell.v) return homeSell.v;
@@ -1494,7 +1494,7 @@ async function homeSellVault() {
   homeSell = { me, v: r.ok && r.value ? wrapSell(r.value, SV.home) : null };
   return homeSell.v;
 }
-/** Portfolio sayfasi: iki kasanin toplami, emirlere bagli kisim, kazanilan faiz ve acik emirler. Yalnizca sayfa acikken okur. */
+/** Portfolio page: the two vaults' total, the part tied to orders, interest earned and open orders. Reads only while the page is open. */
 let pfBusy = false;
 async function renderPortfolio() {
   const box = $("pfolio");
@@ -1523,7 +1523,7 @@ async function renderPortfolio() {
       SV.apr === null ? readXlmPool() : null,
     ]);
     if (who !== me) return;
-    // Tek kasa: secili cift disindaki coinler de ayni kasada durur; onlar da listelenir ve toplama katilir.
+    // Single vault: coins other than the selected pair sit in the same vault; they are listed and added to the total too.
     let others = [];
     const rv = sideOf(vault) || sideOf(sv);
     if (rv && PAIRS.length) {
@@ -1604,7 +1604,7 @@ async function renderPortfolio() {
 async function refreshBuy() {
   if (!me) return;
   await pickGeneration();
-  // Hesap kontrolu ve ilk okumalar ayni anda: her RPC turu beklemeye eklenir.
+  // Account check and the first reads at the same time: every RPC round adds to the wait.
   const [acct, xlmBal, usdcBal, q, vaultOf, baseBal] = await Promise.all([
     server.getAccount(me).then(() => true, () => false),
     read(C.xlm, "balance", [addr(me)]),
@@ -1613,8 +1613,8 @@ async function refreshBuy() {
     read(C.factory, "vault_of", [addr(me)]),
     XB ? read(BASE.addr, "balance", [addr(me)]) : null,
   ]);
-  // SDK, hesap okunamayan her durumu (ag hatasi dahil) "Account not found" diye bildirir. Cuzdanda XLM gorunuyorsa
-  // hesap vardir: yanlislikla "bu cuzdan testnet'te yok" denmez.
+  // The SDK reports every case where the account cannot be read (network errors included) as "Account not found". If
+  // the wallet shows XLM the account exists: it must not say "this wallet is not on testnet" by mistake.
   const exists = acct || (xlmBal.ok && BigInt(xlmBal.value) > 0n);
   if (!exists) {
     mark("funded", false);
@@ -1639,7 +1639,7 @@ async function refreshBuy() {
       <dt>${BS}</dt><dd>${baseBal && baseBal.ok ? fmt(baseBal.value, 4) : "0"}</dd>` : ""}
     </dl>`;
   walletNative = xlmBal.ok ? BigInt(xlmBal.value) : 0n;
-  // walletXlm = islem goren coinin cuzdandaki bakiyesi (XLM ciftinde XLM'in kendisi)
+  // walletXlm = the wallet's balance of the traded coin (XLM itself for the XLM pair)
   walletXlm = XB ? (baseBal && baseBal.ok ? BigInt(baseBal.value) : 0n) : walletNative;
   renderWalletHints();
   renderFaucet(true, hasTrust);
@@ -1677,7 +1677,7 @@ async function refreshBuy() {
     read(vault, "free_balance"),
     read(vault, "stats"),
   ]);
-  // Omur boyu faiz = bakiye + cekilen + harcanan - yatirilan
+  // Lifetime interest = balance + withdrawn + spent - deposited
   let earned = null;
   if (bal.ok && st.ok && st.value) {
     const v = st.value;
@@ -1709,8 +1709,8 @@ async function refreshBuy() {
       log(`Vault address: ${vault}`);
     }
   };
-  // Once emirler; islem gecmisi (olaylar) ve ozet arkadan gelir, ekran onlari beklemez. Gecmis gelince
-  // "beklerken kazanilan" sutunu emirleri yeniden okumadan guncellenir.
+  // Orders first; the transaction history (events) and the summary follow, the screen does not wait for them. When
+  // the history arrives the "earned while waiting" column is updated without reading the orders again.
   await renderOrders();
   const v0 = vault;
   renderHistory()
@@ -1719,7 +1719,7 @@ async function refreshBuy() {
   renderSummary(st.ok ? st.value : null).catch((e) => console.warn("summary", e));
 }
 
-// Fiyat iskelesi: piyasa fiyati ile limit arasindaki mesafeyi gosterir.
+// Price ladder: shows the distance between the market price and the limit.
 function updateGauge() {
   const g = $("gauge");
   const limit = Number(String($("olimit").value).trim().replace(",", "."));
@@ -1786,7 +1786,7 @@ const EVENT_LABEL = {
 async function renderHistory() {
   const events = await fetchVaultEvents();
   const items = [];
-  // Surum 7: ayni kasada iki tarafin olaylari birlikte gelir; bu listede yalnizca bu tarafinkiler gosterilir.
+  // Version 7: events of both sides arrive together in the same vault; this list shows only this side's.
   const side = sideOf(vault);
   const own = side ? new Set((await readOrders(vault)).map((o) => o.id)) : null;
   for (const ev of events) {
@@ -1802,7 +1802,7 @@ async function renderHistory() {
       }
       const data = scValToNative(ev.value);
       const when = ev.ledgerClosedAt ? new Date(ev.ledgerClosedAt).toLocaleString("en-US") : "";
-      // Emir zamanlari: bekleme suresince kazanilan faiz tahmini icin
+      // Order times: for estimating the interest earned while waiting
       const ts = ev.ledgerClosedAt ? Date.parse(ev.ledgerClosedAt) / 1000 : null;
       const oid = topics[1] !== undefined ? Number(topics[1]) : null;
       if (ts && oid !== null) {
@@ -1817,10 +1817,10 @@ async function renderHistory() {
     : `<p class="muted">No activity yet. (The network keeps the last few days of events.)</p>`;
 }
 
-// Dolmus veya iptal edilmis emir bir daha degismez: her yenilemede yeniden okunmaz (RPC yuku emir sayisiyla
-// birlikte buyumesin). Acik emirler her seferinde zincirden okunur.
-const doneOrders = new Map(); // "kasa:no" -> emir
-const doneFollowUps = new Map(); // "kasa:no" -> otomatik satis ayari (veya null)
+// A filled or cancelled order never changes again: it is not read again on every refresh (the RPC load must not
+// grow with the number of orders). Open orders are read from the chain every time.
+const doneOrders = new Map(); // "vault:id" -> order
+const doneFollowUps = new Map(); // "vault:id" -> automatic sell setting (or null)
 const orderStatus = (o) => (Array.isArray(o.status) ? o.status[0] : o.status?.tag || String(o.status));
 async function readOrders(v) {
   const cnt = await read(v, "order_count");
@@ -1839,7 +1839,7 @@ async function readOrders(v) {
   return rows;
 }
 
-let lastOrders = null; // { v, rows, fus }: son okunan emirler (yeniden okumadan cizmek icin)
+let lastOrders = null; // { v, rows, fus }: the orders last read (to draw without reading again)
 async function renderOrders() {
   const rows = await readOrders(vault);
   if (rows.length === 0) {
@@ -1852,7 +1852,7 @@ async function renderOrders() {
     tradeLinesSoon();
     return;
   }
-  // Surum 3: "al, sonra otomatik sat" ayarli emirler
+  // Version 3: orders with the "buy, then sell automatically" setting
   const fus = new Map();
   if (V3.buy) {
     await Promise.all(
@@ -1903,7 +1903,7 @@ function paintOrders() {
       const left = Number(o.expiry) - now;
       const exp =
         status !== "Open" ? "—" : expired ? "Ended" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
-      // Bekleme faizi (tahmini): bugunku Blend oraniyla, emir verildigi andan doldugu/iptal edildigi ana kadar
+      // Waiting interest (estimate): at today's Blend rate, from when the order was placed until it filled or was cancelled
       const times = orderTimes[o.id] || {};
       let waitCell = `<span class="muted">—</span>`;
       if (supplyApr !== null && !times.placed && status === "Open") {
@@ -1946,7 +1946,7 @@ function paintOrders() {
 }
 
 // ---------------------------------------------------------------------------
-// Kullanici islemleri
+// User actions
 // ---------------------------------------------------------------------------
 async function addTrustline() {
   if (busy) return;
@@ -2006,7 +2006,7 @@ async function withdraw() {
     const f = await read(vault, "free_balance");
     if (!f.ok || BigInt(f.value) <= 0n) return log("No available balance to withdraw.", "err");
     n = BigInt(f.value);
-    // Surum 4: "tamamini cek" ozel degeri, imza ile islem arasinda biriken faizi de alir.
+    // Version 4: the "withdraw everything" special value also takes interest that accrued between signing and execution.
     if (V4) return void (await call(vault, "withdraw", [i128(I128_MAX)], `Withdraw all available (${fmt(n)} USDC)`, VAULT_ERRORS));
   } else {
     n = toUnitsSafe($("wdamount").value);
@@ -2015,11 +2015,11 @@ async function withdraw() {
   await call(vault, "withdraw", [i128(n)], `Withdraw ${fmt(n)} USDC`, VAULT_ERRORS);
 }
 
-/** Havuz korumasi: yatirma ya da emir, havuzun o an odeyebilecegi tutara ve kullanim sinirina gore denetlenir. */
+/** Pool guard: a deposit or order is checked against what the pool can pay out at that moment and the utilisation limit. */
 /**
- * Havuz uyarisi (eskiden engeldi; kullanici karari 15.11.2026: diger platformlar gibi engelleme, yalnizca bilgi ver).
- * Islem havuzda o an odenebilir tutarin dortte birini asiyorsa ya da havuz cok doluysa kullaniciya not dusulur;
- * islem her zaman devam eder (true doner). Havuzda nakit yoksa cekim ve dolum zaten kontratta bekler.
+ * Pool warning (it used to block; user decision 15 Nov 2026: do not block, like other platforms, only inform).
+ * If the action is above a quarter of what the pool can pay out at that moment, or the pool is very full, the user gets a note;
+ * the action always goes ahead (returns true). If the pool has no cash, withdrawals and fills wait in the contract anyway.
  */
 function poolGuard(sym, units, what) {
   const p = POOLSTAT[sym];
@@ -2043,7 +2043,7 @@ function paintPoolNotes() {
   }
 }
 
-/** Bir kasada yeni emre ayrilabilir tutar (surum 4: orderable_balance; eski kasada free_balance). */
+/** Amount that can be reserved for a new order in a vault (version 4: orderable_balance; free_balance in old vaults). */
 async function roomIn(v) {
   let r = V4 ? await read(v, "orderable_balance") : { ok: false };
   if (!r.ok) r = await read(v, "free_balance");
@@ -2079,7 +2079,7 @@ async function placeOrder({ single = false } = {}) {
     return placeLadder(amount, limit, limit2, bps, impactPct, expiry);
   }
 
-  // Onay penceresi: cozumlenmis rakamlardan uretilir.
+  // Confirmation dialog: built from the parsed numbers.
   const lim = Number(limit) / 1e7;
   const rows = [
     ["You spend", `${fmt(amount, 2)} USDC`],
@@ -2138,7 +2138,7 @@ async function cancelOrder(id) {
 
 
 // ---------------------------------------------------------------------------
-// Baslat
+// Start
 // ---------------------------------------------------------------------------
 $("connect").onclick = (e) => {
   if (me) {
@@ -2157,7 +2157,7 @@ $("withdraw").onclick = withdraw;
 $("place").onclick = placeOrder;
 $("refresh").onclick = refresh;
 $("status").onclick = () => $("status").classList.remove("show");
-// Para yatir / cek sekmeleri ve emir filtresi
+// Deposit / withdraw tabs and the order filter
 for (const t of document.querySelectorAll("[data-tab]")) {
   t.onclick = () => {
     const box = t.closest("[data-tabs]");
@@ -2165,7 +2165,7 @@ for (const t of document.querySelectorAll("[data-tab]")) {
     for (const p of box.querySelectorAll("[data-pane]")) p.hidden = p.dataset.pane !== t.dataset.tab;
   };
 }
-// Emir karti: hizli limit, sure secimi, en fazla, alinacak asgari XLM
+// Order card: quick limit, lifetime choice, maximum, minimum XLM to receive
 for (const c of document.querySelectorAll("#limit-chips [data-pct]")) {
   c.onclick = () => {
     if (!marketPrice) return log("Market price is not loaded yet.", "err");
@@ -2207,7 +2207,7 @@ function walletDepositable(which) {
 }
 /** Opens the vault's Deposit tab on the Portfolio page; with an amount, fills it in. */
 function openDeposit(which, amount = null) {
-  location.hash = "portfolio"; // kasa kartlari (bakiye, yatirma, cekme) Portfolio sayfasinda
+  location.hash = "portfolio"; // the vault cards (balance, deposit, withdraw) are on the Portfolio page
   setTimeout(() => {
     const tab = document.querySelector(`.vtabs [data-tab="${which}"]`);
     if (!tab) return;
@@ -2242,21 +2242,21 @@ function renderWalletHints() {
 $("oamount").addEventListener("input", updateTicket);
 $("olimit").addEventListener("input", updateTicket);
 
-// Uygulama ici sayfalar (#vault, #sell, #lend, #swap, #faucet)
+// In-app pages (#vault, #sell, #lend, #swap, #faucet)
 function showView() {
   const h = location.hash.slice(1);
   const views = ["vault", "lend", "faucet", "portfolio"];
-  if (SV.factory) views.push("sell"); // satis fabrikasi yoksa #sell alim sayfasina duser
-  // "#sell:BTC" = ek pazar (XLM -> BTC); satis sayfasinin ayni arayuzu o pazarin fabrikasiyla calisir
+  if (SV.factory) views.push("sell"); // without a sell factory #sell falls back to the buy page
+  // "#sell:BTC" = extra market (XLM -> BTC); the sell page's same interface works with that market's factory
   const xm = h.startsWith("sell:") ? EXTRA_MARKETS.find((m) => m.sym === h.slice(5)) : null;
-  const v = xm ? "sell" : views.includes(h) ? h : h === "sell" ? "vault" : "markets"; // adres bossa ilk sayfa: Markets
-  // Sayfa ilk acilirken dosyanin geri kalani henuz calismamistir: pazar degisimi bir sonraki adima birakilir
+  const v = xm ? "sell" : views.includes(h) ? h : h === "sell" ? "vault" : "markets"; // with an empty address the first page is Markets
+  // On first load the rest of the file has not run yet: the market switch is left for the next step
   queueMicrotask(() => {
     if (setSellMarket(xm ? xm.sym : null) && me) refreshSell();
   });
   for (const p of document.querySelectorAll("[data-view-pane]")) p.hidden = p.dataset.viewPane !== v;
   for (const a of document.querySelectorAll("[data-view]")) {
-    // "Trade" sekmesi hem alim hem satis sayfasinda secili gorunur (data-also)
+    // The "Trade" tab shows as selected on both the buy and the sell page (data-also)
     if (a.dataset.view === v || a.dataset.also === v) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
@@ -2264,7 +2264,7 @@ function showView() {
   syncLegacy();
   if (v === "lend" && me) loadLend();
   if (v === "portfolio") renderPortfolio();
-  queueMicrotask(tradeSync); // pazar degisiminden sonra: grafik ve derinlik o pazara gecer
+  queueMicrotask(tradeSync); // after a market switch: the chart and depth move to that market
 }
 window.addEventListener("hashchange", showView);
 showView();
@@ -2278,7 +2278,7 @@ $("olimit").addEventListener("input", updateGauge);
 
 if (!C.factory || !C.usdc) log("Missing settings: web/.env.local not found. Start with web/dev.sh.", "err");
 tryAutoConnect();
-// Sekme arka plandayken de alim dolumlari yakalanir (bildirim icin); tam yenileme yalnizca sayfa gorunurken.
+// Buy fills are caught while the tab is in the background too (for the notification); a full refresh only while the page is visible.
 async function pollBuyFills() {
   if (!vault || !openOrders.length) return;
   const ids = openOrders.map((o) => o.id);
@@ -2295,9 +2295,9 @@ setInterval(() => {
 
 
 // ---------------------------------------------------------------------------
-// Lend & Borrow: Blend'e kasa olmadan, dogrudan cuzdandan
-// Blend v2: istek turleri 2 teminat yatir, 3 teminat cek, 4 borc al, 5 geri ode.
-// Saglik: sum(teminat * fiyat * c_factor) / sum(borc * fiyat / l_factor). 1'in altinda tasfiye.
+// Lend & Borrow: straight from the wallet to Blend, without a vault
+// Blend v2: request types 2 supply collateral, 3 withdraw collateral, 4 borrow, 5 repay.
+// Health: sum(collateral * price * c_factor) / sum(debt * price / l_factor). Liquidation below 1.
 // ---------------------------------------------------------------------------
 const LP = { reserves: [], oracle: null, pdec: 7, take: 0, mode: 2, wallet: {} };
 const LP_VERB = { 2: "Supply", 3: "Withdraw", 4: "Borrow", 5: "Repay" };
@@ -2352,8 +2352,8 @@ async function loadLend() {
         symbol = symbol.replace(/[^A-Za-z0-9.\-_]/g, "").slice(0, 12) || short(asset);
         return {
           asset, symbol, decs, scale, idx, u, supplied, borrowed,
-          // Havuzun siniri: kullanim orani max_util'i gecemez. Borc alinabilecek tutar bununla, cekilebilecek
-          // tutar havuzdaki nakitle sinirlidir (kucuk bir pay birakilir: faiz her ledger'da isler).
+          // The pool's limit: utilisation cannot go above max_util. What can be borrowed is bounded by that, what can be
+          // withdrawn by the cash in the pool (a small margin is left: interest accrues on every ledger).
           maxU: Number(cfg.max_util ?? 1e7) / 1e7,
           room: Math.max(0, supplied * (Number(cfg.max_util ?? 1e7) / 1e7) - borrowed) * 0.995,
           cash: Math.max(0, supplied - borrowed) * 0.995,
@@ -2399,9 +2399,9 @@ const hfClass = (h) => (h === Infinity || h >= 1.5 ? "good" : h >= 1.1 ? "warn" 
 const usd = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
 
-// ---- Havuz ozeti: uygulamanin girisinde, cuzdan baglanmadan da gorunur ----
-// Iora kasalarindaki paranin durdugu Blend havuzunu ozetler: ne kadar yatirilmis, ne kadari borcta, ne kadari
-// su an cekilebilir / hala borc verilebilir, kullanim orani ve faizler. Dogrudan havuz kontratindan okunur.
+// ---- Pool summary: at the app's entrance, visible without a connected wallet too ----
+// Summarises the Blend pool where the funds of Iora vaults sit: how much is supplied, how much is lent out, how
+// much can be withdrawn / still lent right now, utilisation and rates. Read straight from the pool contract.
 const compact = (v) => {
   const a = Math.abs(v);
   if (a >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
@@ -2449,7 +2449,7 @@ async function loadPool() {
       </tr>`);
       const cell = (k, v, cls = "") => `<div><dt>${k}</dt><dd class="${cls}">${v}</dd></div>`;
       const avail = Math.max(0, supplied - borrowed);
-      // Ozet satir: en cok bakilan uc rakam ve kullanim cubugu
+      // Summary row: the three most looked-at numbers and the utilisation bar
       cards[sym] = `<article class="pool-card">
         <h3>${sym}<span class="muted">${where}</span></h3>
         <dl>
@@ -2464,13 +2464,13 @@ async function loadPool() {
       full.push(`<tr><th scope="row">${sym}</th><td>${compact(supplied)}</td><td>${compact(borrowed)}</td><td>${compact(avail)}</td><td>${compact(Math.max(0, supplied * maxU - borrowed))}</td><td>${pct(rates.supply)}</td><td>${pct(rates.borrow)}</td></tr>`);
     });
     if (!full.length) throw new Error("no reserve data");
-    // Her sayfa kendi varligini gosterir (alim: USDC, satis: XLM)
+    // Each page shows its own asset (buy: USDC, sell: XLM)
     for (const el of slots) if (cards[el.dataset.pool]) el.innerHTML = cards[el.dataset.pool];
     const table = `<div class="table-wrap"><table><thead><tr><th scope="col">Asset</th><th scope="col">Supplied</th><th scope="col">Out on loan</th><th scope="col">Available now</th><th scope="col">Still lendable</th><th scope="col">Lenders earn</th><th scope="col">Borrowers pay</th></tr></thead><tbody>${full.join("")}</tbody></table></div>`;
     for (const el of document.querySelectorAll(".pool-full")) el.innerHTML = table;
     paintPoolNotes();
     if (mk) {
-      // Ek pazarlar: XLM yatirilir (ayni XLM havuzu), baska bir token alinir
+      // Extra markets: XLM is deposited (the same XLM pool), another token is bought
       if (mkX) {
         for (const m of EXTRA_MARKETS) {
           rowsMk.push(`<tr data-go="sell:${m.sym}">
@@ -2485,7 +2485,7 @@ async function loadPool() {
         }
       }
       if (V7) {
-        // Tek kasa: her satir bir "<coin> / USDC" cifti. Bekleyen USDC her ciftte Blend'de kazanir; coin tarafi yalnizca XLM'de.
+        // Single vault: each row is a "<coin> / USDC" pair. Waiting USDC earns on Blend in every pair; the coin side only for XLM.
         rowsMk.length = 0;
         const u = mkStat.USDC, x = mkStat.XLM;
         for (const p of [{ sym: "XLM", token: C.xlm }, ...PAIRS]) {
@@ -2519,7 +2519,7 @@ async function loadPool() {
     console.warn("pool overview", e);
   }
 }
-/** Ek pazarlarin fiyati: 100 XLM satilinca gelen miktardan (kucuk fiyatlarda yuvarlama hatasi olmasin). */
+/** Price of the extra markets: from what selling 100 XLM brings in (to avoid rounding errors at small prices). */
 async function paintExtraPrices() {
   await Promise.all(
     [...document.querySelectorAll(".mk-xprice")].map(async (el) => {
@@ -2530,8 +2530,8 @@ async function paintExtraPrices() {
   );
 }
 
-/** Markets tablosundaki fiyat hucreleri (Soroswap fiyati geldikce guncellenir). */
-/** Markets sayfasi: her coinin USDC fiyati (1 USDC ile alinan miktardan; islem ekranindaki fiyatla ayni hesap). */
+/** Price cells in the Markets table (updated as the Soroswap price arrives). */
+/** Markets page: each coin's USDC price (from what 1 USDC buys; the same calculation as the price on the trading screen). */
 async function paintBasePrices() {
   await Promise.all(
     [...document.querySelectorAll(".mk-bprice")].map(async (el) => {
@@ -2553,7 +2553,7 @@ function renderLend() {
   const t = lpTotals(LP.reserves);
   $("lp-sup").textContent = usd(t.sup);
   $("lp-bor").textContent = usd(t.bor);
-  // Dolar toplami tek basina yetmez: her varlik kendi biriminde de yazilir (or. "120.00 USDC · 850.00 XLM").
+  // A dollar total alone is not enough: each asset is also written in its own unit (e.g. "120.00 USDC · 850.00 XLM").
   const each = (pick) =>
     LP.reserves
       .map((r) => [r.symbol, pick(r)])
@@ -2600,7 +2600,7 @@ function renderLend() {
   lpPreview();
 }
 
-// Blend havuzunun en sik gorulen ret kodlari
+// The Blend pool's most common rejection codes
 const BLEND_ERRORS = {
   1205: "Blend rejected this: your health factor would be too low. Try a smaller amount.",
   1207: "Blend rejected this: too much of this asset is already out on loan, so the pool is at its limit. Try a smaller amount, another asset, or come back later.",
@@ -2688,7 +2688,7 @@ $("lp-max").onclick = () => {
   const r = LP.reserves.find((x) => x.asset === lpSel());
   if (!r) return;
   let m = lpSafeMax(r);
-  // XLM yatirirken/oderken islem ucretleri ve hesap rezervi icin cuzdanda biraz XLM kalir.
+  // When supplying/repaying XLM a little XLM stays in the wallet for transaction fees and the account reserve.
   if (r.symbol === "XLM" && (LP.mode === 2 || LP.mode === 5)) m = Math.max(0, m - 2);
   const d = Math.max(0, Math.min(7, Number(r.decs ?? 7)));
   $("lp-amount").value = m > 0 ? (Math.floor(m * 10 ** d) / 10 ** d).toFixed(d).replace(/\.?0+$/, "") : "";
@@ -2725,7 +2725,7 @@ $("lp-go").onclick = async () => {
 };
 
 
-// Sitenin kendi onay penceresi (tarayicinin confirm kutusu yerine)
+// The site's own confirmation dialog (instead of the browser's confirm box)
 function ask({ title, lede = "", rows = [], notes = [], confirm = "Confirm", back = "Go back" }) {
   const d = $("ask");
   $("ask-title").textContent = title;
@@ -2748,13 +2748,13 @@ function ask({ title, lede = "", rows = [], notes = [], confirm = "Confirm", bac
     $("ask-yes").focus();
   });
 }
-// Disariya tiklayinca kapat
+// Close on a click outside
 $("ask").addEventListener("click", (e) => {
   if (e.target === $("ask")) $("ask").close("cancel");
 });
 
 // ---------------------------------------------------------------------------
-// Test funds: Friendbot, trustline durumu
+// Test funds: Friendbot, trustline state
 // ---------------------------------------------------------------------------
 function renderFaucet(funded, hasTrust) {
   const x = walletNative !== null ? fmt(walletNative, 2) : "—";
@@ -2791,7 +2791,7 @@ async function fundFriendbot() {
 }
 
 // ---------------------------------------------------------------------------
-// Swap: XLM <-> USDC, Soroswap, kayma korumali
+// Swap: XLM <-> USDC, Soroswap, with slippage protection
 // ---------------------------------------------------------------------------
 const SW = { dir: "xu", slip: 1, out: null, t: null };
 const swPath = () => (SW.dir === "xu" ? [BASE.addr, C.usdc] : [C.usdc, BASE.addr]);
@@ -2863,7 +2863,7 @@ $("swap-flip").onclick = () => {
 $("swap-max").onclick = () => {
   const bal = SW.dir === "xu" ? walletXlm : walletUsdc;
   if (bal === null) return;
-  const v = SW.dir === "xu" ? bal - BASE_KEEP : bal; // XLM'de ucretler icin pay birak
+  const v = SW.dir === "xu" ? bal - BASE_KEEP : bal; // leave a margin for fees with XLM
   $("swap-in").value = v > 0n ? toPlain(v) : "";
   doQuote();
 };
@@ -2899,8 +2899,8 @@ $("swap-go").onclick = async () => {
 
 
 // ---------------------------------------------------------------------------
-// Al, sonra karla sat: dolan alimdaki XLM'i satis kasasina koyup alis fiyatinin ustunde satis emri verir.
-// Iki (kasa yoksa uc) imza: [satis kasasi ac] -> XLM yatir -> satis emri. Hepsi kullanicinin onayiyla.
+// Buy, then sell at a profit: puts the XLM from a filled buy into the sell vault and places a sell order above the buy price.
+// Two (three without a vault) signatures: [open sell vault] -> deposit XLM -> sell order. All with the user's approval.
 // ---------------------------------------------------------------------------
 function flipButton(o) {
   if (!SV.factory || BigInt(o.filled_out) <= 0n) return "";
@@ -2960,7 +2960,7 @@ async function flipToSell(bought, buyPx) {
   if (!(await call(SV.vault, "deposit", [i128(amount)], `Deposit ${fmt(amount, 2)} ${BS}`, SELL_ERRORS))) return;
   const pu = toUnits(pxAt(pct).toFixed(7));
   const limit = sellLimit(pu);
-  // Yatirilanin tamami emre baglanamayabilir (yuvarlama payi kasada kalir).
+  // Not all of the deposit may be tied to the order (the rounding margin stays in the vault).
   const canOrder = await roomIn(SV.vault);
   const size = canOrder !== null && canOrder < amount ? canOrder : amount;
   if (size < MIN_ORDER) return log("The deposit arrived, but it is too small to place a sell order.", "err");
@@ -2975,7 +2975,7 @@ async function flipToSell(bought, buyPx) {
   }
 }
 
-// ---- Sohbet: iki kasayi birlikte okuyan yardimcilar ----
+// ---- Chat: helpers that read both vaults together ----
 async function sellVaultOf() {
   if (!SV.factory || !me) return null;
   if (SV.vault) return SV.vault;
@@ -3010,9 +3010,9 @@ async function openOrdersIn(v) {
   return out;
 }
 // ---------------------------------------------------------------------------
-// Emir dolunca haber ver: sayfa icinde bildirim + (izin verildiyse) tarayici bildirimi
+// Notify when an order fills: an in-page notice + (if allowed) a browser notification
 // ---------------------------------------------------------------------------
-const seenFills = new Map(); // emir no -> { inn, out } (son gorulen dolum)
+const seenFills = new Map(); // order id -> { inn, out } (the last fill seen)
 let fillsPrimed = false;
 
 function checkFills(rows) {
@@ -3031,7 +3031,7 @@ function checkFills(rows) {
   fillsPrimed = true;
 }
 
-let chainedOrders = new Map(); // emir no -> otomatik satis ayari (surum 3)
+let chainedOrders = new Map(); // order id -> automatic sell setting (version 3)
 function notifyFill(id, dIn, dOut, full, kept) {
   const price = Number(dIn) / Number(dOut);
   const title = full ? `Order #${id} filled` : `Order #${id} partly filled`;
@@ -3059,7 +3059,7 @@ function notifyFill(id, dIn, dOut, full, kept) {
   } catch {}
 }
 
-// Ilk emirden sonra bir kez bildirim izni iste (kullanici eylemine bagli, rahatsiz etmeden)
+// Ask for notification permission once after the first order (tied to a user action, without nagging)
 function askNotify() {
   try {
     if ("Notification" in window && Notification.permission === "default") {
@@ -3084,7 +3084,7 @@ $("notify-btn").onclick = async () => {
 };
 syncNotifyBtn();
 
-// Ilk ziyarette risk bildirimi (Morpho'daki gibi). Kabul bu tarayicida hatirlanir.
+// Risk notice on the first visit (as on Morpho). Acceptance is remembered in this browser.
 (function riskNotice() {
   const KEY = "berthly-risk-v1";
   let seen = false;
@@ -3094,13 +3094,13 @@ syncNotifyBtn();
   if (seen) return;
   const d = $("risk");
   $("risk-ok").addEventListener("change", (e) => ($("risk-go").disabled = !e.target.checked));
-  d.addEventListener("cancel", (e) => e.preventDefault()); // Esc ile gecilemez
+  d.addEventListener("cancel", (e) => e.preventDefault()); // Esc does not dismiss it
   d.addEventListener("close", () => {
     try {
       localStorage.setItem(KEY, "1");
     } catch {}
   });
-  // Erisim kapisi aciksa risk notu kapi gecildikten sonra gosterilir
+  // If the access gate is on, the risk note is shown after the gate is passed
   const show = () => { if (!d.open) d.showModal(); };
   const cl = document.documentElement.classList;
   if (cl.contains("app-closed") || cl.contains("app-pending")) window.addEventListener("iora:open", show, { once: true });
@@ -3108,14 +3108,14 @@ syncNotifyBtn();
 })();
 
 // ---------------------------------------------------------------------------
-// Kademeli alim (ladder): tutari esit emirlere boler, her biri bir oncekinden %gap asagida
+// Scaled buy (ladder): splits the amount into equal orders, each %gap below the one before
 // ---------------------------------------------------------------------------
 /**
- * Kademeli emir (borsalardaki "scaled order"): toplam tutar, iki fiyat arasina esit araliklarla dizilen n limit
- * emrine bolunur. Dagilim: flat = esit; inc = piyasadan uzaklastikca buyur (son emir ilkinin ~3 kati);
- * dec = tersi. fromHigh: ilk emir ust fiyatta (alim), degilse alt fiyatta (satis). Kusurat son emre eklenir.
+ * Scaled order (as on exchanges): the total is split into n limit orders spaced evenly between two prices.
+ * Distribution: flat = equal; inc = grows away from the market (the last order is about 3 times the first);
+ * dec = the reverse. fromHigh: the first order is at the upper price (buy), otherwise at the lower one (sell). The remainder goes to the last order.
  */
-const SCALE_MIN = 2, SCALE_MAX = 10; // her emir ayri imza ister
+const SCALE_MIN = 2, SCALE_MAX = 10; // each order needs its own signature
 function scaleLevels(total, a, b, n, dist, fromHigh) {
   const lo = a < b ? a : b, hi = a < b ? b : a;
   const r = n > 1 ? 3 ** (1 / (n - 1)) : 1;
@@ -3132,7 +3132,7 @@ function scaleLevels(total, a, b, n, dist, fromHigh) {
   return out;
 }
 const buyLevels = (amount, a, b) => scaleLevels(amount, a, b, LADDER.n, LADDER.dist, true).map((l) => ({ amt: l.amt, lim: l.px }));
-/** Formdaki degerlerden kademeli alim emirleri; eksik ya da gecersizse null. */
+/** Scaled buy orders from the form's values; null if something is missing or invalid. */
 function buyScale() {
   try {
     const amount = toUnits($("oamount").value), a = toUnits($("olimit").value), b = toUnits($("olimit2").value);
@@ -3187,14 +3187,14 @@ async function placeLadder(amount, limit, limit2, bps, impactPct, expiry) {
 }
 
 // ---------------------------------------------------------------------------
-// Kademeli emirler: her adim ayri imza. Bir adim durursa (cuzdan penceresi kapandi, reddedildi...)
-// kalan adimlar saklanir ve tek tikla, yeniden onay sormadan devam ettirilebilir.
+// Scaled orders: each step is a separate signature. If a step stops (wallet window closed, rejected...)
+// the remaining steps are kept and can be continued with one click, without asking for approval again.
 // ---------------------------------------------------------------------------
 let resumeSteps = null;
 async function runSteps(steps, noun) {
   let done = 0;
   for (const [i, step] of steps.entries()) {
-    if (i > 0) await new Promise((r) => setTimeout(r, 700)); // cuzdanin onceki pencereyi kapatmasina zaman ver
+    if (i > 0) await new Promise((r) => setTimeout(r, 700)); // give the wallet time to close the previous window
     if (!(await step())) break;
     done++;
   }
@@ -3216,10 +3216,10 @@ document.addEventListener("click", async (e) => {
   if (noun === "sell orders") await refreshSell();
 });
 
-// Agin sakladigi tum olaylari (yaklasik 7 gun) getirir. RPC her istekte yaklasik 10.000 ledger tarar ve
-// arada bos sayfa donebilir; bu yuzden imlecin gosterdigi ledger son ledger'a ulasana kadar devam edilir.
-// Kasa basina olay onbellegi: ilk taramadan sonra her yenilemede yalnizca yeni olaylar okunur.
-const eventCache = new Map(); // kasa -> { events, cursor }
+// Fetches every event the network keeps (about 7 days). The RPC scans about 10,000 ledgers per request and may
+// return empty pages in between; so it continues until the ledger the cursor points to reaches the latest ledger.
+// Event cache per vault: after the first scan only new events are read on each refresh.
+const eventCache = new Map(); // vault -> { events, cursor }
 async function fetchVaultEvents() {
   const v = vault;
   const filters = [{ type: "contract", contractIds: [realId(v)] }];
@@ -3246,7 +3246,7 @@ async function fetchVaultEvents() {
       cached.events = dedupe(cached.events);
       return cached.events;
     } catch (e) {
-      console.warn("events (incremental)", e); // imlec agin sakladigi araligin disina dustuyse bastan taranir
+      console.warn("events (incremental)", e); // if the cursor fell outside the range the network keeps, scan from the start
     }
   }
   const ledgerOf = (c) => {
@@ -3276,19 +3276,19 @@ async function fetchVaultEvents() {
   return dedupe(all);
 }
 
-// innerHTML'e giren zincir verisi icin kacis
+// escaping for on-chain data that goes into innerHTML
 function esc(v) {
   return String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 // ---------------------------------------------------------------------------
-// Satis kasasi (XLM -> USDC). Ayni kasa kontrati, tokenlari ters kurulmus ayri bir fabrikadan:
-// kasa XLM'i Blend'e koyar (faiz kazanir), emir dolunca XLM'i Soroswap'ta USDC'ye cevirir ve
-// USDC'yi sahibine gonderir. Kontratta limit "1 USDC icin en fazla kac XLM" (7 ondalik) olarak
-// tutulur; kullaniciya "1 XLM en az kac USDC" gosterilir: limit = U*U / fiyat (asagi yuvarlanir,
-// boylece asgari USDC her zaman kullanicinin istedigi fiyattan az olmaz).
-// Gorunum, alim kasasiyla ayni duzende: ozet kutulari, sagda islem kartı, solda piyasa ve emirler.
+// Sell vault (XLM -> USDC). The same vault contract, from a separate factory deployed with the tokens reversed:
+// the vault supplies XLM to Blend (earning interest); when the order fills it swaps the XLM to USDC on Soroswap and
+// sends the USDC to its owner. The contract keeps the limit as "at most how many XLM for 1 USDC" (7 decimals);
+// the user is shown "at least how many USDC for 1 XLM": limit = U*U / price (rounded down,
+// so the minimum USDC is never below the price the user asked for).
+// The view has the same layout as the buy vault: summary tiles, action card on the right, market and orders on the left.
 // ---------------------------------------------------------------------------
-/** Satis sayfasinin pazarini secer (null = varsayilan XLM -> USDC). Degistiyse true doner. */
+/** Selects the sell page's market (null = the default XLM -> USDC). Returns true if it changed. */
 function setSellMarket(sym) {
   const m = EXTRA_MARKETS.find((x) => x.sym === sym);
   const factory = m ? m.factory : SV.home;
@@ -3311,19 +3311,19 @@ function setSellMarket(sym) {
   return true;
 }
 
-/** Ek pazarda cuzdanin alinan token icin trustline'i var mi; yoksa ekleme dugmesi gosterilir. */
+/** In an extra market: does the wallet have a trustline for the token bought; if not, a button to add it is shown. */
 async function checkOutTrust() {
   const box = $("sv-trust");
   if (SV.out.sym === "USDC" || !me) return (box.hidden = true);
   const sym = SV.out.sym, token = SV.out.addr;
   const b = await read(token, "balance", [addr(me)]);
-  if (SV.out.addr !== token) return; // bu arada pazar degisti
+  if (SV.out.addr !== token) return; // the market changed in the meantime
   box.hidden = b.ok;
   if (b.ok) return;
   box.innerHTML = `<span>Your wallet cannot hold ${esc(sym)} yet. Without a trustline, filled orders wait in your vault until you add one.</span> <button type="button" class="small" id="sv-trust-add">Add ${esc(sym)} trustline</button>`;
   $("sv-trust-add").onclick = async () => {
     if (busy) return;
-    const nm = await read(token, "name"); // Stellar varlik sozlesmesi: "KOD:IHRACCI"
+    const nm = await read(token, "name"); // Stellar asset contract: "CODE:ISSUER"
     const issuer = nm.ok ? String(nm.value).split(":")[1] : "";
     if (!/^G[A-Z2-7]{55}$/.test(issuer || "")) return log(`Could not read the issuer of ${esc(sym)}, so the trustline cannot be added from here.`, "err");
     busy = true;
@@ -3341,7 +3341,7 @@ async function checkOutTrust() {
     }
   };
 }
-const XLM_KEEP = 5n * U; // cuzdanda islem ucretleri ve asgari bakiye icin birakilan XLM
+const XLM_KEEP = 5n * U; // XLM left in the wallet for transaction fees and the minimum balance
 
 const SELL_ERRORS = {
   ...VAULT_ERRORS,
@@ -3351,25 +3351,25 @@ const SELL_ERRORS = {
   10: `Not enough ${BS} cash in the Blend pool right now`,
 };
 
-/** "1 XLM en az p USDC" (7 ondalik) -> kontrat limiti "1 USDC icin en fazla kac XLM". */
+/** "1 XLM for at least p USDC" (7 decimals) -> contract limit "at most how many XLM for 1 USDC". */
 function sellLimit(priceUnits) {
   return priceUnits > 0n ? (U * U) / priceUnits : 0n;
 }
-/** Kontrat limitinden kullanicinin fiyatina (gosterim icin). */
+/** From the contract limit to the user's price (for display). */
 function sellPrice(limit) {
   return Number(limit) > 0 ? 1e7 / Number(limit) : 0;
 }
-// Kucuk fiyatlar (or. 1 XLM = 0,0000388 BTC) dort ondalikta sifir gorunmesin: anlamli basamak kullanilir.
+// Small prices (e.g. 1 XLM = 0.0000388 BTC) must not show as zero with four decimals: significant digits are used.
 const px4 = (v) => (v !== 0 && Math.abs(v) < 0.01 ? v.toLocaleString("en-US", { maximumSignificantDigits: 4 }) : v.toLocaleString("en-US", { maximumFractionDigits: 4 }));
-/** Alinan token tutarlari icin ondalik sayisi: USDC'de istenen, diger tokenlarda 7 (kucuk tutarlar gorunsun). */
+/** Decimals for amounts of the token bought: as requested for USDC, 7 for other tokens (so small amounts show). */
 const outDp = (d) => (SV.out.sym === "USDC" ? d : 7);
 const trim7 = (units) => (Number(units) / 1e7).toFixed(7).replace(/\.?0+$/, "");
 
 if (SV.factory) $("nav-sell").hidden = false;
 
-/** Blend XLM rezervi: tahmini yillik faiz ve kullanim orani (readPool ile ayni model). */
+/** Blend XLM reserve: estimated yearly interest and utilisation (same model as readPool). */
 async function readXlmPool() {
-  if (XB) return null; // bu coin Blend havuzunda degil
+  if (XB) return null; // this coin is not in the Blend pool
   try {
     const [r, pc] = await Promise.all([read(C.pool, "get_reserve", [addr(C.xlm)]), read(C.pool, "get_config")]);
     if (!r.ok) return null;
@@ -3402,7 +3402,7 @@ async function refreshSell() {
     readXlmPool(),
     read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]),
   ]);
-  // Piyasa: 1 XLM satilinca gelen USDC
+  // Market: USDC received for selling 1 XLM
   if (q.ok) SV.mkt = Number(BigInt(q.value[q.value.length - 1])) / 1e7;
   else if (marketPrice) SV.mkt = marketPrice;
   $("sv-mkt").textContent = SV.mkt ? `Market ${px4(SV.mkt)}` : "";
@@ -3427,7 +3427,7 @@ async function refreshSell() {
   loadFeeCap(SV.vault);
   document.body.classList.toggle("has-svault", !!SV.vault);
   if (SV.vault && V3.sell === null) V3.sell = await isV3(SV.vault);
-  const stopOk = V3.sell && STOP_LOSS && SV.out.sym === "USDC"; // zarar kes oracle ister; ek pazar tokenlari oracle'da yok
+  const stopOk = V3.sell && STOP_LOSS && SV.out.sym === "USDC"; // a stop loss needs an oracle; extra-market tokens are not in the oracle
   $("sv-type").hidden = !stopOk;
   if (!stopOk && SVT.type === "sl") setSellType("tp");
   checkOutTrust();
@@ -3467,7 +3467,7 @@ async function refreshSell() {
   collectHeld();
 }
 
-// Surum 4: cuzdan USDC alamadiginda (trustline yok) dolumun ciktisi kasada bekler; sahibi buradan alir.
+// Version 4: when the wallet cannot receive USDC (no trustline) the fill's output waits in the vault; the owner collects it here.
 let heldSeen = 0n;
 async function collectHeld() {
   if (!V4 || !SV.vault || sideOf(SV.vault)) return;
@@ -3487,13 +3487,13 @@ async function collectHeld() {
   if (ok) await svCall("sweep", [addr(SV.out.addr)], `Collect ${fmt(amt, outDp(2))} ${SV.out.sym}`);
 }
 
-// Satis turu: "tp" = fiyat yukselince sat (kar al), "sl" = fiyat duserse sat (zarar kes, surum 3 kasalar)
+// Sell order type: "tp" = sell when the price rises (take profit), "sl" = sell if the price falls (stop loss, version 3 vaults)
 const SVT = { type: "tp" };
-// Zarar kes tetigi Blend'in fiyat oracle'indan okunur. Testnet'teki oracle sabit fiyat verdigi icin
-// orada calismaz; mainnet derlemesinde VITE_STOP_LOSS=1 ile acilir.
+// The stop loss trigger is read from Blend's price oracle. The testnet oracle gives a fixed price, so it does
+// not work there; a mainnet build turns it on with VITE_STOP_LOSS=1.
 const STOP_LOSS = import.meta.env.VITE_STOP_LOSS === "1";
-const SL_SLIP = 3; // zarar keste tetikten sonra kabul edilen en fazla kayma (%)
-/** Zarar kes: tetik ve en kotu fiyat (ikisi de satis kasasi biriminde, 1 USDC icin XLM). */
+const SL_SLIP = 3; // largest slippage accepted after the trigger for a stop loss (%)
+/** Stop loss: trigger and worst price (both in the sell vault's unit, XLM for 1 USDC). */
 function stopLevels(priceUnits) {
   const worst = (priceUnits * BigInt(100 - SL_SLIP)) / 100n;
   return { trigger: sellLimit(priceUnits), limit: sellLimit(worst), worst };
@@ -3515,7 +3515,7 @@ function setSellType(t) {
 }
 for (const b of document.querySelectorAll("#sv-type [data-type]")) b.onclick = () => setSellType(b.dataset.type);
 
-// Kademeli (scaled) satis: tutar, iki fiyat arasina esit araliklarla dizilen emirlere bolunur (bkz. scaleLevels)
+// Scaled sell: the amount is split into orders spaced evenly between two prices (see scaleLevels)
 const SVL = { on: false, n: 5, dist: "flat" };
 const sellLevels = (amount, a, b) => scaleLevels(amount, a, b, SVL.n, SVL.dist, false).map((l) => ({ amt: l.amt, px: l.px, lim: sellLimit(l.px) }));
 function renderSellLadder(lv) {
@@ -3586,7 +3586,7 @@ function updateSellTicket() {
       : `<span class="bad">${WORSE_SELL(SV.mkt ? (1 - p / SV.mkt) * 100 : 0)}</span>`,
   );
   if (scale) {
-    items.length = 1; // ilk madde (faiz) kalir; tek fiyat cumlesi yerine aralik anlatilir
+    items.length = 1; // the first item (interest) stays; the range is described instead of the single-price sentence
     items.push(`It is split into <b>${scale.length} limit orders</b>, evenly spaced from <b>${px4(Number(scale[0].px) / 1e7)}</b> up to <b>${px4(Number(scale[scale.length - 1].px) / 1e7)} ${SV.out.sym}</b>. Each one sells by itself when the price reaches it.`);
     items.push(`If all of them sell you receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b> ${outIn(SV.vault)}.`);
     items.push(`Each order is placed with its own signature: <b>${scale.length} signatures</b>. Unsold orders keep earning; you can cancel any of them at any time.`);
@@ -3731,7 +3731,7 @@ for (const c of document.querySelectorAll("#sv-days [data-days]")) {
 $("sv-amt").addEventListener("input", updateSellTicket);
 $("sv-px").addEventListener("input", updateSellTicket);
 
-// Satis emri: formdaki tutar/fiyat/sure ile onay ekrani ve imza (sohbet de bunu kullanir)
+// Sell order: confirmation screen and signature from the form's amount/price/lifetime (the chat uses this too)
 async function placeSellOrder(impactBps = 300, { single = false } = {}) {
   let amount = toUnitsSafe($("sv-amt").value);
   const price = toUnitsSafe($("sv-px").value);
@@ -3752,7 +3752,7 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
   }
   const limit = sellLimit(price);
   if (limit <= 0n) return log("Sell price is too high.", "err");
-  const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount; // en az 1 XLM'lik parcalar, kucuk emirde tek parca
+  const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount; // pieces of at least 1 XLM, a single piece for a small order
   const expiry = Math.floor(Date.now() / 1000) + SV.days * 86400;
   const p = Number(price) / 1e7;
   const rows = [
@@ -3841,16 +3841,16 @@ async function cancelSell(id) {
   await svCall("cancel_order", [u32(id)], `Cancel sell #${id}`);
 }
 
-// Sell sayfasi acilinca, cuzdan baglaninca ve duzenli olarak guncelle
+// Update when the Sell page opens, when the wallet connects, and regularly
 window.addEventListener("hashchange", () => (location.hash === "#sell" || location.hash === "#portfolio") && me && refreshSell());
 setInterval(() => {
   let job = null;
   if (me && !busy && (location.hash === "#sell" || location.hash === "#portfolio") && document.visibilityState === "visible") job = refreshSell();
-  else if (me && !busy) job = pollSellFills(); // baska sayfadayken de satis dolumlarini yakala
+  else if (me && !busy) job = pollSellFills(); // catch sell fills while on another page too
   if (job) Promise.resolve(job).catch((e) => console.warn("sell refresh failed", e));
 }, 30000);
 
-// ---- Satis emri dolunca bildirim (alimdakiyle ayni: sayfa ici + tarayici bildirimi) ----
+// ---- Notification when a sell order fills (same as for buys: in-page + browser notification) ----
 const seenSell = new Map();
 let sellPrimed = false;
 function checkSellFills(rows) {
@@ -3886,14 +3886,14 @@ async function pollSellFills() {
 }
 
 // ---------------------------------------------------------------------------
-// Islem ekrani: fiyat grafigi, havuz derinligi, pazar secici.
-// Grafik uydurma veri kullanmaz: emirlerin doldugu Soroswap havuzunun "sync" olaylarindan (her islemden sonraki
-// rezervler) gercek fiyat gecmisi cikarilir. Ag yaklasik bir haftalik olay saklar; gorulen noktalar tarayicida
-// saklanir, boylece ayni tarayicida gecmis zamanla uzar. Havuzda islem olmadiysa cizgi duz kalir.
+// Trading screen: price chart, pool depth, market selector.
+// The chart uses no made-up data: the real price history is derived from the "sync" events (reserves after each
+// trade) of the Soroswap pool where orders fill. The network keeps about a week of events; the points seen are
+// stored in the browser, so the history grows over time in the same browser. If the pool had no trades the line stays flat.
 // ---------------------------------------------------------------------------
 const cssv = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 const SYNC_TOPIC = xdr.ScVal.scvSymbol("sync").toXDR("base64");
-const PX_KEEP = 6000; // tarayicida saklanan en fazla fiyat noktasi
+const PX_KEEP = 6000; // most price points stored in the browser
 
 function tradeMarket() {
   const xm = document.body.dataset.view === "sell" && document.body.classList.contains("xmarket");
@@ -3918,7 +3918,7 @@ function tradeNote(text) {
   el.hidden = !TR.note;
 }
 
-/** Sayfa ya da pazar degisince: grafik kutusunu acik sayfaya tasir, gerekirse yeni pazarin havuzunu yukler. */
+/** When the page or market changes: moves the chart box to the open page and loads the new market's pool if needed. */
 async function tradeSync() {
   const v = document.body.dataset.view;
   if (v !== "vault" && v !== "sell") return;
@@ -3956,11 +3956,11 @@ const resPrice = (r0, r1) => {
 function pushPoint(t, p) {
   const last = TR.pts[TR.pts.length - 1];
   if (last && (last.t > t || last.p === p)) return false;
-  TR.pts.push({ t, p, live: 1 }); // canli okuma: fiyat noktasi, ama havuz islemi sayilmaz
+  TR.pts.push({ t, p, live: 1 }); // live read: a price point, but not counted as a pool trade
   return true;
 }
 
-/** Havuzun su anki rezervleri: anlik fiyat ve derinlik. */
+/** The pool's current reserves: spot price and depth. */
 async function tradeTick() {
   const pair = TR.pair;
   if (!pair) return;
@@ -3976,7 +3976,7 @@ async function tradeTick() {
   paintTradeBar();
 }
 
-/** Havuzun olay gecmisinden fiyat noktalari. Imlec saklanir: sonraki acilista yalnizca yeni olaylar okunur. */
+/** Price points from the pool's event history. The cursor is stored: on the next open only new events are read. */
 async function tradeHistory() {
   const pair = TR.pair;
   if (!pair) return;
@@ -4016,7 +4016,7 @@ async function tradeHistory() {
   const strict = [{ type: "contract", contractIds: [pair], topics: [["*", SYNC_TOPIC]] }];
   const loose = [{ type: "contract", contractIds: [pair] }];
   let out = null;
-  // 1) sakli imlecten devam  2) agin sakladigi en eski defterden bastan  3) konu suzgeci kabul edilmezse suzgecsiz
+  // 1) continue from the stored cursor  2) from the oldest ledger the network keeps  3) without a filter if the topic filter is not accepted
   const tries = [];
   const full = (filters, limit) => async () => ({ ...(await scan((h) => ({ startLedger: h.oldestLedger + 2 }), filters, limit)), full: true });
   if (cache.cursor) tries.push(() => scan(() => ({ cursor: cache.cursor }), strict, 1000));
@@ -4033,13 +4033,13 @@ async function tradeHistory() {
   if (TR.pair !== pair) return;
   TR.scanned = true;
   if (out) {
-    // Taranan surede hic islem yoksa fiyat o sure boyunca degismemistir: cizgi taramanin basindan baslar
+    // If there was no trade in the scanned period the price did not change over it: the line starts at the beginning of the scan
     if (out.full && !out.got.length && TR.spot) {
       const t0 = Number(out.h.oldestLedgerCloseTime) || Math.floor(Date.now() / 1000) - (out.h.latestLedger - out.h.oldestLedger) * 5;
       if (!cache.pts.length || cache.pts[cache.pts.length - 1].p === TR.spot) out.got.push({ t: t0, p: TR.spot });
     }
     const first = out.got.length ? out.got[0].t : Infinity;
-    const live = TR.pts.filter((x) => !cache.pts.some((c) => c.t === x.t && c.p === x.p)); // bu oturumda canli eklenenler
+    const live = TR.pts.filter((x) => !cache.pts.some((c) => c.t === x.t && c.p === x.p)); // points added live in this session
     const merged = [...cache.pts.filter((x) => x.t < first), ...out.got, ...live].sort((a, b) => a.t - b.t);
     TR.pts = merged.filter((x, i) => i === 0 || x.p !== merged[i - 1].p || x.t !== merged[i - 1].t);
     pxCacheSet(pair, out.cursor || cache.cursor, TR.pts);
@@ -4057,21 +4057,21 @@ async function tradeHistory() {
   paintTradeBar();
 }
 
-/** Pazar ilk yuklendiginde mum boyu, eldeki gecmisin tamami ekrana sigacak sekilde secilir (kullanici sonra degistirebilir). */
+/** When a market first loads, the candle size is chosen so that all the history at hand fits on screen (the user can change it later). */
 function chartFit() {
   if (TR.fitted === TR.pair || !TR.pts.length) return;
   TR.fitted = TR.pair;
   const box = $("ch").parentElement.getBoundingClientRect();
   const plotW = (box.width || 800) - 84;
   const span = Date.now() / 1000 - TR.pts[0].t;
-  // En ince mum boyu: gecmisin tamami, kova basina en az 5 px ile sigsin; sonra kova genisligi alani dolduracak kadar acilir
+  // Smallest candle size: the whole history must fit with at least 5 px per bucket; then the bucket width opens up to fill the area
   TR.tf = [900, 3600, 14400, 86400].find((tf) => plotW / (span / tf + 2) >= 6) || 86400;
   CH.cw = Math.min(12, Math.max(6, plotW / (span / TR.tf + 2)));
   CH.pan = 0;
   for (const o of document.querySelectorAll("#ch-tf [data-tf]")) o.setAttribute("aria-pressed", String(Number(o.dataset.tf) === TR.tf));
 }
 
-/** [from, to] araligindaki kovalar icin mumlar. Ilk noktadan onceki kovalar bos birakilir (o zamanin fiyati bilinmiyor). */
+/** Candles for the buckets in [from, to]. Buckets before the first point are left empty (the price then is unknown). */
 function candlesOf(pts, tf, from, to) {
   if (!pts.length) return [];
   from = Math.max(from, Math.floor(pts[0].t / tf) * tf);
@@ -4098,12 +4098,12 @@ const niceStep = (raw) => {
 };
 let chartDp = 4;
 const cpx = (v, extra = 0) => v.toLocaleString("en-US", { minimumFractionDigits: chartDp + extra, maximumFractionDigits: chartDp + extra });
-// Gorunum: cizgi (seyrek islemli havuzlarda okunakli) ya da mum; yakinlastirma (kova genisligi) ve gecmise kaydirma
+// View: line (readable for pools with few trades) or candles; zoom (bucket width) and scrolling into the past
 const CH = { mode: "line", cw: 10, pan: 0, drag: null, geo: null };
 try {
   if (localStorage.getItem("iora-chart-mode") === "candle") CH.mode = "candle";
 } catch {}
-// Tuval icin yari saydam renk: CSS degiskeninin degeri (hex, rgb, color-mix...) tarayiciya cozdurulur, rgba'ya cevrilir
+// Semi-transparent color for the canvas: the CSS variable's value (hex, rgb, color-mix...) is resolved by the browser and turned into rgba
 const rgbCache = new Map();
 function rgbOf(color) {
   if (rgbCache.has(color)) return rgbCache.get(color);
@@ -4156,20 +4156,20 @@ function drawChart() {
   }
   const tf = TR.tf, cw = CH.cw, small = W < 520;
   const padT = 10, padB = 26, volH = small ? 26 : 38;
-  // Pencere: sag kenar "simdi - kaydirma"; genislik kac kova sigiyorsa
+  // Window: the right edge is "now - scroll"; the width is however many buckets fit
   g.font = `11.5px ${mono}`;
   const prevDp = chartDp;
   let padR = 64;
   const maxPan = Math.max(0, now - pts[0].t - tf * 8);
   if (CH.pan > maxPan) CH.pan = maxPan;
-  const endB = Math.floor((now - CH.pan) / tf) * tf; // son kovanin baslangici
+  const endB = Math.floor((now - CH.pan) / tf) * tf; // start of the last bucket
   const build = () => {
     const count = Math.max(12, Math.floor((W - padR - 8) / cw));
     const from = endB - (count - 1) * tf, winEnd = endB + tf;
     return { count, from, winEnd, cs: candlesOf(pts, tf, from, endB) };
   };
   let win = build();
-  // Olcek: penceredeki fiyatlar + yakin emir cizgileri
+  // Scale: the prices in the window + nearby order lines
   let lo = Infinity, hi = -Infinity;
   for (const c of win.cs) {
     if (c.l < lo) lo = c.l;
@@ -4178,7 +4178,7 @@ function drawChart() {
   if (!win.cs.length) lo = hi = pts[0].p;
   const mid = (lo + hi) / 2;
   for (const o of TR.lines) if (o.price > mid * 0.88 && o.price < mid * 1.12) { lo = Math.min(lo, o.price); hi = Math.max(hi, o.price); }
-  if (hi - lo < mid * 0.004) { lo = mid * 0.998; hi = mid * 1.002; } // duz cizgi: dar ama sifir olmayan aralik
+  if (hi - lo < mid * 0.004) { lo = mid * 0.998; hi = mid * 1.002; } // flat line: a narrow but non-zero range
   const padY = (hi - lo) * 0.12;
   lo -= padY;
   hi += padY;
@@ -4191,7 +4191,7 @@ function drawChart() {
     win = build();
   }
   void prevDp;
-  const plotR = W - padR - 8; // son kovanin sag kenari
+  const plotR = W - padR - 8; // right edge of the last bucket
   const x = (t) => plotR - ((win.winEnd - t) / tf) * cw;
   const y = (p) => padT + ((hi - p) / (hi - lo)) * ph;
   const tOfX = (px) => win.winEnd - ((plotR - px) / cw) * tf;
@@ -4199,14 +4199,14 @@ function drawChart() {
   const up = win.cs.length ? win.cs[win.cs.length - 1].c >= win.cs[0].o : true;
   const trend = up ? col.up : col.down;
 
-  // --- izgara
+  // --- grid
   g.lineWidth = 1;
   g.textBaseline = "middle";
   g.strokeStyle = alpha(col.line2, 0.55);
   g.fillStyle = col.muted;
   g.textAlign = "left";
   g.setLineDash([2, 4]);
-  // Etiket kutularinin (emir fiyatlari, son fiyat) altinda kalan eksen yazilari cizilmez
+  // Axis labels under the label boxes (order prices, last price) are not drawn
   const pillYs = [...TR.lines.map((o) => o.price), TR.spot || pts[pts.length - 1].p].filter((v) => v > lo && v < hi).map((v) => y(v));
   for (let p = Math.ceil(lo / step) * step; p < hi; p += step) {
     const yy = Math.round(y(p)) + 0.5;
@@ -4216,7 +4216,7 @@ function drawChart() {
     g.stroke();
     if (!pillYs.some((v) => Math.abs(v - yy) < 17)) g.fillText(cpx(p), W - padR + 10, yy);
   }
-  // zaman ekseni: yerel saate hizali, etiketler en az ~96 px arayla
+  // time axis: aligned to local time, labels at least ~96 px apart
   const spanS = ((W - padR) / cw) * tf;
   const tStep = [900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 345600, 604800].find((s) => (s / spanS) * (W - padR) >= 96) || 604800;
   const tz = -new Date().getTimezoneOffset() * 60;
@@ -4240,8 +4240,8 @@ function drawChart() {
   g.beginPath();
   g.rect(0, 0, W - padR, H - padB);
   g.clip();
-  // --- havuz islemi sayisi (alt serit)
-  const nmax = Math.max(4, ...win.cs.map((c) => c.n)); // tek tuk islemler kisa cubuk olarak kalsin
+  // --- number of pool trades (bottom strip)
+  const nmax = Math.max(4, ...win.cs.map((c) => c.n)); // keep the odd trade as a short bar
   for (const c of win.cs) {
     if (!c.n) continue;
     const vh = Math.max(3, (c.n / nmax) * volH), bw = Math.min(8, Math.max(2, cw - 3));
@@ -4249,9 +4249,9 @@ function drawChart() {
     roundRect(g, x(c.t) + (cw - bw) / 2, H - padB - vh, bw, vh, Math.min(2, bw / 2));
     g.fill();
   }
-  // --- fiyat
+  // --- price
   if (CH.mode === "line") {
-    // AMM fiyati iki islem arasinda sabittir: basamakli cizgi gercegi gosterir
+    // The AMM price is constant between two trades: a stepped line shows the truth
     const t0 = Math.max(win.cs.length ? win.cs[0].t : pts[0].t, pts[0].t);
     const tEnd = Math.min(now, win.winEnd);
     let i = 0, p = pts[0].p;
@@ -4327,7 +4327,7 @@ function drawChart() {
     g.textAlign = "left";
     g.fillText(text, W - padR + 10, yy + 0.5);
   };
-  // --- acik emirler
+  // --- open orders
   const used = [];
   for (const o of [...TR.lines].sort((a, b) => b.price - a.price)) {
     const c = o.side === "buy" ? col.buy : col.sell;
@@ -4343,7 +4343,7 @@ function drawChart() {
       g.setLineDash([]);
       pill(yy, cpx(o.price), c, false);
     }
-    while (used.some((u) => Math.abs(u - yy) < 22)) yy += 22; // ust uste binen etiketler asagi kayar
+    while (used.some((u) => Math.abs(u - yy) < 22)) yy += 22; // overlapping labels shift down
     used.push(yy);
     const lab = off ? `${off}${o.text} at ${cpx(o.price)}` : o.text;
     g.font = `500 11.5px ${sans}`;
@@ -4357,7 +4357,7 @@ function drawChart() {
     g.textAlign = "left";
     g.fillText(lab, 14, yy + 0.5);
   }
-  // --- son fiyat
+  // --- last price
   const lastP = TR.spot || pts[pts.length - 1].p;
   if (lastP > lo && lastP < hi) {
     const yl = Math.round(y(lastP)) + 0.5;
@@ -4370,7 +4370,7 @@ function drawChart() {
     g.setLineDash([]);
     pill(yl, cpx(lastP, 1), trend, true);
   }
-  // --- imlec ve ust satir
+  // --- cursor and top row
   const priceAt = (t) => {
     let p = null;
     for (const q of pts) {
@@ -4442,7 +4442,7 @@ function drawChart() {
   }
 }
 
-/** Ustteki pazar cubugu: son 24 saatin degisimi, en yuksegi, en dusugu (havuzun gercek fiyat noktalarindan). */
+/** Market bar at the top: change, high and low of the last 24 hours (from the pool's real price points). */
 function paintTradeBar() {
   const now = Date.now() / 1000, from = now - 86400;
   let chg = "—", hi = "—", lo = "—", cls = "";
@@ -4454,7 +4454,7 @@ function paintTradeBar() {
       if (x.t <= from) before = x.p;
       else inside.push(x.p);
     }
-    // 24 saat onceki fiyat bilinmiyorsa (gecmis o kadar geri gitmiyorsa) degisim gosterilmez
+    // If the price 24 hours ago is unknown (the history does not go back that far) the change is not shown
     const known = before !== null || (TR.scanned && pts[0].t > from);
     const start = before !== null ? before : pts[0].p;
     const set = [start, ...inside, TR.spot];
@@ -4474,7 +4474,7 @@ function paintTradeBar() {
   for (const el of document.querySelectorAll(".tb-lo")) el.textContent = lo;
 }
 
-/** Havuz derinligi: sabit carpim (x*y=k) havuzunda fiyat her seviyeye gelene kadar ne kadar islem yapilabilir. */
+/** Pool depth: how much can be traded in a constant-product (x*y=k) pool before the price reaches each level. */
 function paintDepth() {
   const el = $("dp");
   const r = TR.res;
@@ -4501,7 +4501,7 @@ function paintDepth() {
   }
 }
 
-/** Grafikteki emir cizgileri: acik alim ve satis emirleri (ek pazarda yalnizca o pazarin satis emirleri). */
+/** Order lines on the chart: open buy and sell orders (in an extra market only that market's sell orders). */
 let linesTimer = null;
 function tradeLinesSoon() {
   clearTimeout(linesTimer);
@@ -4525,7 +4525,7 @@ async function tradeLines() {
   drawChart();
 }
 
-// Pazar secici: XLM / USDC ve (varsa) gostermelik pazarlar
+// Market selector: XLM / USDC and the showcase markets (if any)
 for (const sel of document.querySelectorAll(".pairsel")) {
   if (V7) {
     sel.innerHTML = [{ sym: "XLM" }, ...PAIRS].map((p) => `<option value="${esc(p.sym)}"${p.sym === BS ? " selected" : ""}>${esc(p.sym)} / USDC</option>`).join("");
@@ -4540,7 +4540,7 @@ for (const sel of document.querySelectorAll(".pairsel")) {
 for (const b of document.querySelectorAll("#ch-tf [data-tf]")) {
   b.onclick = () => {
     TR.tf = Number(b.dataset.tf);
-    // Mum boyu degisince standart genislige ve "simdi"ye donulur: ekrana olabildigince cok mum (gecmis) sigar
+    // When the candle size changes, return to the standard width and to "now": as many candles (history) as possible fit on screen
     CH.cw = 8;
     CH.pan = 0;
     for (const o of document.querySelectorAll("#ch-tf [data-tf]")) o.setAttribute("aria-pressed", String(o === b));
@@ -4563,7 +4563,7 @@ for (const b of document.querySelectorAll("#ch-tf [data-tf]")) {
     if (CH.drag) {
       const dx = e.clientX - CH.drag.x;
       if (Math.abs(dx) > 3) CH.drag.moved = true;
-      if (CH.drag.moved) CH.pan = Math.max(0, CH.drag.pan + (dx / CH.cw) * TR.tf); // saga surukle: gecmise git
+      if (CH.drag.moved) CH.pan = Math.max(0, CH.drag.pan + (dx / CH.cw) * TR.tf); // drag right: go back in time
       cv.style.cursor = "grabbing";
     }
     drawChart();
@@ -4580,7 +4580,7 @@ for (const b of document.querySelectorAll("#ch-tf [data-tf]")) {
     TR.hover = null;
     drawChart();
   });
-  // Tekerlek: yakinlastir / uzaklastir (kova genisligi). Sayfa kaymasin diye yalnizca grafik uzerindeyken.
+  // Wheel: zoom in / out (bucket width). Only over the chart, so that the page does not scroll.
   cv.addEventListener(
     "wheel",
     (e) => {
@@ -4592,7 +4592,7 @@ for (const b of document.querySelectorAll("#ch-tf [data-tf]")) {
     { passive: false },
   );
   cv.addEventListener("dblclick", () => {
-    TR.fitted = null; // ilk gorunume don: tum gecmis ekrana sigar
+    TR.fitted = null; // back to the first view: the whole history fits on screen
     chartFit();
     drawChart();
   });
@@ -4617,10 +4617,10 @@ for (const b of document.querySelectorAll("#ch-tf [data-tf]")) {
   for (const b of document.querySelectorAll("#ch-mode [data-mode]")) b.onclick = () => setMode(b.dataset.mode);
   setMode(CH.mode);
   new ResizeObserver(() => drawChart()).observe(cv.parentElement);
-  // Tema degisince tuval yeniden boyanir (renkler CSS degiskenlerinden okunur)
+  // The canvas is repainted when the theme changes (colors are read from CSS variables)
   new MutationObserver(() => drawChart()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => drawChart());
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => drawChart()); // yazi tipi gelince olculer degisir
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => drawChart()); // sizes change once the font arrives
 }
 setInterval(() => {
   const v = document.body.dataset.view;
@@ -4628,8 +4628,8 @@ setInterval(() => {
 }, 20000);
 
 // ---------------------------------------------------------------------------
-// Emir turu: Limit / Market / Scaled. Limit ve Scaled ayni formu kullanir (kasadan, keeper doldurur);
-// Market eski Swap bolumudur: cuzdandan, Soroswap havuzunda o anda islem (kasayi kullanmaz).
+// Order type: Limit / Market / Scaled. Limit and Scaled use the same form (from the vault, filled by the keeper);
+// Market is the old Swap section: from the wallet, a trade in the Soroswap pool right away (does not use the vault).
 // ---------------------------------------------------------------------------
 function marketPaneSync(v) {
   const slot = document.querySelector(`[data-view-pane="${v}"] [data-pane="mkt"]`);
@@ -4640,7 +4640,7 @@ function marketPaneSync(v) {
     SW.dir = dir;
     $("swap-in").value = "";
   }
-  // Ek pazarda piyasa emri yok (yalnizca XLM / USDC havuzu): secili kaldiysa Limit'e doner
+  // No market order in an extra market (only the XLM / USDC pool): if it stayed selected it goes back to Limit
   const xm = document.body.classList.contains("xmarket");
   const opt = document.querySelector('#tk-sell [data-otsel] option[value="market"]');
   opt.hidden = opt.disabled = xm;
@@ -4654,7 +4654,7 @@ function syncOrderType() {
   $("place").textContent = LADDER.on ? `Place ${LADDER.n} buy orders` : `Buy ${BS}`;
   $("oqty").readOnly = LADDER.on;
   $("sv-val").readOnly = SVL.on;
-  if (SVL.on && SVT.type === "sl") setSellType("tp"); // zarar kes tek emirdir
+  if (SVL.on && SVT.type === "sl") setSellType("tp"); // a stop loss is a single order
   else {
     const sl = SVT.type === "sl";
     $("sv-px-label").textContent = SVL.on ? "Lowest price" : sl ? "Stop price" : "Price";
@@ -4690,11 +4690,11 @@ for (const [countId, distId, st] of [["ocount", "odist", LADDER], ["sv-ocount", 
 }
 $("olimit2").addEventListener("input", updateTicket);
 $("sv-px2").addEventListener("input", updateSellTicket);
-// Test funds sayfasindaki "USDC al" dugmesi: Trade > Sell > Market
+// The "get USDC" button on the Test funds page: Trade > Sell > Market
 $("go-mkt-sell").addEventListener("click", () => setTimeout(() => document.querySelector('#tk-sell [data-ot="market"]').click(), 0));
 
-// Tutar kutularinin altindaki yuzde dugmeleri: kullanilabilir bakiyenin yuzde kaci ile islem yapilacak.
-// (Eski "Market / -5% / -10% / -20%" fiyat dugmeleri kaldirildi; piyasa fiyati etiketine tiklamak fiyati doldurur.)
+// Percentage buttons under the amount boxes: what share of the available balance to trade with.
+// (The old "Market / -5% / -10% / -20%" price buttons were removed; clicking the market price label fills in the price.)
 {
   const pctOf = (units, p) => (units * BigInt(p)) / 100n;
   const mark = (box, on) => {
@@ -4709,10 +4709,10 @@ $("go-mkt-sell").addEventListener("click", () => setTimeout(() => document.query
         const v = pctOf(m, Number(b.dataset.p));
         input.value = v > 0n ? trim7(v) : "";
         after();
-        mark(box, b); // "after" input olayini tetiklemez; secili dugme isaretli kalir
+        mark(box, b); // "after" does not fire the input event; the selected button stays marked
       };
     }
-    input.addEventListener("input", () => mark(box, null)); // elle yazinca isaret kalkar
+    input.addEventListener("input", () => mark(box, null)); // typing by hand clears the mark
   };
   wire("amt-pct", "oamount", () => (freeUnits !== null ? buyRoom() : null), updateTicket);
   wire("sv-amt-pct", "sv-amt", () => (SV.free !== null ? sellRoom() : null), updateSellTicket);
@@ -4722,7 +4722,7 @@ $("go-mkt-sell").addEventListener("click", () => setTimeout(() => document.query
     () => {
       const bal = SW.dir === "xu" ? walletXlm : walletUsdc;
       if (bal === null) return null;
-      const m = SW.dir === "xu" ? bal - BASE_KEEP : bal; // XLM'de ucretler icin pay birak
+      const m = SW.dir === "xu" ? bal - BASE_KEEP : bal; // leave a margin for fees with XLM
       return m > 0n ? m : 0n;
     },
     doQuote,
@@ -4740,8 +4740,8 @@ $("go-mkt-sell").addEventListener("click", () => setTimeout(() => document.query
 }
 
 // ---------------------------------------------------------------------------
-// Emir formu (borsa duzeni): tur secimi acilir listeden, Quantity <-> Order value birbirine bagli,
-// "Max. buy / Max. sell" satiri, kar al kutusu onay kutusuyla acilir, "+" kasaya yatirma sekmesini acar.
+// Order form (exchange layout): type picked from a dropdown, Quantity <-> Order value tied together,
+// a "Max. buy / Max. sell" row, the take profit box opens with a checkbox, "+" opens the vault's deposit tab.
 // ---------------------------------------------------------------------------
 for (const sel of document.querySelectorAll("[data-otsel]")) {
   sel.onchange = () => sel.closest(".ticket").querySelector(`[data-ot="${sel.value}"]`).click();
@@ -4751,21 +4751,21 @@ const num = (id) => {
   return v > 0 ? v : 0;
 };
 const plain = (v, d) => String(Number(v.toFixed(d)));
-// Alim: Quantity (XLM) yazilinca Order value = miktar x fiyat
+// Buy: typing Quantity (XLM) sets Order value = quantity x price
 $("oqty").addEventListener("input", () => {
   if (LADDER.on) return;
   const q = num("oqty"), px = num("olimit");
   $("oamount").value = q && px ? plain(q * px, 7) : "";
   updateTicket();
 });
-// Satis: Order value yazilinca Quantity = deger / fiyat
+// Sell: typing Order value sets Quantity = value / price
 $("sv-val").addEventListener("input", () => {
   if (SVL.on) return;
   const v = num("sv-val"), px = num("sv-px");
   $("sv-amt").value = v && px ? plain(v / px, 7) : "";
   updateSellTicket();
 });
-/** "Max. buy" (kullanilabilir USDC ile bu fiyattan alinabilecek XLM) ve "Max. sell" (kullanilabilir XLM'in degeri). */
+/** "Max. buy" (the XLM the available USDC buys at this price) and "Max. sell" (the value of the available XLM). */
 function ticketExtras() {
   const n = nfmt;
   const bpx = num("olimit") || marketPrice || 0;
@@ -4774,11 +4774,11 @@ function ticketExtras() {
   $("sv-max-val").textContent = SV.free !== null && spx ? `${n((Number(SV.free) / 1e7) * spx, SV.out.sym === "USDC" ? 2 : 7)} ${SV.out.sym}` : "—";
 }
 for (const id of ["avail-buy", "sv-free2", "market", "sv-mkt"]) new MutationObserver(ticketExtras).observe($(id), { childList: true, characterData: true, subtree: true });
-// "+" : kasa kartindaki Deposit sekmesi
+// "+" : the Deposit tab of the vault card
 for (const b of document.querySelectorAll("[data-open-dep]")) b.onclick = () => openDeposit(b.dataset.openDep);
 $("buy-wal-dep").onclick = () => openDeposit("dep", walletDepositable("dep"));
 $("sv-wal-dep").onclick = () => openDeposit("sv-dep", walletDepositable("sv-dep"));
-// Kar al onay kutusu: isaret kalkinca fiyat silinir (kar al kapanir)
+// Take profit checkbox: unticking clears the price (take profit off)
 $("tp-on").onchange = () => {
   const on = $("tp-on").checked;
   $("autosell-row").classList.toggle("open", on);
@@ -4787,7 +4787,7 @@ $("tp-on").onchange = () => {
   $("tp-px").dispatchEvent(new Event("input", { bubbles: true }));
 };
 ticketExtras();
-// Onizlemede uyari (kirmizi madde) varsa kapali kalmasin: "What happens next" kendiliginden acilir.
+// If the preview has a warning (red item) it must not stay closed: "What happens next" opens by itself.
 for (const [listId, boxId] of [["preview-list", "preview"], ["sv-preview-list", "sv-preview"]]) {
   new MutationObserver(() => {
     if ($(listId).querySelector(".bad")) $(boxId).open = true;

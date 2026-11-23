@@ -11,7 +11,7 @@
     html.classList.remove("app-closed");
     window.dispatchEvent(new Event("iora:open"));
   }
-  // Cuzdanla alinan bilet o cuzdana aittir: baska bir cuzdan baglanirsa kapi yeniden kapanir.
+  // A ticket obtained with a wallet belongs to that wallet: if another wallet connects, the gate closes again.
   function lock(text) {
     try { localStorage.removeItem("iora-access"); } catch (e) {}
     window.__ioraSub = null;
@@ -47,7 +47,7 @@
     if (c && !document.body.classList.contains("connected")) c.click();
     else if (lastAddress) window.dispatchEvent(new CustomEvent("iora:wallet", { detail: lastAddress }));
   });
-  // main.js cuzdan baglaninca (veya zaten bagliysa) adresi bildirir
+  // main.js reports the address when the wallet connects (or is already connected)
   window.addEventListener("iora:wallet", function (e) {
     var address = e.detail;
     if (!address) return;

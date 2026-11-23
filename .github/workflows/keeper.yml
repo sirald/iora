@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
 
-# Tarama ve gunluk TTL ayri gruplarda: kuyruktaki TTL calismasi bir taramayla yer degistirip dusmesin.
+# Scans and the daily TTL run use separate groups, so a queued TTL run is not displaced by a scan.
 concurrency:
   group: keeper-${{ (github.event.schedule == '17 3 * * *' || inputs.ttl) && 'ttl' || 'scan' }}
   cancel-in-progress: false
@@ -24,8 +24,8 @@ permissions:
 
 jobs:
   run:
-    # Zamanlanmis calisma yalnizca depo degiskeni KEEPER_CLOUD=1 ise (scripts/keeper-github.sh bunu ayarlar).
-    # Boylece bilgisayardaki keeper ile ayni anda calisip islem cakismasi ve bosa Actions dakikasi olmaz.
+    # Scheduled runs happen only if the repository variable KEEPER_CLOUD=1 (set by scripts/keeper-github.sh).
+    # That way it never runs alongside a keeper on a local machine, which would collide and waste Actions minutes.
     if: ${{ github.event_name == 'workflow_dispatch' || vars.KEEPER_CLOUD == '1' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8

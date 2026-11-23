@@ -1,4 +1,4 @@
-// Coklu cuzdan kutuphanesi kurulamadiginda kullanilan yer tutucu: uygulama yalnizca Freighter ile calisir.
+// Placeholder used when the multi-wallet library could not be installed: the app works with Varial (Freighter) only.
 export const StellarWalletsKit = null;
 export function defaultModules() {
   return [];

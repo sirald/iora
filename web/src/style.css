@@ -1,6 +1,6 @@
 @import "./base.css";
 
-/* Testnet uygulamasi. Duzen: ustte kasa ozeti (Aave gibi), sagda tek islem karti (Uniswap limit karti gibi), solda emirler ve gecmis */
+/* Testnet app. Layout: vault summary on top (like Aave), a single action card on the right (like Uniswap's limit card), orders and history on the left */
 body.appbody {
   margin: 0;
   color: var(--text);
@@ -31,7 +31,7 @@ p { margin: 0 0 10px; }
 .panel > h2 { margin-bottom: 14px; }
 .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 
-/* ---------- Karsilama ---------- */
+/* ---------- Welcome ---------- */
 .welcome { padding: 28px 0 4px; }
 .welcome h1 {
   font-size: clamp(34px, 4.6vw, 54px);
@@ -47,7 +47,7 @@ p { margin: 0 0 10px; }
 }
 .welcome p { font-size: 17px; color: var(--muted); max-width: 58ch; }
 
-/* ---------- Kasa ozeti: kutusuz, buyuk rakamlar ---------- */
+/* ---------- Vault summary: no box, big numbers ---------- */
 .overview-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
 .overview h1 { font-size: 26px; font-weight: 500; letter-spacing: -0.025em; }
 .vault-chip { display: flex; align-items: center; gap: 8px; font-size: 13.5px; padding: 5px 6px 5px 12px; border-radius: 999px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
@@ -68,14 +68,14 @@ p { margin: 0 0 10px; }
 .novault h2 { font-size: 20px; margin-bottom: 6px; }
 .novault p { margin: 0; max-width: 60ch; }
 
-/* ---------- Kolonlar ---------- */
+/* ---------- Columns ---------- */
 .cols { display: grid; grid-template-columns: minmax(0, 1fr) 420px; grid-template-areas: "deck side"; gap: 22px; align-items: start; }
 .side { grid-area: side; display: grid; gap: 18px; position: sticky; top: 16px; min-width: 0; }
 .deck { grid-area: deck; display: grid; gap: 22px; min-width: 0; }
 .vault-only { display: none; }
 .has-vault .vault-only { display: block; }
 
-/* ---------- Butonlar ---------- */
+/* ---------- Buttons ---------- */
 .btn.block { display: block; width: 100%; padding: 17px; font-size: 16px; border-radius: 16px; margin-top: 14px; }
 .wide-btn { width: 100%; margin-top: 4px; }
 button.small, button.icon {
@@ -111,7 +111,7 @@ input::placeholder { color: var(--muted); opacity: 0.7; }
 .pair input { flex: 1; min-width: 0; }
 .pair .btn { padding: 11px 16px; font-size: 14px; white-space: nowrap; }
 
-/* ---------- Islem karti ---------- */
+/* ---------- Action card ---------- */
 .ticket { background: var(--surface); border-radius: 24px; padding: 10px; box-shadow: inset 0 0 0 1px var(--line), var(--shadow); }
 .ticket > [data-pane] { padding: 4px 6px 8px; }
 .tabs { display: flex; gap: 4px; padding: 4px 4px 10px; }
@@ -162,7 +162,7 @@ output.big { display: block; overflow: hidden; text-overflow: ellipsis; white-sp
 .adv-grid input { width: 100%; }
 .fine { margin: 12px 2px 0; font-size: 12.5px; color: var(--muted); }
 
-/* Fiyat cetveli (kart icinde, kompakt) */
+/* Price scale (inside the card, compact) */
 .gauge { margin: 18px 2px 4px; --market: 70%; --limit: 30%; }
 .gauge-scale {
   position: relative;
@@ -184,7 +184,7 @@ output.big { display: block; overflow: hidden; text-overflow: ellipsis; white-sp
 .now .gauge-note { color: var(--ok); }
 @media (prefers-reduced-motion: no-preference) { .gauge-mark, .gauge-gap { transition: left 0.35s ease, width 0.35s ease; } }
 
-/* Cuzdan */
+/* Wallet */
 dl { display: grid; grid-template-columns: auto 1fr; gap: 9px 0; margin: 0 0 12px; font-size: 14px; }
 dt { color: var(--muted); white-space: nowrap; }
 dd { margin: 0; padding-left: 12px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -192,7 +192,7 @@ dd { margin: 0; padding-left: 12px; text-align: right; font-variant-numeric: tab
 .side summary { cursor: pointer; font-weight: 500; color: var(--accent); font-size: 14px; }
 .side details p { margin: 10px 0; }
 
-/* Segment (gecmis / ozet) */
+/* Segment (history / summary) */
 .seg { display: inline-flex; padding: 3px; border-radius: 999px; background: var(--bg-2); }
 .seg button { font: 500 14px var(--sans); padding: 6px 14px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; }
 .seg button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(16, 24, 40, 0.1); }
@@ -200,9 +200,9 @@ dd { margin: 0; padding-left: 12px; text-align: right; font-variant-numeric: tab
 #orders[data-show="open"] tr.is-done { display: none; }
 .count { font: 500 12.5px var(--sans); color: var(--signal); margin-left: 6px; letter-spacing: 0; }
 
-/* Sohbet */
+/* Chat */
 
-/* Emir tablosu */
+/* Orders table */
 #orders { overflow-x: auto; }
 .empty { margin: 4px 0; color: var(--muted); padding: 22px 0; text-align: center; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
@@ -229,10 +229,10 @@ td .muted { display: block; font-size: 12px; }
 #log li.err { color: var(--err); }
 #log time { color: var(--muted); margin-right: 6px; }
 
-/* ---------- Kurulum listesi ---------- */
+/* ---------- Setup checklist ---------- */
 @keyframes beacon { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 60%, transparent); } 100% { box-shadow: 0 0 0 10px transparent; } }
 
-/* ---------- Bildirim ---------- */
+/* ---------- Notification ---------- */
 .status {
   position: fixed;
   left: 50%;
@@ -258,7 +258,7 @@ td .muted { display: block; font-size: 12px; }
 .status a { color: inherit; }
 @media (prefers-reduced-motion: no-preference) { .status { transition: transform 0.25s ease, opacity 0.25s ease; } }
 
-/* Gorunurluk */
+/* Visibility */
 .user-only { display: none; }
 .connected .user-only { display: block; }
 .connected .cols.user-only { display: grid; }
@@ -282,7 +282,7 @@ body:not(.has-vault) .side { position: static; }
   .big { font-size: 28px; }
 }
 
-/* ---------- Aciklama baloncugu ---------- */
+/* ---------- Tooltip ---------- */
 .tip {
   position: relative;
   display: inline-grid;
@@ -320,11 +320,11 @@ body:not(.has-vault) .side { position: static; }
   pointer-events: none;
   z-index: 20;
 }
-/* Gizliyken display:none: gorunmez baloncuklar telefonda sayfayi yana tasirmasin */
+/* display:none while hidden: invisible tooltips must not push the page sideways on a phone */
 .tip:hover::after, .tip:focus-visible::after { display: block; }
 @media (max-width: 700px) { .tip::after { left: auto; right: -8px; transform: none; max-width: min(260px, 80vw); } }
 
-/* ---------- Dagilim cubugu ve duz dil ozeti ---------- */
+/* ---------- Allocation bar and plain-language summary ---------- */
 .alloc { margin-top: 22px; }
 .alloc-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--bg-2); gap: 2px; }
 .alloc-bar span { display: block; height: 100%; }
@@ -335,7 +335,7 @@ body:not(.has-vault) .side { position: static; }
 .plain { margin: 14px 0 0; padding: 12px 16px; border-radius: 12px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); font-size: 14.5px; color: var(--text-2); max-width: 900px; }
 .plain b { color: var(--text); font-weight: 600; }
 
-/* ---------- Emir ozeti (kart icinde) ---------- */
+/* ---------- Order summary (inside the card) ---------- */
 .preview { margin: 12px 2px 0; padding: 14px 16px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 6%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent); }
 .preview-title { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--accent); }
 .preview ol { margin: 0; padding-left: 18px; display: grid; gap: 7px; font-size: 13px; color: var(--text-2); }
@@ -343,7 +343,7 @@ body:not(.has-vault) .side { position: static; }
 .preview b { color: var(--text); font-weight: 600; }
 .preview .bad { color: var(--err); }
 
-/* ---------- Piyasa paneli ---------- */
+/* ---------- Market panel ---------- */
 .head .more { font-size: 13px; color: var(--accent); text-decoration: none; }
 .head .more:hover { text-decoration: underline; }
 .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
@@ -356,7 +356,7 @@ body:not(.has-vault) .side { position: static; }
 .util-bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--signal)); }
 @media (prefers-reduced-motion: no-preference) { .util-bar span, .alloc-bar span { transition: width 0.6s ease; } }
 
-/* ---------- Fiyat cetvelinde emirler ---------- */
+/* ---------- Orders on the price scale ---------- */
 .lscale { position: relative; padding-top: 30px; }
 .lmarket { position: absolute; top: 0; bottom: 0; width: 0; left: calc(46px + (100% - 228px) * var(--p, 0.8)); border-left: 2px solid var(--accent); z-index: 1; }
 .lmarket em { position: absolute; top: 0; left: 6px; font: 500 12px var(--sans); font-style: normal; color: var(--accent); white-space: nowrap; }
@@ -371,7 +371,7 @@ body:not(.has-vault) .side { position: static; }
 .linfo small { display: block; font-size: 12px; color: var(--muted); }
 .ladder .fine { margin-top: 10px; }
 
-/* ---------- Guvenlik paneli ---------- */
+/* ---------- Security panel ---------- */
 .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .checks li { position: relative; padding-left: 30px; font-size: 14px; color: var(--text-2); }
 .checks li b { color: var(--text); font-weight: 600; }
@@ -401,7 +401,7 @@ body:not(.has-vault) .side { position: static; }
 .ticket .gauge { margin-bottom: 52px; }
 @media (max-width: 700px) { .lmarket { left: calc(42px + (100% - 42px) * var(--p, 0.8)); } }
 
-/* ---------- Uygulama ici gezinme ---------- */
+/* ---------- In-app navigation ---------- */
 .appnav { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); width: max-content; }
 .connected .appnav.user-only { display: flex; }
 .appnav a { display: inline-flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 999px; color: var(--muted); text-decoration: none; font-weight: 500; font-size: 14.5px; }
@@ -411,7 +411,7 @@ body:not(.has-vault) .side { position: static; }
 .view { display: grid; gap: 22px; }
 .view[hidden] { display: none !important; }
 
-/* ---------- Sohbet sayfasi ---------- */
+/* ---------- Chat page ---------- */
 .suggest { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .suggest button { font: 500 13px var(--sans); padding: 7px 12px; border-radius: 999px; border: 0; background: var(--bg-2); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; }
 .suggest button:hover { color: var(--text); box-shadow: inset 0 0 0 1px var(--line-2); }
@@ -466,7 +466,7 @@ td.pos { color: var(--ok); }
 
 .earn-cell { color: var(--ok); font-variant-numeric: tabular-nums; }
 
-/* ---------- Onay penceresi ---------- */
+/* ---------- Confirmation dialog ---------- */
 .ask {
   width: min(460px, calc(100vw - 32px));
   padding: 0;
@@ -540,7 +540,7 @@ td.pos { color: var(--ok); }
 .head #notify-btn { margin-left: auto; }
 .head #notify-btn:disabled { opacity: 0.7; cursor: default; }
 
-/* ---------- Risk bildirimi ---------- */
+/* ---------- Risk notice ---------- */
 .risk { width: min(520px, calc(100vw - 32px)); }
 .risk-badge { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 4px 12px 4px 9px; border-radius: 999px; font-size: 12.5px; font-weight: 500; background: var(--bg-2); }
 .chain-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
@@ -551,7 +551,7 @@ td.pos { color: var(--ok); }
 .risk-check input { width: 18px; height: 18px; margin-top: 2px; padding: 0; accent-color: var(--accent); box-shadow: none; }
 .risk .ask-actions .btn { text-align: center; }
 
-/* Kademeli emir onizlemesi */
+/* Scaled order preview */
 .ladder-preview { margin: 10px 2px 0; display: grid; gap: 4px; padding: 10px 12px; border-radius: 12px; background: var(--bg-2); font-size: 13px; font-variant-numeric: tabular-nums; }
 .ladder-preview div { display: grid; grid-template-columns: 52px auto 1fr auto; gap: 10px; align-items: baseline; }
 .ladder-preview span:first-child { color: var(--muted); }
@@ -559,10 +559,10 @@ td.pos { color: var(--ok); }
 
 .lmarket.flip em { left: auto; right: 6px; }
 
-/* Satis kasasi: alim kasasiyla ayni duzen */
+/* Sell vault: same layout as the buy vault */
 .sv-only { display: none; }
 .has-svault .sv-only { display: block; }
-/* Alim kasasinin "kasa yoksa tek sutun" kurali (body:not(.has-vault) .cols) burayi etkilemesin */
+/* The buy vault's "single column without a vault" rule (body:not(.has-vault) .cols) must not affect this */
 body.has-svault .sellview .cols { grid-template-columns: minmax(0, 1fr) 420px; grid-template-areas: "deck side"; }
 body.has-svault .sellview .side { position: sticky; }
 body:not(.has-svault) .sellview .cols { grid-template-columns: minmax(0, 420px); grid-template-areas: "side" "deck"; }
@@ -573,7 +573,7 @@ body:not(.has-svault) .sellview .side { position: static; }
   body.has-svault .sellview .side { position: static; }
 }
 
-/* Portfoy ozeti: iki kasanin toplami (alim ve satis sayfalarinin ustunde) */
+/* Portfolio summary: the two vaults' total (above the buy and sell pages) */
 .portfolio { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 32px; margin: 0 0 22px; padding: 14px 20px; border-radius: 16px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
 .portfolio > div, .portfolio > a > div { display: grid; gap: 2px; min-width: 0; }
 .portfolio > a { display: block; min-width: 0; }
@@ -586,7 +586,7 @@ body:not(.has-svault) .sellview .side { position: static; }
 .portfolio a:hover b { text-decoration: underline; text-underline-offset: 3px; }
 @media (max-width: 640px) { .portfolio { gap: 10px 20px; padding: 12px 14px; } .portfolio > div, .portfolio > a { flex: 1 1 40%; } }
 
-/* Satis turu secimi (kar al / zarar kes) */
+/* Sell order type selector (take profit / stop loss) */
 .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: 0 0 10px; border-radius: 14px; background: var(--bg-2); }
 .segmented[hidden] { display: none; }
 .segmented button { border: 0; background: transparent; padding: 9px 10px; border-radius: 10px; font: 500 14px var(--sans); color: var(--muted); cursor: pointer; }
@@ -595,7 +595,7 @@ body:not(.has-svault) .sellview .side { position: static; }
 .tag.stop { background: color-mix(in srgb, var(--err, #c0392b) 12%, transparent); color: var(--err, #c0392b); }
 .then-note { display: block; font-size: 12px; color: var(--muted); }
 
-/* Eski surum kasalar: yeni kasaya tasima karti */
+/* Old-version vaults: the card for moving to the new vault */
 .legacy { margin: 0 0 22px; padding: 22px 24px; border-radius: 20px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line), var(--shadow, 0 10px 30px -18px rgb(0 0 0 / 0.35)); position: relative; overflow: hidden; }
 .legacy::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: linear-gradient(180deg, var(--primary-1, var(--accent)), var(--primary-2, var(--accent))); }
 .legacy-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 18px; }
@@ -619,12 +619,12 @@ body:not(.has-svault) .sellview .side { position: static; }
   .legacy-actions .link { text-align: center; }
 }
 
-/* "user-only" bagli kullanicida display:block verir; bu iki kutu kendi duzenini ve hidden'i korusun */
+/* "user-only" gives display:block to a connected user; these two boxes keep their own layout and hidden */
 .connected .portfolio.user-only { display: flex; }
 .connected .legacy.user-only { display: block; }
 .portfolio[hidden], .legacy[hidden] { display: none !important; }
 
-/* Yanlis ag uyarisi */
+/* Wrong network warning */
 .netwarn { position: sticky; top: 0; z-index: 50; padding: 12px 16px 0; }
 .netwarn[hidden] { display: none; }
 .netwarn-card { max-width: 760px; margin: 0 auto; padding: 16px 20px; border-radius: 16px; background: color-mix(in srgb, var(--signal, #e8b33a) 14%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--signal, #e8b33a) 55%, var(--line)), var(--shadow, 0 10px 30px -18px rgb(0 0 0 / .35)); font-size: 14px; line-height: 1.5; }
@@ -633,7 +633,7 @@ body:not(.has-svault) .sellview .side { position: static; }
 .netwarn-card ol { margin: 4px 0 6px; padding-left: 20px; display: grid; gap: 2px; }
 .netwarn-foot { font-size: 12.5px; }
 
-/* Cuzdan menusu (sag ust) */
+/* Wallet menu (top right) */
 .wallet-wrap { position: relative; display: inline-flex; }
 #connect .wdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok, #1f9d55); margin-right: 8px; display: inline-block; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #1f9d55) 22%, transparent); }
 #connect .wcaret { margin-left: 8px; font-size: 11px; opacity: 0.7; }
@@ -656,7 +656,7 @@ body:not(.has-svault) .sellview .side { position: static; }
 .wm-links a:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .wm-disc { border: 0; cursor: pointer; padding: 11px; border-radius: 12px; font: 600 14px var(--sans); color: var(--err, #c0392b); background: color-mix(in srgb, var(--err, #c0392b) 10%, transparent); }
 .wm-disc:hover { background: color-mix(in srgb, var(--err, #c0392b) 16%, transparent); }
-/* Ust bar kurallari menunun icine sizmasin (nav flex, mobilde linkleri gizleme) */
+/* Top bar rules must not leak into the menu (nav flex, hiding links on mobile) */
 .top nav .wmenu .wm-links { display: grid; gap: 2px; justify-items: stretch; }
 .top nav .wmenu .wm-links a { display: block; }
 .wmenu .wm-bal dd { text-align: left; }

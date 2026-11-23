@@ -1,5 +1,5 @@
-// Ana sayfa hareketleri: kaydirinca beliren bolumler, sayi sayaclari, ust ilerleme cizgisi,
-// fareyi takip eden hafif isik ve kartlarda egim. Hareket istemeyenlerde (prefers-reduced-motion) hicbiri calismaz.
+// Home page motion: sections that appear on scroll, number counters, the top progress line,
+// a faint light that follows the mouse and a tilt on cards. None of it runs for people who prefer reduced motion.
 
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const fine = matchMedia("(pointer: fine)").matches;
@@ -9,7 +9,7 @@ if (!reduce) start();
 function start() {
   document.body.classList.add("motion");
 
-  // 1) Kaydirinca beliren ogeler (bolum basliklari, kartlar, satirlar), kademeli gecikmeyle
+  // 1) Elements that appear on scroll (section headings, cards, rows), with a staggered delay
   const groups = [
     ["main section h2, main section .section-lede, .why-text > .calc, .costs-lede, .control a.more", 0],
     [".use-grid article", 90],
@@ -47,7 +47,7 @@ function start() {
   );
   for (const el of seen) io.observe(el);
 
-  // Yol haritasi cizgisi ve karsilastirma tablosundaki Iora sutunu kendi zamanlariyla
+  // The roadmap line and the Iora column of the comparison table run on their own timing
   for (const el of document.querySelectorAll(".road-h, .cmp")) {
     new IntersectionObserver(
       ([e], obs) => {
@@ -60,7 +60,7 @@ function start() {
     ).observe(el);
   }
 
-  // 2) Sayi sayaclari: "Fee to place an order 0.018 XLM" gibi rakamlar gorununce sifirdan sayar
+  // 2) Number counters: figures such as "Fee to place an order 0.018 XLM" count up from zero when they come into view
   const facts = document.querySelector(".facts");
   if (facts) {
     const items = [...facts.querySelectorAll("dd")]
@@ -85,7 +85,7 @@ function start() {
     ).observe(facts);
   }
 
-  // 3) Sayfanin ustunde ince ilerleme cizgisi
+  // 3) A thin progress line at the top of the page
   const bar = document.createElement("div");
   bar.className = "scroll-progress";
   bar.setAttribute("aria-hidden", "true");
@@ -104,9 +104,9 @@ function start() {
   addEventListener("scroll", onScroll, { passive: true });
   onScroll();
 
-  if (!fine) return; // dokunmatik ekranlarda fare efektleri yok
+  if (!fine) return; // no mouse effects on touch screens
 
-  // 4) Kartlarin icinde fareyi takip eden yumusak isik + cok hafif egim
+  // 4) A soft light inside cards that follows the mouse + a very slight tilt
   for (const card of document.querySelectorAll(".use-grid article, .rules > div, .steps li, .beta form")) {
     card.classList.add(card.matches(".steps li") ? "lift" : "glow");
     card.addEventListener("pointermove", (e) => {

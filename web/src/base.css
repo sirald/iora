@@ -1,10 +1,10 @@
-/* Iora: buyuk I harfi serifli (Iora 'lora' okunmasin) */
+/* Iora: the capital I has serifs (so that Iora is not read as 'lora') */
 @font-face{font-family:"SerifI";src:url(/fonts/serif-i-Light.woff) format("woff");font-weight:300;font-display:swap;unicode-range:U+0049}
 @font-face{font-family:"SerifI";src:url(/fonts/serif-i-Regular.woff) format("woff");font-weight:400;font-display:swap;unicode-range:U+0049}
 @font-face{font-family:"SerifI";src:url(/fonts/serif-i-Medium.woff) format("woff");font-weight:500;font-display:swap;unicode-range:U+0049}
 @font-face{font-family:"SerifI";src:url(/fonts/serif-i-SemiBold.woff) format("woff");font-weight:600;font-display:swap;unicode-range:U+0049}
-/* Iora ortak tokenlar: "emir fisi" gorunumu. Logonun mavisi tek vurgu; soguk beyaz / gece laciverti zemin, lacivert yazi. */
-/* Iki tema. Varsayilan: sistemin tercihi; kullanici secerse html[data-theme] ile sabitlenir. */
+/* Iora shared tokens: the "order slip" look. The logo's blue is the only accent; cool white / night navy ground, navy text. */
+/* Two themes. Default: the system preference; if the user chooses, it is fixed with html[data-theme]. */
 :root {
   color-scheme: light;
   --bg: #f4f6fa;
@@ -92,7 +92,7 @@
   --display: "IBM Plex Sans", "Inter", system-ui, sans-serif;
   --sans: "IBM Plex Sans", "Inter", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* eski adlar */
+  /* old names */
   --chart: var(--bg);
   --chart-deep: var(--bg-2);
   --paper: var(--surface);
@@ -171,7 +171,7 @@ a { color: var(--accent); }
 .bottom p { margin: 4px 0; }
 .bottom a { color: var(--text); }
 
-/* Tema dugmesi */
+/* Theme toggle */
 .theme-toggle {
   width: 36px;
   height: 36px;
@@ -194,7 +194,7 @@ a { color: var(--accent); }
   :root:not([data-theme="light"]) .theme-toggle .moon { display: none; }
 }
 
-/* Ana eylem butonu */
+/* Primary action button */
 .btn.primary { background: linear-gradient(180deg, var(--primary-1), var(--primary-2)); color: var(--accent-ink); box-shadow: 0 1px 0 color-mix(in srgb, white 20%, transparent) inset, 0 6px 18px color-mix(in srgb, var(--primary-2) 30%, transparent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--primary-1), var(--primary-2)); }
 .btn.primary:disabled:hover { filter: none; }

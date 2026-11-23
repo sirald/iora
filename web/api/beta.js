@@ -1,12 +1,12 @@
-// Vercel sunucusuz fonksiyonu: beta kaydini sahibin Telegram'ina iletir. Hicbir yerde saklamaz.
-// Gerekli ortam degiskenleri: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (set by scripts/deploy-web.sh).
+// Vercel serverless function: forwards a beta sign-up to the owner's Telegram. It is not stored anywhere.
+// Required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (set by scripts/deploy-web.sh).
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const TELEGRAM = /^@?[A-Za-z0-9_]{5,32}$/;
-const LEVELS = { yeni: "Hic kullanmadim", biraz: "Cuzdani var", deneyimli: "DeFi kullaniyor" };
+const LEVELS = { new: "Never used it", wallet: "Has a wallet", defi: "Uses DeFi" };
 // Only form posts from our own site (browsers always add the Origin header).
 const ORIGINS = /^https:\/\/(iorafi\.com|www\.iorafi\.com|berthly[a-z0-9-]*\.vercel\.app)$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
-// Basit sel korumasi (sunucu ornegi basina): ayni IP 10 dakikada en fazla 3, toplamda saatte en fazla 30 kayit.
-// Amac, sahte kayit seliyle Telegram'in hiz sinirina takilip keeper uyarilarinin gecikmesini onlemek.
+// Simple flood protection (per server instance): at most 3 sign-ups per IP in 10 minutes, 30 per hour in total.
+// The aim is to keep a flood of fake sign-ups from hitting Telegram's rate limit and delaying keeper alerts.
 const hits = new Map();
 let hourStart = 0;
 let hourCount = 0;
@@ -40,14 +40,14 @@ module.exports = async (req, res) => {
       return res.status(400).json({ ok: false });
     }
   }
-  // Bot tuzagi: gercek kullanicilar bu alani gormez.
+  // Bot trap: real users never see this field.
   if (body.website) return res.status(200).json({ ok: true });
 
   const contact = String(body.contact || "").trim().slice(0, 120);
-  // Ad serbest metin: satir sonu ve kontrol karakterleri temizlenir ki Telegram mesajina sahte
-  // satir (or. sahte bir "calistir" komutu) eklenemesin.
+  // The name is free text: line breaks and control characters are removed so that fake lines cannot be added to
+  // the Telegram message (e.g. a fake "run this" command).
   const name = String(body.name || "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
-  const level = LEVELS[body.level] || "belirtilmedi";
+  const level = LEVELS[body.level] || "not given";
   const wallet = String(body.wallet || "").trim().toUpperCase();
   if (!/^G[A-Z2-7]{55}$/.test(wallet)) return res.status(400).json({ ok: false });
   if (!(EMAIL.test(contact) || TELEGRAM.test(contact)) || body.consent !== true) {
@@ -55,7 +55,7 @@ module.exports = async (req, res) => {
   }
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  // Ayri bir sohbet tanimlanmissa beta kayitlari oraya gider (keeper uyarilariyla karismaz).
+  // If a separate chat is configured, beta sign-ups go there (they do not mix with keeper alerts).
   const chat = process.env.TELEGRAM_BETA_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) return res.status(500).json({ ok: false });
 

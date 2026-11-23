@@ -1,5 +1,5 @@
-//! Yerel testler. Blend ve Soroswap yerine davranislari taklit eden sahte
-//! (mock) sozlesmeler kullanilir; yetkilendirme kurallari gercekleriyle ayni.
+//! Local tests. Instead of Blend and Soroswap they use mock contracts that imitate
+//! their behaviour; the authorization rules are the same as the real ones.
 extern crate std;
 
 use super::*;
@@ -10,18 +10,18 @@ use soroban_sdk::{
     symbol_short, vec, Address, Env, Map, Vec,
 };
 
-const U: i128 = 10_000_000; // 1 token (7 ondalik)
+const U: i128 = 10_000_000; // 1 token (7 decimals)
 const NOW: u64 = 1_000_000;
 const DAY: u64 = 86_400;
 const IMPACT: u32 = 300; // %3
 
-/// Sozlesme hata kodunu istemcinin dondurdugu genel hata tipine cevirir.
+/// Turns a contract error code into the generic error type the client returns.
 fn ce(e: Error) -> soroban_sdk::Error {
     e.into()
 }
 
 // ---------------------------------------------------------------------------
-// Sahte Blend havuzu (b_token + b_rate muhasebesi gercegine benzer)
+// Mock Blend pool (b_token + b_rate accounting close to the real one)
 // ---------------------------------------------------------------------------
 
 const RESERVE_INDEX: u32 = 3;
@@ -113,7 +113,7 @@ impl MockPool {
                     burn = bal;
                     amt = bal * rate / B_RATE_SCALE;
                 }
-                // Havuzda nakit yoksa bu transfer basarisiz olur (likidite yetersiz).
+                // If the pool has no cash this transfer fails (not enough liquidity).
                 tc.transfer(&me, &to, &amt);
                 env.storage().instance().set(&key, &(bal - burn));
             } else {
@@ -154,7 +154,7 @@ impl MockPool {
         0
     }
 
-    /// Faiz birikimini taklit eder.
+    /// Imitates interest accruing.
     pub fn set_b_rate(env: Env, rate: i128) {
         env.storage().instance().set(&PoolKey::BRate, &rate);
     }
@@ -163,7 +163,7 @@ impl MockPool {
         env.storage().instance().get(&PoolKey::BTokens(who)).unwrap_or(0)
     }
 
-    /// Borc alanlarin havuzdaki nakdi cekmesini taklit eder.
+    /// Imitates borrowers taking the cash out of the pool.
     pub fn lend_out(env: Env, to: Address, amount: i128) {
         let token: Address = env.storage().instance().get(&PoolKey::Token).unwrap();
         TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
@@ -171,15 +171,15 @@ impl MockPool {
 }
 
 // ---------------------------------------------------------------------------
-// Sahte Soroswap router (sabit fiyat; buyuk islemlerde istege bagli fiyat etkisi)
+// Mock Soroswap router (fixed price; optional price impact on large trades)
 // ---------------------------------------------------------------------------
 
 #[contracttype]
 #[derive(Clone)]
 pub enum RouterKey {
-    /// 1 USDC karsiligi verilen XLM (7 ondalik).
+    /// XLM given for 1 USDC (7 decimals).
     Price,
-    /// (esik, bps): esigi asan islemlerde cikis bps kadar azalir.
+    /// (threshold, bps): on trades above the threshold the output drops by bps.
     Penalty,
 }
 
@@ -242,7 +242,7 @@ impl MockRouter {
 }
 
 // ---------------------------------------------------------------------------
-// Sahte fiyat oracle'i (Blend/Reflector arayuzu): fiyat 7 ondalik, zaman damgasi ayarlanabilir
+// Mock price oracle (Blend/Reflector interface): price with 7 decimals, adjustable timestamp
 // ---------------------------------------------------------------------------
 
 #[contracttype]
@@ -262,12 +262,12 @@ impl MockOracle {
         env.storage().instance().set(&OracleKey::Price(asset), &price);
     }
 
-    /// Fiyatin kac saniye once guncellendigini taklit eder (eski veri testi).
+    /// Imitates how many seconds ago the price was updated (stale data test).
     pub fn set_age(env: Env, age: u64) {
         env.storage().instance().set(&OracleKey::Age, &age);
     }
 
-    /// Gelecekten zaman damgasi (bozuk oracle) taklidi.
+    /// Imitates a timestamp from the future (a broken oracle).
     pub fn set_future(env: Env, secs: u64) {
         env.storage().instance().set(&OracleKey::Future, &secs);
     }
@@ -282,7 +282,7 @@ impl MockOracle {
 }
 
 // ---------------------------------------------------------------------------
-// Sahte duraklatma sozlesmesi (fabrikanin yerine)
+// Mock pause contract (in place of the factory)
 // ---------------------------------------------------------------------------
 
 #[contract]
@@ -298,7 +298,7 @@ impl MockGuard {
         env.storage().instance().set(&symbol_short!("p"), &paused);
     }
 
-    /// Kardes fabrika taklidi: testlerde ayni sahte sozlesme iki fabrikanin da yerini tutar.
+    /// Sibling factory stand-in: in the tests the same mock contract stands for both factories.
     pub fn sibling(env: Env) -> Option<Address> {
         env.storage().instance().get(&symbol_short!("s"))
     }
@@ -317,7 +317,7 @@ impl MockGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Sahte token: belirli bir adrese transferi reddedebilir (trustline'i olmayan cuzdan taklidi)
+// Mock token: can refuse a transfer to a given address (imitates a wallet without a trustline)
 // ---------------------------------------------------------------------------
 
 #[contracttype]
@@ -365,7 +365,7 @@ impl MockToken {
 }
 
 // ---------------------------------------------------------------------------
-// Kurulum
+// Setup
 // ---------------------------------------------------------------------------
 
 struct Setup<'a> {
@@ -382,7 +382,7 @@ struct Setup<'a> {
     vault: OrderVaultClient<'a>,
 }
 
-/// XLM fiyati 0,20 USDC (1 USDC = 5 XLM). Kullanicinin 10.000 USDC'si var.
+/// XLM price 0.20 USDC (1 USDC = 5 XLM). The user has 10,000 USDC.
 fn setup() -> Setup<'static> {
     let env = Env::default();
     env.mock_all_auths();
@@ -397,7 +397,7 @@ fn setup() -> Setup<'static> {
     let pool_id = env.register(MockPool, (usdc_id.clone(),));
     let router_id = env.register(MockRouter, (5 * U,));
     let guard_id = env.register(MockGuard, ());
-    // Oracle: USDC 1,00 $, XLM 0,20 $ (havuz fiyatiyla ayni)
+    // Oracle: USDC $1.00, XLM $0.20 (same as the pool price)
     let oracle_id = env.register(MockOracle, ());
     MockPoolClient::new(&env, &pool_id).set_oracle(&oracle_id);
     MockOracleClient::new(&env, &oracle_id).set_price(&usdc_id, &10_000_000);
@@ -434,7 +434,7 @@ fn setup() -> Setup<'static> {
     }
 }
 
-/// 10.000 USDC yatir, 4.000 USDC'lik "XLM <= 0,20" emri ver (asgari dolum 500).
+/// Deposit 10,000 USDC, place a 4,000 USDC "XLM <= 0.20" order (minimum fill 500).
 fn setup_with_order() -> Setup<'static> {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
@@ -455,7 +455,7 @@ fn assert_order_untouched(s: &Setup) {
 }
 
 // ---------------------------------------------------------------------------
-// Temel akis
+// Basic flow
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -491,7 +491,7 @@ fn fills_at_limit_and_sends_xlm_to_owner() {
 #[test]
 fn better_price_gives_more_xlm() {
     let s = setup_with_order();
-    s.router.set_price(&(6 * U)); // XLM 0,1667 USDC
+    s.router.set_price(&(6 * U)); // XLM 0.1667 USDC
     let out = s.vault.execute(&s.outsider, &0, &(1_000 * U));
     assert_eq!(out, 6_000 * U);
 }
@@ -499,17 +499,17 @@ fn better_price_gives_more_xlm() {
 #[test]
 fn whole_tx_reverts_when_price_is_worse() {
     let s = setup_with_order();
-    s.router.set_price(&(4 * U)); // XLM 0,25 USDC: limit saglanmiyor
+    s.router.set_price(&(4 * U)); // XLM 0.25 USDC: the limit is not met
     assert!(s.vault.try_execute(&s.outsider, &0, &(4_000 * U)).is_err());
-    // Blend cekimi de geri alinmis olmali.
+    // The Blend withdrawal must be rolled back too.
     assert_eq!(s.pool.b_tokens(&s.vault.address), 10_000 * U);
     assert_order_untouched(&s);
 }
 
 #[test]
 fn execute_needs_no_signature() {
-    // Keeper hicbir imza vermeden cagirir. Kasanin Blend ve Soroswap icindeki
-    // token transferlerini kendi adina yetkilendirmesi gercekten calisiyor mu?
+    // The keeper calls without any signature. Does the vault authorizing token transfers inside Blend and
+    // Soroswap on its own behalf really work?
     let s = setup_with_order();
     s.env.set_auths(&[]);
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
@@ -531,7 +531,7 @@ fn only_owner_can_move_funds_or_orders() {
 }
 
 // ---------------------------------------------------------------------------
-// Kismi dolum, likidite, rezerv
+// Partial fill, liquidity, reserve
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -556,12 +556,12 @@ fn fill_cannot_leave_remainder_below_min_fill() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     s.vault.place_order(&(4_000 * U), &2_000_000, &(1_500 * U), &IMPACT, &(NOW + DAY));
-    // 3.000 doldurmak geride 1.000 (< asgari 1.500) birakirdi: reddedilir.
+    // Filling 3,000 would leave 1,000 (< the minimum 1,500): rejected.
     assert_eq!(s.vault.try_execute(&s.outsider, &0, &(3_000 * U)), Err(Ok(ce(Error::FillTooSmall))));
-    // "Kalan - 1" dolumuyla emri kirintiyla acik birakma denemesi de reddedilir.
+    // Trying to leave the order open with a crumb by a "remaining - 1" fill is rejected too.
     assert_eq!(s.vault.try_execute(&s.outsider, &0, &(4_000 * U - 1)), Err(Ok(ce(Error::FillTooSmall))));
     assert_eq!(s.vault.get_order(&0).filled_in, 0);
-    // 2.500 doldurmak geride 1.500 birakir: gecerli; kalan tek parcada biter.
+    // Filling 2,500 leaves 1,500: valid; the rest completes in one piece.
     s.vault.execute(&s.outsider, &0, &(2_500 * U));
     assert_eq!(s.vault.try_execute(&s.outsider, &0, &(1_000 * U)), Err(Ok(ce(Error::FillTooSmall))));
     s.vault.execute(&s.outsider, &0, &(1_500 * U));
@@ -572,14 +572,14 @@ fn fill_cannot_leave_remainder_below_min_fill() {
 #[test]
 fn low_blend_liquidity_reverts_then_partial_succeeds() {
     let s = setup_with_order();
-    // Borc alanlar havuzun nakdinin 9.000'ini cekmis; 1.000 nakit kalmis.
+    // Borrowers took 9,000 of the pool's cash; 1,000 is left.
     s.pool.lend_out(&s.outsider, &(9_000 * U));
 
     assert!(s.vault.try_execute(&s.outsider, &0, &(4_000 * U)).is_err());
     assert_eq!(s.pool.b_tokens(&s.vault.address), 10_000 * U);
     assert_order_untouched(&s);
 
-    // Keeper kisa miktarla yeniden dener.
+    // The keeper retries with a smaller amount.
     let out = s.vault.execute(&s.outsider, &0, &(1_000 * U));
     assert_eq!(out, 5_000 * U);
     assert_eq!(s.vault.reserved(), 3_000 * U);
@@ -587,7 +587,7 @@ fn low_blend_liquidity_reverts_then_partial_succeeds() {
 
 #[test]
 fn reserved_balance_cannot_be_spent_twice() {
-    let s = setup_with_order(); // 4.000 ayrildi, 6.000 serbest
+    let s = setup_with_order(); // 4,000 reserved, 6,000 free
     assert_eq!(
         s.vault.try_place_order(&(6_001 * U), &2_000_000, &(1_000 * U), &IMPACT, &(NOW + DAY)),
         Err(Ok(ce(Error::InsufficientFree)))
@@ -597,7 +597,7 @@ fn reserved_balance_cannot_be_spent_twice() {
     s.vault.withdraw(&s.vault.free_balance());
     assert_eq!(s.usdc.balance(&s.owner), 6_000 * U - ROUNDING_BUFFER);
     assert_eq!(s.vault.free_balance(), 0);
-    // Emir hala tam doldurulabilir.
+    // The order can still be filled in full.
     s.vault.execute(&s.outsider, &0, &(4_000 * U));
 }
 
@@ -619,7 +619,7 @@ fn expired_order_cannot_execute() {
     let s = setup_with_order();
     s.env.ledger().set_timestamp(NOW + DAY + 1);
     assert_eq!(s.vault.try_execute(&s.outsider, &0, &(4_000 * U)), Err(Ok(ce(Error::OrderExpired))));
-    // Suresi gecen emri kullanici iptal edip parasini alabilir.
+    // The user can cancel an expired order and take the funds back.
     s.vault.cancel_order(&0);
     s.vault.withdraw(&(10_000 * U));
 }
@@ -658,10 +658,10 @@ fn min_out_rounds_up() {
 }
 
 // ---------------------------------------------------------------------------
-// Faiz muhasebesi
+// Interest accounting
 // ---------------------------------------------------------------------------
 
-/// Havuz %5 faiz kazandirmis gibi yapar (faizi odeyecek nakit de havuza eklenir).
+/// Pretends the pool earned 5% interest (the cash to pay it is added to the pool too).
 fn accrue_5_percent(s: &Setup) {
     s.pool.set_b_rate(&(B_RATE_SCALE * 105 / 100));
     s.usdc_admin.mint(&s.pool.address, &(500 * U));
@@ -689,44 +689,44 @@ fn interest_can_fund_orders() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     accrue_5_percent(&s);
-    // Anaparadan fazla, ama faiz dahil bakiyeden az.
+    // More than the principal, but less than the balance with interest.
     s.vault.place_order(&(10_400 * U), &2_000_000, &(1_000 * U), &IMPACT, &(NOW + DAY));
     assert_eq!(s.vault.free_balance(), 100 * U - ROUNDING_BUFFER);
     s.vault.execute(&s.outsider, &0, &(10_400 * U));
     assert_eq!(s.xlm.balance(&s.owner), 52_000 * U);
     assert_eq!(s.vault.deposited(), 0);
-    // Blend yuvarlamasi en fazla 1 birim.
+    // Blend's rounding is at most 1 unit.
     let b = s.vault.balance();
     assert!(b >= 100 * U - 1 && b <= 100 * U);
 }
 
 #[test]
 fn reserved_stays_safe_while_interest_accrues() {
-    let s = setup_with_order(); // 4.000 ayrildi
+    let s = setup_with_order(); // 4,000 reserved
     accrue_5_percent(&s);
-    // Serbest = 10.500 - 4.000
+    // Free = 10,500 - 4,000
     assert_eq!(s.vault.free_balance(), 6_500 * U - ROUNDING_BUFFER);
     assert_eq!(s.vault.try_withdraw(&(6_500 * U)), Err(Ok(ce(Error::InsufficientFree))));
-    // Serbest bakiyenin tamamini cekmek rezervi eksik birakmamali (yuvarlama tamponu).
+    // Withdrawing the whole free balance must not leave the reserve short (rounding buffer).
     s.vault.withdraw(&s.vault.free_balance());
-    // Emir hala tam doldurulabilir.
+    // The order can still be filled in full.
     s.vault.execute(&s.outsider, &0, &(4_000 * U));
     assert_eq!(s.vault.get_order(&0).status, OrderStatus::Filled);
 }
 
 // ---------------------------------------------------------------------------
-// Fiyat etkisi korumasi
+// Price impact guard
 // ---------------------------------------------------------------------------
 
 #[test]
 fn high_impact_fill_rejected_smaller_fill_ok() {
-    let s = setup_with_order(); // azami etki %3
-    // 2.000 USDC'yi asan takaslar %5 daha az XLM verir (sig havuz).
+    let s = setup_with_order(); // maximum impact 3%
+    // Swaps above 2,000 USDC give 5% less XLM (shallow pool).
     s.router.set_penalty(&(2_000 * U), &500);
     assert_eq!(s.vault.try_execute(&s.outsider, &0, &(4_000 * U)), Err(Ok(ce(Error::ImpactTooHigh))));
     assert_order_untouched(&s);
 
-    // Keeper parcalara boler.
+    // The keeper splits it into pieces.
     s.vault.execute(&s.outsider, &0, &(2_000 * U));
     s.vault.execute(&s.outsider, &0, &(2_000 * U));
     assert_eq!(s.vault.get_order(&0).status, OrderStatus::Filled);
@@ -737,7 +737,7 @@ fn high_impact_fill_rejected_smaller_fill_ok() {
 fn impact_within_tolerance_passes() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
-    // Azami etki %6, havuz etkisi %5: gecer. Limit 0,25 oldugu icin fiyat da tutar.
+    // Maximum impact 6%, pool impact 5%: passes. The limit is 0.25, so the price holds too.
     s.vault.place_order(&(4_000 * U), &2_500_000, &(500 * U), &600, &(NOW + DAY));
     s.router.set_penalty(&(2_000 * U), &500);
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
@@ -749,13 +749,13 @@ fn impact_check_can_be_disabled() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     s.vault.place_order(&(4_000 * U), &2_500_000, &(500 * U), &BPS, &(NOW + DAY));
-    s.router.set_penalty(&(2_000 * U), &2_000); // %20 etki
+    s.router.set_penalty(&(2_000 * U), &2_000); // 20% impact
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
     assert_eq!(out, 16_000 * U);
 }
 
 // ---------------------------------------------------------------------------
-// Duraklatma
+// Pause
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -766,7 +766,7 @@ fn pause_blocks_only_new_orders() {
         s.vault.try_place_order(&(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY)),
         Err(Ok(ce(Error::Paused)))
     );
-    // Mevcut emir doldurulabilir, iptal ve cekim calisir.
+    // The existing order can be filled; cancelling and withdrawing work.
     s.vault.execute(&s.outsider, &0, &(1_000 * U));
     s.vault.cancel_order(&0);
     s.vault.withdraw(&(9_000 * U));
@@ -778,7 +778,7 @@ fn pause_blocks_only_new_orders() {
 }
 
 // ---------------------------------------------------------------------------
-// Surum 2: tamamini cekme, emir sayisi, omur boyu toplamlar
+// Version 2: withdraw everything, order count, lifetime totals
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -788,7 +788,7 @@ fn withdraw_all_burns_every_b_token() {
     accrue_5_percent(&s);
     let free = s.vault.free_balance();
     s.vault.withdraw(&free);
-    // Kirinti kalmamali; aksi halde simulasyon/uygulama arasinda kayit boyutu degisir.
+    // No dust may be left; otherwise the entry size differs between simulation and execution.
     assert_eq!(s.pool.b_tokens(&s.vault.address), 0);
     assert_eq!(s.usdc.balance(&s.owner), 10_500 * U);
     assert_eq!(s.vault.balance(), 0);
@@ -798,18 +798,18 @@ fn withdraw_all_burns_every_b_token() {
 
 #[test]
 fn withdraw_all_pays_interest_accrued_after_quote() {
-    // Kullanici bakiyeyi okuduktan sonra faiz artarsa yine hepsi cekilir.
+    // If interest accrues after the user read the balance, everything is still withdrawn.
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     let quoted = s.vault.free_balance(); // 10.000
     accrue_5_percent(&s);
     s.vault.withdraw(&quoted);
-    // Istenen 10.000 < guncel bakiye 10.500 -> normal cekim; 500 faiz kasada kalir.
+    // Requested 10,000 < current balance 10,500 -> a normal withdrawal; 500 of interest stays in the vault.
     assert_eq!(s.usdc.balance(&s.owner), 10_000 * U);
-    // Blend yakilan b_token'i yukari yuvarlar: en fazla 1 birim eksik.
+    // Blend rounds the b_tokens burned up: at most 1 unit short.
     let left = s.vault.balance();
     assert!(left >= 500 * U - 1 && left <= 500 * U);
-    // Ikinci "tamamini cek" kalan faizi alir ve kirinti birakmaz.
+    // A second "withdraw everything" takes the remaining interest and leaves no dust.
     s.vault.withdraw(&s.vault.free_balance());
     assert_eq!(s.pool.b_tokens(&s.vault.address), 0);
     let got = s.usdc.balance(&s.owner);
@@ -836,7 +836,7 @@ fn order_count_and_lifetime_stats() {
 
     s.vault.execute(&s.outsider, &0, &(4_000 * U));
     s.vault.cancel_order(&1);
-    accrue_5_percent(&s); // 6.000 * %5 = 300 faiz
+    accrue_5_percent(&s); // 6,000 * 5% = 300 interest
     s.vault.withdraw(&(1_000 * U));
 
     let st = s.vault.stats();
@@ -844,27 +844,27 @@ fn order_count_and_lifetime_stats() {
     assert_eq!(st.total_spent, 4_000 * U);
     assert_eq!(st.total_received, 20_000 * U);
     assert_eq!(st.total_withdrawn, 1_000 * U);
-    // Omur boyu faiz = bakiye + cekilen + harcanan - yatirilan
+    // Lifetime interest = balance + withdrawn + spent - deposited
     let lifetime = s.vault.balance() + st.total_withdrawn + st.total_spent - st.total_deposited;
     assert!(lifetime >= 300 * U - 1 && lifetime <= 300 * U);
 }
 
 // ---------------------------------------------------------------------------
-// Surum 3: tetikli emir (stop) ve zincirleme emir (alim -> satis kasasi)
+// Version 3: triggered order (stop) and follow-up order (buy -> sell vault)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stop_order_waits_for_trigger_then_fills() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
-    // "XLM 0,25'e cikarsa al, en fazla 0,26 ode" (kirilim alimi). Piyasa 0,20.
+    // "Buy if XLM rises to 0.25, pay 0.26 at most" (breakout buy). Market at 0.20.
     let id = s.vault.place_stop_order(&(1_000 * U), &2_500_000, &2_600_000, &(100 * U), &IMPACT, &(NOW + DAY), &300);
     assert_eq!(s.vault.get_order(&id).trigger_price, 2_500_000);
     assert_eq!(s.vault.get_order(&id).stop_band_bps, 300);
-    // Fiyat 0,20 limitten iyi ama tetik gelmedi: dolum yok.
+    // The price 0.20 is better than the limit but the trigger has not come: no fill.
     assert_eq!(s.vault.try_execute(&s.outsider, &id, &(1_000 * U)), Err(Ok(ce(Error::TriggerNotMet))));
     assert_eq!(s.vault.get_order(&id).filled_in, 0);
-    // XLM 0,25: tetik geldi (oracle), limit (0,26) de tutuyor.
+    // XLM 0.25: the trigger came (oracle), and the limit (0.26) holds too.
     s.router.set_price(&(4 * U));
     s.oracle.set_price(&s.xlm.address, &2_500_000);
     let out = s.vault.execute(&s.outsider, &id, &(1_000 * U));
@@ -878,7 +878,7 @@ fn stop_order_still_respects_limit() {
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     let id = s.vault.place_stop_order(&(1_000 * U), &2_500_000, &2_600_000, &(100 * U), &IMPACT, &(NOW + DAY), &300);
-    // XLM 0,2857: tetik gecildi ama limit 0,26'dan pahali -> islem tamamen geri alinir.
+    // XLM 0.2857: past the trigger but dearer than the 0.26 limit -> the whole transaction is reverted.
     s.router.set_price(&(35 * U / 10));
     s.oracle.set_price(&s.xlm.address, &2_857_142);
     assert!(s.vault.try_execute(&s.outsider, &id, &(1_000 * U)).is_err());
@@ -895,17 +895,17 @@ fn stop_order_validation() {
         s.vault.try_place_stop_order(&(100 * U), &0, &2_000_000, &(10 * U), &IMPACT, &(NOW + DAY), &300),
         Err(Ok(ce(Error::InvalidPrice)))
     );
-    // Limit tetikten kotu olamaz (aksi halde emir hic dolamaz).
+    // The limit cannot be worse than the trigger (otherwise the order could never fill).
     assert_eq!(
         s.vault.try_place_stop_order(&(100 * U), &2_500_000, &2_400_000, &(10 * U), &IMPACT, &(NOW + DAY), &300),
         Err(Ok(ce(Error::InvalidPrice)))
     );
-    // Limit tetikten en fazla %10 uzak olabilir (2,75 sinirda gecerli, 2,76 degil).
+    // The limit can be at most 10% away from the trigger (2.75 is valid at the edge, 2.76 is not).
     assert_eq!(
         s.vault.try_place_stop_order(&(100 * U), &2_500_000, &2_760_000, &(10 * U), &IMPACT, &(NOW + DAY), &300),
         Err(Ok(ce(Error::InvalidPrice)))
     );
-    // Sapma bandi %0,5 - %10 arasinda olmali.
+    // The deviation band must be between 0.5% and 10%.
     assert_eq!(
         s.vault.try_place_stop_order(&(100 * U), &2_500_000, &2_600_000, &(10 * U), &IMPACT, &(NOW + DAY), &49),
         Err(Ok(ce(Error::InvalidBand)))
@@ -916,13 +916,13 @@ fn stop_order_validation() {
     );
     assert_eq!(s.vault.order_count(), 0);
     s.vault.place_stop_order(&(100 * U), &2_500_000, &2_750_000, &(10 * U), &IMPACT, &(NOW + DAY), &300);
-    // Normal emirlerin tetigi ve bandi yoktur.
+    // Normal orders have no trigger and no band.
     let id = s.vault.place_order(&(100 * U), &2_000_000, &(10 * U), &IMPACT, &(NOW + DAY));
     assert_eq!(s.vault.get_order(&id).trigger_price, 0);
     assert_eq!(s.vault.get_order(&id).stop_band_bps, 0);
 }
 
-/// Ayni kontrat, tokenlar ters: XLM yatirilir, USDC alinir (satis kasasi).
+/// Same contract, tokens reversed: XLM is deposited, USDC is bought (sell vault).
 fn sell_vault(s: &Setup) -> (OrderVaultClient<'static>, MockPoolClient<'static>) {
     let env = &s.env;
     let xpool = env.register(MockPool, (s.xlm.address.clone(),));
@@ -939,7 +939,7 @@ fn sell_vault(s: &Setup) -> (OrderVaultClient<'static>, MockPoolClient<'static>)
             0i128,
         ),
     );
-    // Kardes fabrika kaydi: sahibin satis kasasi budur (zincirleme emrin hedef dogrulamasi).
+    // Sibling factory entry: this is the owner's sell vault (target check of the follow-up order).
     s.guard.set_sibling(&s.guard.address);
     s.guard.set_vault(&s.owner, &id);
     (OrderVaultClient::new(env, &id), MockPoolClient::new(env, &xpool))
@@ -951,31 +951,31 @@ fn sell_side_stop_loss() {
     let (sv, _) = sell_vault(&s);
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.owner, &(1_000 * U));
     s.usdc_admin.mint(&s.router.address, &(1_000_000 * U));
-    // Sahte router yon ayirt etmez: satis testinde fiyat "1 XLM = 0,20 USDC".
+    // The mock router does not tell directions apart: in the sell test the price is "1 XLM = 0.20 USDC".
     s.router.set_price(&2_000_000);
     sv.deposit(&(1_000 * U));
-    // "XLM 0,15'e duserse sat, en az 0,14 al": birimler 1 USDC icin XLM.
-    let trigger = 10_000_000 * SCALE / 1_500_000; // 6,6666666 XLM / USDC (asagi yuvarlanir)
+    // "Sell if XLM drops to 0.15, take 0.14 at least": the units are XLM for 1 USDC.
+    let trigger = 10_000_000 * SCALE / 1_500_000; // 6.6666666 XLM / USDC (rounded down)
     let limit = 10_000_000 * SCALE / 1_400_000; // 7,1428571
     let id = sv.place_stop_order(&(900 * U), &trigger, &limit, &(100 * U), &IMPACT, &(NOW + DAY), &300);
-    // XLM hala 0,20: zarar kes calismaz.
+    // XLM still at 0.20: the stop loss does not run.
     assert_eq!(sv.try_execute(&s.outsider, &id, &(900 * U)), Err(Ok(ce(Error::TriggerNotMet))));
-    // XLM 0,15'e dustu: satilir.
+    // XLM dropped to 0.15: it is sold.
     s.router.set_price(&1_500_000);
     s.oracle.set_price(&s.xlm.address, &1_500_000);
-    let before = s.usdc.balance(&s.owner); // kurulumdaki 10.000 USDC
+    let before = s.usdc.balance(&s.owner); // the 10,000 USDC from setup
     let out = sv.execute(&s.outsider, &id, &(900 * U));
     assert_eq!(out, 135 * U);
     assert_eq!(s.usdc.balance(&s.owner) - before, 135 * U);
 }
 
-/// Alim kasasi 4.000 USDC'lik "XLM <= 0,20" emri; dolunca XLM satis kasasina gidip
-/// "XLM >= 0,25" satis emri olarak acilir.
+/// The buy vault has a 4,000 USDC "XLM <= 0.20" order; when it fills, the XLM goes to the sell vault and
+/// opens as an "XLM >= 0.25" sell order.
 fn chained_setup() -> (Setup<'static>, OrderVaultClient<'static>, MockPoolClient<'static>) {
     let s = setup();
     let (sv, xpool) = sell_vault(&s);
     s.vault.deposit(&(10_000 * U));
-    let sell_limit = 10_000_000 * SCALE / 2_500_000; // 4 XLM / USDC = 0,25 USDC / XLM
+    let sell_limit = 10_000_000 * SCALE / 2_500_000; // 4 XLM / USDC = 0.25 USDC / XLM
     let id = s.vault.place_order_then(
         &(4_000 * U),
         &2_000_000,
@@ -996,16 +996,16 @@ fn chained_setup() -> (Setup<'static>, OrderVaultClient<'static>, MockPoolClient
 fn chained_order_moves_output_to_sell_vault() {
     let (s, sv, xpool) = chained_setup();
     sv.set_feeder(&Some(s.vault.address.clone()));
-    // Keeper imzasiz cagirir: kasalar arasi aktarim yetkileri gercekten calismali.
+    // The keeper calls without a signature: the vault-to-vault transfer authorizations must really work.
     s.env.set_auths(&[]);
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
     assert_eq!(out, 20_000 * U);
-    // XLM cuzdana degil satis kasasina gitti ve Blend'de faiz kazaniyor.
+    // The XLM went to the sell vault, not the wallet, and is earning on Blend.
     assert_eq!(s.xlm.balance(&s.owner), 0);
     assert_eq!(s.xlm.balance(&s.vault.address), 0);
     assert_eq!(xpool.b_tokens(&sv.address), 20_000 * U);
     assert_eq!(sv.balance(), 20_000 * U);
-    // Satis emri otomatik acildi; yuvarlama tamponu emre baglanmaz.
+    // The sell order opened automatically; the rounding buffer is not tied to the order.
     let o = sv.get_order(&0);
     assert_eq!(o.amount_in, 20_000 * U - ROUNDING_BUFFER);
     assert_eq!(o.limit_price, 40_000_000);
@@ -1013,7 +1013,7 @@ fn chained_order_moves_output_to_sell_vault() {
     assert_eq!(o.status, OrderStatus::Open);
     assert_eq!(sv.reserved(), 20_000 * U - ROUNDING_BUFFER);
     assert_eq!(sv.stats().total_deposited, 20_000 * U);
-    // Alim emri normal sekilde kapandi.
+    // The buy order closed normally.
     assert_eq!(s.vault.get_order(&0).status, OrderStatus::Filled);
     assert_eq!(s.vault.get_order(&0).filled_out, 20_000 * U);
 }
@@ -1021,7 +1021,7 @@ fn chained_order_moves_output_to_sell_vault() {
 #[test]
 fn chained_order_falls_back_to_wallet_without_permission() {
     let (s, sv, xpool) = chained_setup();
-    // Satis kasasi bu alim kasasina izin vermedi: XLM her zamanki gibi cuzdana gider.
+    // The sell vault did not allow this buy vault: the XLM goes to the wallet as usual.
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
     assert_eq!(s.xlm.balance(&s.owner), out);
     assert_eq!(xpool.b_tokens(&sv.address), 0);
@@ -1033,7 +1033,7 @@ fn chained_order_falls_back_to_wallet_without_permission() {
 fn chained_order_falls_back_when_paused() {
     let (s, sv, _) = chained_setup();
     sv.set_feeder(&Some(s.vault.address.clone()));
-    // Yeni emirler durduruldu: satis emri acilamaz, ama alim yine dolar ve XLM cuzdana gider.
+    // New orders are paused: the sell order cannot open, but the buy still fills and the XLM goes to the wallet.
     s.guard.set_paused(&true);
     let out = s.vault.execute(&s.outsider, &0, &(4_000 * U));
     assert_eq!(s.xlm.balance(&s.owner), out);
@@ -1046,18 +1046,18 @@ fn receive_and_order_only_from_feeder() {
     let s = setup();
     let (sv, _) = sell_vault(&s);
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.outsider, &(100 * U));
-    // Izin verilen kimse yok.
+    // Nobody is allowed.
     assert_eq!(
         sv.try_receive_and_order(&s.outsider, &(100 * U), &40_000_000, &IMPACT, &(NOW + DAY)),
         Err(Ok(ce(Error::NotFeeder)))
     );
-    // Izin alim kasasina verildi; baskasi yine giremez.
+    // Permission was given to the buy vault; nobody else can get in.
     sv.set_feeder(&Some(s.vault.address.clone()));
     assert_eq!(
         sv.try_receive_and_order(&s.outsider, &(100 * U), &40_000_000, &IMPACT, &(NOW + DAY)),
         Err(Ok(ce(Error::NotFeeder)))
     );
-    // Izni yalnizca sahip verebilir.
+    // Only the owner can give the permission.
     s.env.set_auths(&[]);
     assert!(sv.try_set_feeder(&Some(s.outsider.clone())).is_err());
 }
@@ -1074,31 +1074,31 @@ fn place_order_then_validation() {
     assert_eq!(bad(40_000_000, 0, DAY, &sv.address), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(bad(40_000_000, IMPACT, 0, &sv.address), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(bad(40_000_000, IMPACT, 400 * DAY, &sv.address), Err(Ok(ce(Error::InvalidFollowUp))));
-    // Kendine zincirleme yasak.
+    // Chaining to itself is forbidden.
     assert_eq!(bad(40_000_000, IMPACT, DAY, &s.vault.address), Err(Ok(ce(Error::InvalidFollowUp))));
-    // Hata durumunda emir de olusmamali.
+    // On an error no order may be created either.
     assert_eq!(s.vault.order_count(), 0);
     assert_eq!(s.vault.reserved(), 0);
 }
 
 #[test]
 fn chain_target_must_be_own_matching_vault() {
-    // Bagimsiz inceleme: zincirin hedefi baskasinin kasasi olamaz (cikti ona giderdi) ve hedef bu
-    // emrin aldigi tokeni (XLM) kabul eden kasa olmali.
+    // Independent review: the chain's target cannot be someone else's vault (the output would go to them) and the
+    // target must be a vault that accepts the token this order buys (XLM).
     let s = setup();
     s.vault.deposit(&(1_000 * U));
     let env = &s.env;
     let place = |target: &Address| {
         s.vault.try_place_order_then(&(100 * U), &2_000_000, &(10 * U), &IMPACT, &(NOW + DAY), target, &40_000_000, &IMPACT, &DAY)
     };
-    // Baskasinin (outsider) satis kasasi
+    // Someone else's (outsider) sell vault
     let xpool = env.register(MockPool, (s.xlm.address.clone(),));
     let foreign = env.register(
         OrderVault,
         (s.outsider.clone(), s.xlm.address.clone(), s.usdc.address.clone(), xpool, s.router.address.clone(), s.guard.address.clone(), 0i128),
     );
     assert_eq!(place(&foreign), Err(Ok(ce(Error::InvalidFollowUp))));
-    // Sahibin baska bir alim kasasi: XLM degil USDC kabul eder
+    // Another buy vault of the owner: accepts USDC, not XLM
     let upool = env.register(MockPool, (s.usdc.address.clone(),));
     let other_buy = env.register(
         OrderVault,
@@ -1106,19 +1106,19 @@ fn chain_target_must_be_own_matching_vault() {
     );
     assert_eq!(place(&other_buy), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(s.vault.order_count(), 0);
-    // Sahibin kendi satis kasasi: kabul
+    // The owner's own sell vault: accepted
     let (sv, _) = sell_vault(&s);
     assert!(place(&sv.address).is_ok());
     assert_eq!(s.vault.get_follow_up(&0).unwrap().vault, sv.address);
 }
 
 // ---------------------------------------------------------------------------
-// Guvenlik incelemesi sonrasi: tetik oracle'dan okunur, kasada kalan token kurtarilir
+// After the security review: the trigger is read from the oracle, a token left in the vault is recovered
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stop_trigger_ignores_manipulated_pool_price() {
-    // Saldiri: ayni islemde havuzu satarak fiyati dusur, zarar kesi tetikle, geri al.
+    // Attack: push the price down by selling into the pool in the same transaction, set off the stop loss, buy back.
     let s = setup();
     let (sv, _) = sell_vault(&s);
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.owner, &(1_000 * U));
@@ -1128,7 +1128,7 @@ fn stop_trigger_ignores_manipulated_pool_price() {
     let trigger = 10_000_000 * SCALE / 1_500_000;
     let limit = 10_000_000 * SCALE / 1_400_000;
     let id = sv.place_stop_order(&(900 * U), &trigger, &limit, &(100 * U), &IMPACT, &(NOW + DAY), &300);
-    // Havuz fiyati 0,145'e itildi ama gercek fiyat (oracle) hala 0,20: dolum yok.
+    // The pool price was pushed to 0.145 but the real price (oracle) is still 0.20: no fill.
     s.router.set_price(&1_450_000);
     assert_eq!(sv.try_execute(&s.outsider, &id, &(900 * U)), Err(Ok(ce(Error::TriggerNotMet))));
     assert_eq!(sv.get_order(&id).filled_in, 0);
@@ -1142,12 +1142,12 @@ fn stop_trigger_needs_fresh_oracle_price() {
     let id = s.vault.place_stop_order(&(1_000 * U), &2_500_000, &2_600_000, &(100 * U), &IMPACT, &(NOW + DAY), &300);
     s.router.set_price(&(4 * U));
     s.oracle.set_price(&s.xlm.address, &2_500_000);
-    // Oracle 20 dakikadir guncellenmemis: tetikli emir calismaz.
+    // The oracle has not updated for 20 minutes: the triggered order does not run.
     s.oracle.set_age(&(20 * 60));
     assert_eq!(s.vault.try_execute(&s.outsider, &id, &(1_000 * U)), Err(Ok(ce(Error::OracleUnavailable))));
     s.oracle.set_age(&60);
     s.vault.execute(&s.outsider, &id, &(1_000 * U));
-    // Normal limit emirleri oracle'a hic bakmaz.
+    // Normal limit orders never look at the oracle.
     s.oracle.set_age(&(99 * 60));
     let id2 = s.vault.place_order(&(1_000 * U), &2_600_000, &(100 * U), &IMPACT, &(NOW + DAY));
     s.vault.execute(&s.outsider, &id2, &(1_000 * U));
@@ -1157,29 +1157,29 @@ fn stop_trigger_needs_fresh_oracle_price() {
 fn owner_can_sweep_stray_tokens_and_claim() {
     let s = setup();
     s.vault.deposit(&(1_000 * U));
-    // Yanlislikla kasaya gonderilen XLM
+    // XLM sent to the vault by mistake
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.vault.address, &(7 * U));
     assert_eq!(s.vault.sweep(&s.xlm.address), 7 * U);
     assert_eq!(s.xlm.balance(&s.owner), 7 * U);
     assert_eq!(s.xlm.balance(&s.vault.address), 0);
-    // Blend'deki para sweep ile cekilemez (yalnizca kasada duran token).
+    // Funds on Blend cannot be taken with sweep (only a token sitting in the vault).
     assert_eq!(s.vault.sweep(&s.usdc.address), 0);
     assert_eq!(s.vault.balance(), 1_000 * U);
     s.vault.claim_rewards(&vec![&s.env, 1u32]);
-    // Yalnizca sahip
+    // Owner only
     s.env.set_auths(&[]);
     assert!(s.vault.try_sweep(&s.xlm.address).is_err());
     assert!(s.vault.try_claim_rewards(&vec![&s.env, 1u32]).is_err());
 }
 
 // ---------------------------------------------------------------------------
-// Ikinci inceleme sonrasi
+// After the second review
 // ---------------------------------------------------------------------------
 
 #[test]
 fn stop_fill_must_be_close_to_oracle_price() {
-    // Zarar kes tetiklendi (oracle 0,15) ama havuz 0,143'e itilmis: limit (0,14) izin verse de
-    // oracle'a gore %3'ten fazla kotu oldugu icin dolum reddedilir.
+    // The stop loss triggered (oracle 0.15) but the pool was pushed to 0.143: even though the limit (0.14) allows it,
+    // the fill is rejected because it is more than 3% worse than the oracle.
     let s = setup();
     let (sv, _) = sell_vault(&s);
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.owner, &(1_000 * U));
@@ -1192,7 +1192,7 @@ fn stop_fill_must_be_close_to_oracle_price() {
     s.router.set_price(&1_430_000);
     assert_eq!(sv.try_execute(&s.outsider, &id, &(900 * U)), Err(Ok(ce(Error::PriceDeviation))));
     assert_eq!(sv.balance(), 1_000 * U);
-    // Havuz oracle'a yakin (0,148, %1,3 asagi): dolum gecer.
+    // The pool is close to the oracle (0.148, 1.3% below): the fill passes.
     s.router.set_price(&1_480_000);
     let out = sv.execute(&s.outsider, &id, &(900 * U));
     assert_eq!(out, 900 * 1_480_000);
@@ -1202,20 +1202,20 @@ fn stop_fill_must_be_close_to_oracle_price() {
 fn stop_order_needs_oracle_prices_when_placed() {
     let s = setup();
     s.vault.deposit(&(1_000 * U));
-    // Oracle XLM fiyati vermiyor: emir hic tetiklenemeyecegi icin bastan reddedilir.
+    // The oracle gives no XLM price: the order could never trigger, so it is rejected up front.
     s.oracle.set_price(&s.xlm.address, &0);
     assert_eq!(
         s.vault.try_place_stop_order(&(100 * U), &2_500_000, &2_600_000, &(10 * U), &IMPACT, &(NOW + DAY), &300),
         Err(Ok(ce(Error::OracleUnavailable)))
     );
-    // Gelecekten zaman damgasi da gecersiz.
+    // A timestamp from the future is invalid too.
     s.oracle.set_price(&s.xlm.address, &2_000_000);
     s.oracle.set_future(&600);
     assert_eq!(
         s.vault.try_place_stop_order(&(100 * U), &2_500_000, &2_600_000, &(10 * U), &IMPACT, &(NOW + DAY), &300),
         Err(Ok(ce(Error::OracleUnavailable)))
     );
-    // Normal emir oracle'dan bagimsiz.
+    // A normal order does not depend on the oracle.
     s.vault.place_order(&(100 * U), &2_000_000, &(10 * U), &IMPACT, &(NOW + DAY));
 }
 
@@ -1238,12 +1238,12 @@ fn vault_rejects_same_token_twice() {
 }
 
 // ---------------------------------------------------------------------------
-// Ic denetim (Kasim 2026) sonrasi: her bulgu icin bir test
+// After the internal review (November 2026): one test per finding
 // ---------------------------------------------------------------------------
 
 #[test]
 fn first_order_leaves_rounding_buffer() {
-    // Bulgu 5: tampon ilk emirde de birakilir; bakiyenin tamami emre baglanamaz.
+    // Finding 5: the buffer is left on the first order too; the whole balance cannot be tied to an order.
     let s = setup();
     s.vault.deposit(&(1_000 * U));
     assert_eq!(s.vault.free_balance(), 1_000 * U);
@@ -1256,7 +1256,7 @@ fn first_order_leaves_rounding_buffer() {
     s.vault.place_order(&all, &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY));
     assert_eq!(s.vault.orderable_balance(), 0);
     assert_eq!(s.vault.free_balance(), 0);
-    // Faiz biriktikce yuvarlama (b_rate 1'den buyuk) olsa da emir dort parcada tam dolar.
+    // Even with rounding as interest accrues (b_rate above 1) the order fills completely in four pieces.
     s.pool.set_b_rate(&(B_RATE_SCALE * 1_337 / 1_000));
     s.usdc_admin.mint(&s.pool.address, &(337 * U));
     for _ in 0..3 {
@@ -1270,7 +1270,7 @@ fn first_order_leaves_rounding_buffer() {
 
 #[test]
 fn order_cannot_be_split_into_too_many_fills() {
-    // Bulgu 4 ve 5: min_fill, tutarin MAX_FILLS'te birinden kucuk olamaz.
+    // Findings 4 and 5: min_fill cannot be smaller than one MAX_FILLS-th of the amount.
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     assert_eq!(
@@ -1286,7 +1286,7 @@ fn order_cannot_be_split_into_too_many_fills() {
 
 #[test]
 fn expiry_and_price_have_upper_bounds() {
-    // Bulgu 7.
+    // Finding 7.
     let s = setup();
     s.vault.deposit(&(1_000 * U));
     assert_eq!(
@@ -1302,16 +1302,16 @@ fn expiry_and_price_have_upper_bounds() {
 
 #[test]
 fn anyone_can_close_an_expired_order() {
-    // Bulgu 7: suresi dolan emir rezervi tutmaya devam etmesin diye herkes kapatabilir.
+    // Finding 7: anyone can close an expired order so that it does not keep holding the reserve.
     let s = setup_with_order();
     s.env.set_auths(&[]);
-    // Suresi dolmadan yalnizca sahip iptal edebilir.
+    // Before it expires only the owner can cancel.
     assert!(s.vault.try_cancel_order(&0).is_err());
     s.env.ledger().set_timestamp(NOW + DAY + 1);
     s.vault.cancel_order(&0);
     assert_eq!(s.vault.get_order(&0).status, OrderStatus::Cancelled);
     assert_eq!(s.vault.reserved(), 0);
-    // Para yerinden oynamadi: hepsi hala kasada ve sahibinin.
+    // No funds moved: everything is still in the vault and belongs to its owner.
     assert_eq!(s.vault.balance(), 10_000 * U);
     assert_eq!(s.vault.free_balance(), 10_000 * U);
     assert_eq!(s.usdc.balance(&s.outsider), 0);
@@ -1319,7 +1319,7 @@ fn anyone_can_close_an_expired_order() {
 
 #[test]
 fn chain_cannot_sell_below_buy_price() {
-    // Bulgu 8: 0,20'den al, 0,1667'den sat (limit 6 XLM/USDC) zincirde kabul edilmez.
+    // Finding 8: buying at 0.20 and selling at 0.1667 (limit 6 XLM/USDC) is not accepted in a chain.
     let s = setup();
     let (sv, _) = sell_vault(&s);
     s.vault.deposit(&(1_000 * U));
@@ -1329,14 +1329,14 @@ fn chain_cannot_sell_below_buy_price() {
     assert_eq!(place(60_000_000), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(place(MAX_PRICE + 1), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(s.vault.order_count(), 0);
-    // Alis fiyatindan satis (5 XLM/USDC) sinirdir: kabul.
+    // Selling at the buy price (5 XLM/USDC) is the edge: accepted.
     assert!(place(50_000_000).is_ok());
 }
 
 #[test]
 fn chain_target_must_be_registered_in_sibling_factory() {
-    // Bulgu 3: hedefin kendi beyani yetmez. Sahibi ve tokenlari dogru gorunen ama kardes fabrikada
-    // kayitli olmayan bir kasa hedef olamaz.
+    // Finding 3: the target's own statement is not enough. A vault whose owner and tokens look right but that is not
+    // registered in the sibling factory cannot be the target.
     let s = setup();
     s.vault.deposit(&(1_000 * U));
     let env = &s.env;
@@ -1348,9 +1348,9 @@ fn chain_target_must_be_registered_in_sibling_factory() {
         OrderVault,
         (s.owner.clone(), s.xlm.address.clone(), s.usdc.address.clone(), xpool, s.router.address.clone(), s.guard.address.clone(), 0i128),
     );
-    // Kardes fabrika hic ayarlanmamis.
+    // The sibling factory was never set.
     assert_eq!(place(&unregistered), Err(Ok(ce(Error::InvalidFollowUp))));
-    // Kardes fabrika var ama sahibin kayitli kasasi baska bir adres.
+    // There is a sibling factory, but the owner's registered vault is a different address.
     let (sv, _) = sell_vault(&s);
     assert_eq!(place(&unregistered), Err(Ok(ce(Error::InvalidFollowUp))));
     assert_eq!(s.vault.order_count(), 0);
@@ -1359,7 +1359,7 @@ fn chain_target_must_be_registered_in_sibling_factory() {
 
 #[test]
 fn stop_band_is_chosen_by_the_user() {
-    // Bulgu 1: bant %1 secildiyse, oracle'dan %1,3 kotu dolum reddedilir (%3 bantta gecerdi).
+    // Finding 1: with a 1% band, a fill 1.3% worse than the oracle is rejected (it would pass with a 3% band).
     let s = setup();
     let (sv, _) = sell_vault(&s);
     StellarAssetClient::new(&s.env, &s.xlm.address).mint(&s.owner, &(1_000 * U));
@@ -1372,7 +1372,7 @@ fn stop_band_is_chosen_by_the_user() {
     s.router.set_price(&1_480_000);
     assert_eq!(sv.try_execute(&s.outsider, &id, &(900 * U)), Err(Ok(ce(Error::PriceDeviation))));
     assert_eq!(sv.get_order(&id).filled_in, 0);
-    // Oracle'dan %0,67 kotu: bant icinde.
+    // 0.67% worse than the oracle: inside the band.
     s.router.set_price(&1_490_000);
     let out = sv.execute(&s.outsider, &id, &(900 * U));
     assert_eq!(out, 900 * 1_490_000);
@@ -1380,7 +1380,7 @@ fn stop_band_is_chosen_by_the_user() {
 
 #[test]
 fn withdraw_all_sentinel_takes_everything_free() {
-    // Bulgu 12: ozel deger, imza ile islem arasinda biriken faizi de ceker.
+    // Finding 12: the special value also withdraws interest that accrued between signing and execution.
     let s = setup();
     s.vault.deposit(&(10_000 * U));
     accrue_5_percent(&s);
@@ -1388,13 +1388,13 @@ fn withdraw_all_sentinel_takes_everything_free() {
     assert_eq!(s.pool.b_tokens(&s.vault.address), 0);
     assert_eq!(s.usdc.balance(&s.owner), 10_500 * U);
     assert_eq!(s.vault.deposited(), 0);
-    // Cekilecek bir sey kalmadiysa hata.
+    // An error if nothing is left to withdraw.
     assert_eq!(s.vault.try_withdraw(&WITHDRAW_ALL), Err(Ok(ce(Error::InsufficientFree))));
 }
 
 #[test]
 fn withdraw_all_sentinel_never_touches_reserved() {
-    let s = setup_with_order(); // 4.000 ayrildi
+    let s = setup_with_order(); // 4,000 reserved
     s.vault.withdraw(&WITHDRAW_ALL);
     assert_eq!(s.usdc.balance(&s.owner), 6_000 * U - ROUNDING_BUFFER);
     assert_eq!(s.vault.reserved(), 4_000 * U);
@@ -1404,7 +1404,7 @@ fn withdraw_all_sentinel_never_touches_reserved() {
 
 #[test]
 fn sweep_only_works_for_the_two_vault_tokens() {
-    // Bulgu 10: kasa, sahibi istese bile rastgele bir sozlesmeyi cagirmaz.
+    // Finding 10: the vault does not call an arbitrary contract even if its owner asks.
     let s = setup();
     let other = s.env.register(MockToken, ());
     MockTokenClient::new(&s.env, &other).mint(&s.vault.address, &(5 * U));
@@ -1413,8 +1413,8 @@ fn sweep_only_works_for_the_two_vault_tokens() {
 
 #[test]
 fn output_waits_in_vault_when_wallet_cannot_receive() {
-    // Bulgu 9: sahibin cuzdani cikan tokeni alamiyorsa (trustline yok) dolum durmaz; token kasada
-    // bekler ve sahibi sonradan `sweep` ile alir.
+    // Finding 9: if the owner's wallet cannot receive the output token (no trustline) the fill does not stop; the
+    // token waits in the vault and the owner collects it later with `sweep`.
     let s = setup();
     let env = &s.env;
     let tok = env.register(MockToken, ());
@@ -1433,7 +1433,7 @@ fn output_waits_in_vault_when_wallet_cannot_receive() {
     assert_eq!(out, 1_000 * U);
     assert_eq!(t.balance(&s.owner), 0);
     assert_eq!(t.balance(&vid), 1_000 * U);
-    // Bekleyen token sonraki dolumun olcumunu bozmaz.
+    // The waiting token does not distort the next fill's measurement.
     let out2 = v.execute(&s.outsider, &0, &(200 * U));
     assert_eq!(out2, 1_000 * U);
     assert_eq!(v.get_order(&0).status, OrderStatus::Filled);
@@ -1441,7 +1441,7 @@ fn output_waits_in_vault_when_wallet_cannot_receive() {
     assert_eq!(v.reserved(), 0);
     assert_eq!(t.balance(&vid), 2_000 * U);
 
-    // Yalnizca sahip alabilir.
+    // Only the owner can collect it.
     env.set_auths(&[]);
     assert!(v.try_sweep(&tok).is_err());
     env.mock_all_auths();
@@ -1454,7 +1454,7 @@ fn output_waits_in_vault_when_wallet_cannot_receive() {
 #[test]
 #[should_panic]
 fn vault_rejects_address_that_is_not_a_7_decimal_token() {
-    // MockPool bir token degildir (decimals yok): kurulum reddedilmeli.
+    // MockPool is not a token (no decimals): setup must be rejected.
     let s = setup();
     s.env.register(
         OrderVault,
@@ -1471,12 +1471,12 @@ fn vault_rejects_address_that_is_not_a_7_decimal_token() {
 }
 
 // ---------------------------------------------------------------------------
-// Surum 5: dolum ucreti (dolumu yapana, yalnizca limitten iyi gelen kisimdan)
+// Version 5: fill fee (to the filler, only from what comes in above the limit)
 // ---------------------------------------------------------------------------
 
-const FEE: i128 = U / 10; // dolum basina en fazla 0,1 token
+const FEE: i128 = U / 10; // at most 0.1 token per fill
 
-/// Dolum ucretli alim kasasi (ayni sahte havuz ve router); 10.000 USDC yatirilmis.
+/// Buy vault with a fill fee (same mock pool and router); 10,000 USDC deposited.
 fn fee_vault(s: &Setup) -> OrderVaultClient<'static> {
     let env = &s.env;
     let id = env.register(
@@ -1490,14 +1490,14 @@ fn fee_vault(s: &Setup) -> OrderVaultClient<'static> {
 
 #[test]
 fn exec_fee_is_paid_from_price_improvement() {
-    // Limit 0,25; piyasa 0,20: sahip en az 16.000 XLM almali, takas 20.000 veriyor.
-    // Dolumu yapan yalnizca sabit ucreti alir; iyilesmenin geri kalani sahibindir.
+    // Limit 0.25; market 0.20: the owner must get at least 16,000 XLM, the swap gives 20,000.
+    // The filler only gets the fixed fee; the rest of the improvement belongs to the owner.
     let s = setup();
     let v = fee_vault(&s);
     let filler = Address::generate(&s.env);
     assert_eq!(v.get_config().exec_fee, FEE);
     v.place_order(&(4_000 * U), &2_500_000, &(500 * U), &IMPACT, &(NOW + DAY));
-    // Gercek yetki denetimi acik: dolumu yapan hicbir imza vermez, ucreti kasa kendi adina gonderir.
+    // Real authorization checks are on: the filler signs nothing, the vault sends the fee on its own behalf.
     s.env.set_auths(&[]);
     let out = v.execute(&filler, &0, &(4_000 * U));
     assert_eq!(out, 20_000 * U - FEE);
@@ -1510,7 +1510,7 @@ fn exec_fee_is_paid_from_price_improvement() {
 
 #[test]
 fn exec_fee_is_zero_when_fill_is_exactly_at_limit() {
-    // Limit 0,20; piyasa 0,20: iyilesme yok, ucret yok. Sahip limitinin tam karsiligini alir.
+    // Limit 0.20; market 0.20: no improvement, no fee. The owner gets exactly what the limit promises.
     let s = setup();
     let v = fee_vault(&s);
     let filler = Address::generate(&s.env);
@@ -1523,8 +1523,8 @@ fn exec_fee_is_zero_when_fill_is_exactly_at_limit() {
 
 #[test]
 fn exec_fee_never_cuts_below_the_limit() {
-    // Iyilesme ucretten kucuk (4.000 birim): dolumu yapan yalnizca o kadarini alir,
-    // sahip yine limitinin tam karsiligini (20.000 XLM) alir.
+    // The improvement is smaller than the fee (4,000 units): the filler only gets that much,
+    // the owner still gets exactly what the limit promises (20,000 XLM).
     let s = setup();
     let v = fee_vault(&s);
     let filler = Address::generate(&s.env);
@@ -1553,7 +1553,7 @@ fn exec_fee_is_charged_per_fill() {
 
 #[test]
 fn fill_goes_through_when_executor_cannot_receive_fee() {
-    // Dolumu yapanin adresi tokeni alamiyorsa (or. trustline yok) dolum durmaz; ucret sahibinde kalir.
+    // If the filler's address cannot receive the token (e.g. no trustline) the fill does not stop; the fee stays with the owner.
     let s = setup();
     let env = &s.env;
     let tok = env.register(MockToken, ());
@@ -1584,8 +1584,8 @@ fn fill_goes_through_when_executor_cannot_receive_fee() {
 
 #[test]
 fn exec_fee_on_stop_order_respects_oracle_band() {
-    // Zarar kes: oracle 0,15, havuz 0,148, bant %3. Sahip oracle'a gore en az 130,95 USDC almali;
-    // takas 133,2 veriyor. Ucret ust siniri 5 USDC olsa da dolumu yapan yalnizca aradaki 2,25'i alir.
+    // Stop loss: oracle 0.15, pool 0.148, band 3%. By the oracle the owner must get at least 130.95 USDC;
+    // the swap gives 133.2. Although the fee cap is 5 USDC the filler only gets the 2.25 in between.
     let s = setup();
     let env = &s.env;
     let xpool = env.register(MockPool, (s.xlm.address.clone(),));

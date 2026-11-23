@@ -20,13 +20,13 @@ SSH="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $HOST"
 CMD="${1:-}"
 
 copy_code() {
-  # durum.json (keeper state) is sent only on setup so a later push never overwrites the server's state.
+  # status.json (keeper state) is sent only on setup so a later push never overwrites the server's state.
   local skip_state="$1" files=(keeper)
-  for f in addr factory factory-sell eski-fabrikalar markets batch; do
+  for f in addr factory factory-sell old-factories markets batch; do
     [ -f "testnet/$f.env" ] && files+=("testnet/$f.env")
   done
   local ex=(--exclude=node_modules --exclude=keeper.log)
-  [ "$skip_state" = "1" ] && ex+=(--exclude=durum.json)
+  [ "$skip_state" = "1" ] && ex+=(--exclude=status.json)
   tar czf - "${ex[@]}" "${files[@]}" | $SSH 'mkdir -p /opt/iora && tar xzf - -C /opt/iora --no-same-owner'
 }
 

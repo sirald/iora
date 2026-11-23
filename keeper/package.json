@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Iora keeper botu",
+  "description": "Iora keeper bot",
   "main": "keeper.js",
   "dependencies": {
     "@stellar/stellar-sdk": "^17.4.0"

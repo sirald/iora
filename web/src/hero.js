@@ -1,13 +1,13 @@
-// Ana sayfa canlandirmasi: fiyat bir su seviyesi gibi limite iner, samandira ustunde yuzer, faiz sayaci artar.
-// Hareket CSS'tedir (skin.css, th-*); bu dosya sayaci su seviyesi animasyonunun saatine baglar ve her turda
-// farkli bir ornek emir gosterir (tutar, bekleme suresi, limit). Tamamen yerel; zincire baglanmaz.
-// Faiz ornek oranla hesaplanir: tutar x %6 x gun / 365. Dolan miktar: tutar / limit.
+// Home page animation: the price sinks to the limit like a water level, a buoy floats on it, the interest counter rises.
+// The motion is in CSS (skin.css, th-*); this file ties the counter to the clock of the water-level animation and
+// shows a different example order each round (amount, waiting time, limit). Fully local; it does not touch the chain.
+// Interest uses an example rate: amount x 6% x days / 365. Amount filled: amount / limit.
 const tide = document.getElementById("th-tide");
 const val = document.getElementById("th-val");
 const cap = document.getElementById("th-cap");
 const limitLabel = document.getElementById("th-limit-label");
 const filled = document.getElementById("th-filled");
-const PERIOD = 12000; // skin.css'teki th-tide suresi (ms)
+const PERIOD = 12000; // duration of th-tide in skin.css (ms)
 const RATE = 0.06;
 const SIZES = [5000, 10000, 25000, 50000, 100000, 250000];
 const LIMITS = [0.135, 0.14, 0.145, 0.15, 0.155, 0.16];
@@ -43,7 +43,7 @@ if (tide && val) {
       } catch {}
       const c = Math.floor(t / PERIOD);
       if (c !== cycle) {
-        // Yeni tur: farkli bir ornek emir (etiket gorunmezken degisir)
+        // New round: a different example order (changed while the label is invisible)
         cycle = c;
         order = { size: pick(SIZES, order.size), days: 7 + Math.floor(Math.random() * 54), limit: pick(LIMITS, order.limit) };
         show(order);

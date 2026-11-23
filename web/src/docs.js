@@ -2,20 +2,20 @@ import "./landing.css";
 import "./docs.css";
 import "./skin.css";
 
-// Fabrika adresini derleme anindaki gercek degerle guncelle.
+// Replace the factory address with the real value from build time.
 const f = import.meta.env?.VITE_FACTORY;
 const el = document.getElementById("addr-factory");
 if (f && el) el.textContent = f;
-// Satis kasasi fabrikasi kuruluysa satirini goster
+// Show the sell factory's row if a sell factory is deployed
 const fs = import.meta.env?.VITE_FACTORY_SELL;
 const row = document.getElementById("row-factory-sell");
-// Tek kasali surumde (surum 7) alim ve satim ayni fabrikadir: ikinci satir gosterilmez.
+// In the single-vault version (version 7) buying and selling use the same factory: the second row is not shown.
 if (fs && fs !== f && row) {
   document.getElementById("addr-factory-sell").textContent = fs;
   row.hidden = false;
 } else if (row) row.hidden = true;
 
-// Adreslerin yanina kopyala dugmesi
+// Copy button next to the addresses
 for (const code of document.querySelectorAll(".addr code")) {
   const b = document.createElement("button");
   b.className = "copy";
@@ -31,7 +31,7 @@ for (const code of document.querySelectorAll(".addr code")) {
   code.after(b);
 }
 
-// Kenar menusunde okunan bolumu isaretle
+// Mark the section being read in the side menu
 const links = [...document.querySelectorAll("#toc a")];
 const byId = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
 const io = new IntersectionObserver(
@@ -49,7 +49,7 @@ for (const id of byId.keys()) {
   if (s) io.observe(s);
 }
 
-// Konu filtresi
+// Topic filter
 const input = document.getElementById("toc-filter");
 input?.addEventListener("input", () => {
   const q = input.value.trim().toLowerCase();

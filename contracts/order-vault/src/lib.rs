@@ -1,38 +1,38 @@
-//! Getirili limit emir kasasi.
+//! Yield-bearing limit order vault.
 //!
-//! Kullanici basina bir kasa. USDC Blend havuzunda faiz kazanir; limit alim emri
-//! tetiklenince ayni islemde Blend'den cekilir ve Soroswap'ta XLM'e takas edilir.
-//! Normal emirlerde fiyat kosulu oracle ile degil, takasin `amount_out_min` parametresiyle zorlanir.
-//! Kosul saglanmazsa islemin tamami geri alinir.
+//! One vault per user. USDC earns interest in the Blend pool; when a limit buy order
+//! triggers, it is withdrawn from Blend and swapped to XLM on Soroswap in the same transaction.
+//! For normal orders the price condition is enforced by the swap's `amount_out_min`, not by an oracle.
+//! If the condition is not met, the whole transaction is reverted.
 //!
-//! Surum 3 eklemeleri:
-//! - Tetikli emir (`place_stop_order`): piyasa fiyati tetik seviyesine gelince calisir; en kotu fiyat
-//!   yine `limit_price` ile sinirlidir. Satis kasasinda bu "zarar kes" (stop-loss) demektir.
-//!   Tetik, Blend havuzunun kullandigi fiyat oracle'indan okunur (tek islem icinde oynatilamaz);
-//!   Soroswap'in anlik fiyati kullanilmaz.
-//! - Zincirleme emir (`place_order_then`): dolumdan cikan token, sahibin sectigi diger kasaya
-//!   (or. satis kasasi) yatirilir ve orada otomatik bir emir acilir. Hedef kasa yalnizca sahibinin
-//!   `set_feeder` ile izin verdigi kasadan gelen parayi kabul eder. Aktarim herhangi bir nedenle
-//!   basarisiz olursa token her zamanki gibi sahibin cuzdanina gider; dolum asla bu yuzden durmaz.
+//! Added in version 3:
+//! - Triggered order (`place_stop_order`): runs when the market price reaches the trigger level; the worst price
+//!   is still capped by `limit_price`. In a sell vault this is a stop loss.
+//!   The trigger is read from the price oracle the Blend pool uses (it cannot be moved within one transaction);
+//!   Soroswap's spot price is not used.
+//! - Follow-up order (`place_order_then`): the token that comes out of the fill is deposited into another vault
+//!   the owner chose (e.g. the sell vault) and an order is opened there automatically. The target vault only accepts
+//!   funds from the vault its owner allowed with `set_feeder`. If the hand-over fails for any reason, the token
+//!   goes to the owner's wallet as usual; a fill never stops because of it.
 //!
-//! Surum 4 (ic denetim, Kasim 2026) degisiklikleri:
-//! - Yuvarlama tamponu ilk emirde de uygulanir; emir en fazla `MAX_FILLS` parcada dolar ve bir dolum
-//!   geride asgari dolumdan kucuk "kirinti" birakamaz.
-//! - Emir suresi ve fiyat ust sinirlidir; suresi dolan emri herkes kapatabilir (rezerv sahibine acilir).
-//! - Zincirleme emrin hedefi kardes fabrikada sahibin kayitli kasasi olmak zorundadir ve zincir, alis
-//!   fiyatinin altinda satis emri acamaz.
-//! - Tetikli emirde oracle'dan sapma bandini kullanici secer (`stop_band_bps`); limit tetikten en fazla
-//!   %10 uzak olabilir.
-//! - Sahibin cuzdani cikan tokeni alamiyorsa (or. trustline yok) dolum durmaz: token kasada bekler,
-//!   sahibi `sweep` ile alir.
-//! - `sweep` yalnizca kasanin iki tokeni icin calisir; `withdraw(WITHDRAW_ALL)` serbest bakiyenin tamamini ceker.
+//! Changes in version 4 (internal review, November 2026):
+//! - The rounding buffer applies to the first order too; an order fills in at most `MAX_FILLS` pieces and a fill
+//!   cannot leave "dust" smaller than the minimum fill behind.
+//! - Order lifetime and price are capped; anyone can close an expired order (the reserve is released to its owner).
+//! - The target of a follow-up order must be the owner's registered vault in the sibling factory, and the chain
+//!   cannot open a sell order below the buy price.
+//! - For a triggered order the user chooses the allowed deviation from the oracle (`stop_band_bps`); the limit can
+//!   be at most 10% away from the trigger.
+//! - If the owner's wallet cannot receive the output token (e.g. no trustline) the fill does not stop: the token
+//!   waits in the vault and the owner collects it with `sweep`.
+//! - `sweep` works only for the vault's two tokens; `withdraw(WITHDRAW_ALL)` withdraws the whole free balance.
 //!
-//! Surum 5 (dolum ucreti):
-//! - `execute` dolumu yapanin adresini alir ve ona, alinan token cinsinden kucuk bir ucret oder. Ucret
-//!   YALNIZCA limitten iyi gelen kisimdan kesilir ve dolum basina `exec_fee` ile sinirlidir (fabrikada
-//!   sabit, sonradan degistirilemez). Sahip her zaman en az kendi limitinin karsiligini alir; fiyat tam
-//!   limitteyse ucret sifirdir. Boylece asgari emir tutari koymadan her dolum kendi ag masrafini oder:
-//!   masrafini cikarmayan cok kucuk emir yasak degildir, fiyat limiti biraz gecene kadar bekler.
+//! Version 5 (fill fee):
+//! - `execute` takes the filler's address and pays it a small fee in the token bought. The fee is taken
+//!   ONLY from what comes in above the limit and is capped per fill by `exec_fee` (fixed in the factory,
+//!   cannot be changed later). The owner always gets at least what their limit promises; exactly at the
+//!   limit the fee is zero. So every fill pays for its own network cost without a minimum order amount:
+//!   a very small order that does not cover it is not forbidden, it waits until the price is a little past the limit.
 #![no_std]
 
 use soroban_sdk::{
@@ -41,45 +41,45 @@ use soroban_sdk::{
     panic_with_error, token, vec, Address, Env, IntoVal, Map, Symbol, TryFromVal, Val, Vec,
 };
 
-/// Fiyatlar 7 ondalikla tutulur (USDC ve XLM ikisi de 7 ondalikli).
+/// Prices use 7 decimals (USDC and XLM both have 7 decimals).
 pub const SCALE: i128 = 10_000_000;
-/// Blend b_rate 12 ondaliklidir.
+/// Blend's b_rate has 12 decimals.
 pub const B_RATE_SCALE: i128 = 1_000_000_000_000;
-/// Fiyat etkisi baz puan olarak; 10_000 = kontrol kapali.
+/// Price impact in basis points; 10_000 = check off.
 pub const BPS: u32 = 10_000;
 
-/// Blend v2 istek tipleri.
+/// Blend v2 request types.
 const BLEND_SUPPLY: u32 = 0;
 const BLEND_WITHDRAW: u32 = 1;
 
-/// Takas son tarihi: islem anindan itibaren saniye. Ayni islemin icinde hesaplandigi icin kendi basina
-/// bir koruma DEGILDIR (router bu parametreyi zorunlu tuttugu icin verilir). Eski bir islemin gec
-/// calismasina karsi koruma, islemin kendi zaman siniri ve emrin `expiry` alanidir.
+/// Swap deadline: seconds from the time of the transaction. It is computed inside the same transaction, so it is
+/// NOT a protection by itself (it is passed because the router requires the parameter). Protection against an old
+/// transaction running late comes from the transaction's own time bound and the order's `expiry` field.
 const SWAP_DEADLINE_SECS: u64 = 300;
 
-/// Bir emir en fazla bu kadar parcada dolabilir (`min_fill * MAX_FILLS >= amount_in`). Parca sayisi
-/// sinirli olunca yuvarlama kaybi da sinirli kalir ve fiyat etkisi siniri asiri bolmeyle asilamaz.
+/// An order can fill in at most this many pieces (`min_fill * MAX_FILLS >= amount_in`). With a bounded number of
+/// pieces the rounding loss is bounded too, and the price impact limit cannot be dodged by splitting too finely.
 pub const MAX_FILLS: i128 = 20;
-/// Emir en fazla bu kadar ileri tarihli olabilir (arayuz en fazla 365 gun sunar; bir gun, kullanicinin
-/// saati ile zincir saati arasindaki fark icin paydir).
+/// An order can be dated at most this far ahead (the app offers up to 365 days; one day is a margin for the
+/// difference between the user's clock and the chain's).
 pub const MAX_ORDER_SECS: u64 = 366 * 86_400;
-/// Kabul edilen en yuksek fiyat (1 alinan token icin 1 milyar yatirilan token). Tasmalara karsi sinir.
+/// Highest price accepted (1 billion deposited tokens for 1 token bought). A bound against overflow.
 pub const MAX_PRICE: i128 = SCALE * 1_000_000_000;
-/// `withdraw` icin ozel deger: serbest bakiyenin tamami (acik emir yoksa Blend'deki her sey).
+/// Special value for `withdraw`: the whole free balance (everything on Blend if there is no open order).
 pub const WITHDRAW_ALL: i128 = i128::MAX;
-/// Iki token da bu ondalikta olmalidir; fiyat hesaplari buna gore yapilir.
+/// Both tokens must have this many decimals; the price maths assumes it.
 pub const TOKEN_DECIMALS: u32 = 7;
 
-/// TTL (yaklasik 5 sn/ledger).
+/// TTL (about 5 s per ledger).
 const DAY_IN_LEDGERS: u32 = 17_280;
 const BUMP_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS;
 const BUMP_TO: u32 = 30 * DAY_IN_LEDGERS;
 
 // ---------------------------------------------------------------------------
-// Dis sozlesme arayuzleri
+// External contract interfaces
 // ---------------------------------------------------------------------------
 
-/// Blend v2 `Request` yapisi (alan adlari Blend ile birebir ayni olmali).
+/// Blend v2 `Request` struct (field names must match Blend exactly).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
@@ -88,8 +88,8 @@ pub struct Request {
     pub amount: i128,
 }
 
-/// Blend'in donus yapilarinin tamami yerine yalnizca ihtiyac duyulan alanlar
-/// okunur (Map olarak), boylece Blend yapiya alan eklese de kasa bozulmaz.
+/// Only the fields that are needed are read from Blend's return structs
+/// (as a Map), so the vault keeps working if Blend adds fields.
 #[contractclient(name = "BlendPoolClient")]
 pub trait BlendPool {
     fn submit(env: Env, from: Address, spender: Address, to: Address, requests: Vec<Request>)
@@ -100,7 +100,7 @@ pub trait BlendPool {
     fn claim(env: Env, from: Address, reserve_token_ids: Vec<u32>, to: Address) -> i128;
 }
 
-/// SEP-40 / Reflector fiyat oracle'i (Blend havuzlari bunu kullanir).
+/// SEP-40 / Reflector price oracle (Blend pools use it).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OracleAsset {
@@ -120,27 +120,27 @@ pub trait PriceOracle {
     fn lastprice(env: Env, asset: OracleAsset) -> Option<PriceData>;
 }
 
-/// Oracle fiyati bundan eskiyse tetikli emir calismaz. Reflector 5 dakikada bir gunceller ve zaman
-/// damgasi donemin basidir; 6 dakikalik eski sinir, guncelleme biraz gecikince zarar kesi calismaz
-/// birakiyordu. 10 dakika iki guncelleme donemini kapsar.
+/// A triggered order does not run if the oracle price is older than this. Reflector updates every 5 minutes and
+/// the timestamp is the start of the period; the old 6-minute bound left a stop loss unable to run when an
+/// update was a little late. 10 minutes covers two update periods.
 pub const ORACLE_MAX_AGE_SECS: u64 = 10 * 60;
-/// Tetikli emirde dolum, oracle'a gore adil miktarin en fazla `stop_band_bps` kadar altinda olabilir.
-/// Bandi kullanici secer (%0,5 - %10). Bant takas ucretini ve fiyat etkisini de kapsar: dolduran kisi
-/// havuzu en fazla bu banda kadar oynatabilir; dar bant daha iyi fiyat, genis bant sert dususte daha
-/// yuksek dolma ihtimali demektir.
+/// In a triggered order the fill may be at most `stop_band_bps` below the fair amount by the oracle.
+/// The user chooses the band (0.5% - 10%). The band also covers the swap fee and price impact: whoever fills
+/// can move the pool at most that far; a narrow band means a better price, a wide band a better chance of
+/// filling in a sharp drop.
 pub const STOP_BAND_MIN_BPS: u32 = 50;
 pub const STOP_BAND_MAX_BPS: u32 = 1_000;
-/// Tetikli emirde limit, tetikten en fazla bu kadar uzak olabilir (%10, en genis sapma bandiyla ayni).
-/// Satis kasasinda bu, tetik fiyatinin en fazla ~%9 altinda bir "en kotu fiyat" demektir. Yanlislikla
-/// girilen cok uzak bir limit bu korumayi anlamsiz kilmasin.
+/// In a triggered order the limit can be at most this far from the trigger (10%, the same as the widest band).
+/// In a sell vault that means a "worst price" at most about 9% below the trigger price. A limit typed far
+/// away by mistake must not make this protection meaningless.
 pub const STOP_MAX_GAP_BPS: i128 = 1_000;
 
-/// Fabrika. Kasa ondan yalnizca bilgi okur: "yeni emirler durduruldu mu", kardes fabrikanin adresi
-/// ve bir sahibin kayitli kasasi. Fabrikanin para hareketine yetkisi yoktur.
+/// Factory. The vault only reads information from it: "are new orders paused", the sibling factory's address
+/// and an owner's registered vault. The factory has no authority over funds.
 #[contractclient(name = "GuardClient")]
 pub trait Guard {
     fn is_paused(env: Env) -> bool;
-    /// Tokenlari ters olan kardes fabrika (alim <-> satis). Ayarlanmadiysa None.
+    /// The sibling factory with the tokens reversed (buy <-> sell). None if not set.
     fn sibling(env: Env) -> Option<Address>;
     fn vault_of(env: Env, owner: Address) -> Option<Address>;
 }
@@ -162,7 +162,7 @@ pub trait SoroswapRouter {
 }
 
 // ---------------------------------------------------------------------------
-// Veri tipleri
+// Data types
 // ---------------------------------------------------------------------------
 
 #[contracterror]
@@ -184,25 +184,25 @@ pub enum Error {
     ImpactTooHigh = 13,
     InvalidImpact = 14,
     Paused = 15,
-    /// Tetikli emir: piyasa henuz tetik seviyesine gelmedi.
+    /// Triggered order: the market has not reached the trigger level yet.
     TriggerNotMet = 16,
-    /// `receive_and_order`: gonderen bu kasanin izin verdigi besleyici degil.
+    /// `receive_and_order`: the sender is not the feeder this vault allows.
     NotFeeder = 17,
-    /// Zincirleme emir ayarlari gecersiz.
+    /// The follow-up order settings are invalid.
     InvalidFollowUp = 18,
-    /// Tetikli emir: guncel oracle fiyati alinamadi.
+    /// Triggered order: no current oracle price could be read.
     OracleUnavailable = 19,
-    /// Tetikli emir: dolum fiyati oracle fiyatindan cok uzak (havuz oynatilmis olabilir).
+    /// Triggered order: the fill price is too far from the oracle price (the pool may have been moved).
     PriceDeviation = 20,
-    /// Kurulum: yatirilan ve alinan token ayni olamaz.
+    /// Setup: the deposited token and the bought token cannot be the same.
     SameToken = 21,
-    /// `sweep`: yalnizca kasanin iki tokeni kurtarilabilir.
+    /// `sweep`: only the vault's two tokens can be recovered.
     UnknownToken = 22,
-    /// Kurulum: tokenlar 7 ondalikli olmali.
+    /// Setup: the tokens must have 7 decimals.
     BadDecimals = 23,
-    /// Tetikli emir: sapma bandi izin verilen aralikta degil.
+    /// Triggered order: the deviation band is outside the allowed range.
     InvalidBand = 24,
-    /// Kurulum: dolum ucreti negatif olamaz.
+    /// Setup: the fill fee cannot be negative.
     InvalidFee = 25,
 }
 
@@ -214,10 +214,10 @@ pub struct Config {
     pub xlm: Address,
     pub pool: Address,
     pub router: Address,
-    /// Duraklatma bilgisini veren sozlesme (fabrika).
+    /// The contract that reports the pause state (the factory).
     pub guard: Address,
-    /// Dolumu yapana dolum basina odenebilecek azami ucret (alinan token, 7 ondalik). Yalnizca
-    /// limitten iyi gelen kisimdan kesilir; 0 = ucret yok.
+    /// Highest fee that may be paid to the filler per fill (in the token bought, 7 decimals). Taken only
+    /// from what comes in above the limit; 0 = no fee.
     pub exec_fee: i128,
 }
 
@@ -229,9 +229,9 @@ pub enum OrderStatus {
     Cancelled,
 }
 
-/// USDC -> XLM limit alim emri.
-/// `limit_price`: 1 XLM icin odenecek azami USDC (7 ondalik). 0,20 USDC = 2_000_000.
-/// `max_impact_bps`: tek dolumun Soroswap havuzunda yaratabilecegi azami fiyat etkisi.
+/// USDC -> XLM limit buy order.
+/// `limit_price`: the most USDC paid for 1 XLM (7 decimals). 0.20 USDC = 2_000_000.
+/// `max_impact_bps`: the largest price impact a single fill may cause in the Soroswap pool.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Order {
@@ -243,26 +243,26 @@ pub struct Order {
     pub max_impact_bps: u32,
     pub expiry: u64,
     pub status: OrderStatus,
-    /// 0: normal limit emir. >0: tetikli emir; piyasa fiyati (yatirilan token cinsinden, 1 alinan
-    /// token icin) bu degere ulasmadan dolum yapilamaz. Ornek: satis kasasinda zarar kes.
+    /// 0: a normal limit order. >0: a triggered order; no fill until the market price (in the deposited token, for 1
+    /// token bought) reaches this value. Example: a stop loss in a sell vault.
     pub trigger_price: i128,
-    /// Yalnizca tetikli emir: dolumun oracle fiyatindan azami sapmasi (baz puan). Normal emirde 0.
+    /// Triggered orders only: the fill's largest deviation from the oracle price (basis points). 0 for a normal order.
     pub stop_band_bps: u32,
 }
 
-/// Zincirleme emir: dolumdan cikan token `vault` kasasina yatirilir ve orada bu ayarlarla emir acilir.
+/// Follow-up order: the token that comes out of the fill is deposited into `vault` and an order is opened there with these settings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FollowUp {
     pub vault: Address,
-    /// Hedef kasanin kendi birimlerinde limit (hedef kasanin `place_order` limitiyle ayni anlam).
+    /// The limit in the target vault's own units (same meaning as the target vault's `place_order` limit).
     pub limit_price: i128,
     pub max_impact_bps: u32,
-    /// Hedef emrin gecerlilik suresi (saniye), aktarim anindan itibaren.
+    /// Lifetime of the target order (seconds), from the moment of the hand-over.
     pub duration: u64,
 }
 
-/// Hedef kasanin arayuzu (ayni kontrat kodu).
+/// The target vault's interface (the same contract code).
 #[contractclient(name = "FollowVaultClient")]
 pub trait FollowVault {
     fn receive_and_order(env: Env, from: Address, amount: i128, limit_price: i128, max_impact_bps: u32, expiry: u64) -> u32;
@@ -273,21 +273,21 @@ pub trait FollowVault {
 #[derive(Clone)]
 enum DataKey {
     Config,
-    /// Yatirilan anapara (bilgi amacli; faiz = bakiye - anapara).
+    /// Principal deposited (informational; interest = balance - principal).
     Deposited,
-    /// Acik emirlere ayrilmis tutar.
+    /// Amount reserved for open orders.
     Reserved,
     NextId,
     Order(u32),
-    /// Omur boyu toplamlar (gecmis ekrani icin).
+    /// Lifetime totals (for the history screen).
     Stats,
-    /// Zincirleme emir ayari (emir numarasina gore).
+    /// Follow-up order setting (by order id).
     FollowUp(u32),
-    /// Bu kasaya para yatirip emir acabilecek tek kasa (sahibinin izniyle).
+    /// The only vault that may deposit into this vault and open an order (with its owner's permission).
     Feeder,
 }
 
-/// Kasanin omur boyu toplamlari. Omur boyu faiz = bakiye + cekilen + harcanan - yatirilan.
+/// The vault's lifetime totals. Lifetime interest = balance + withdrawn + spent - deposited.
 #[contracttype]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
@@ -335,7 +335,7 @@ pub struct OrderFilled {
     pub amount_out: i128,
 }
 
-/// Zincirleme emir: dolum ciktisi hedef kasaya yatirildi ve orada emir acildi.
+/// Follow-up order: the fill's output was deposited into the target vault and an order was opened there.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forwarded {
@@ -346,7 +346,7 @@ pub struct Forwarded {
     pub new_order_id: u32,
 }
 
-/// Bu kasa baska bir kasadan para alip emir acti.
+/// This vault received funds from another vault and opened an order.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Received {
@@ -355,7 +355,7 @@ pub struct Received {
     pub order_id: u32,
 }
 
-/// Zincirleme emir: hedef kasa parayi kabul etmedi; cikti sahibin cuzdanina yonlendirildi.
+/// Follow-up order: the target vault did not accept the funds; the output was sent to the owner's wallet.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForwardFailed {
@@ -364,7 +364,7 @@ pub struct ForwardFailed {
     pub vault: Address,
 }
 
-/// Sahibin cuzdani cikan tokeni alamadi (or. trustline yok); token kasada bekliyor, `sweep` ile alinir.
+/// The owner's wallet could not receive the output token (e.g. no trustline); it waits in the vault and is collected with `sweep`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Held {
@@ -373,7 +373,7 @@ pub struct Held {
     pub amount: i128,
 }
 
-/// Dolumu yapana odenen ucret (alinan token cinsinden; limitten iyi gelen kisimdan kesildi).
+/// Fee paid to the filler (in the token bought; taken from what came in above the limit).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecFeePaid {
@@ -404,7 +404,7 @@ pub struct RewardsClaimed {
 }
 
 // ---------------------------------------------------------------------------
-// Sozlesme
+// Contract
 // ---------------------------------------------------------------------------
 
 #[contract]
@@ -442,7 +442,7 @@ impl OrderVault {
         bump_instance(&env);
     }
 
-    /// Kullanici USDC yatirir; kasa hemen Blend'e yatirir.
+    /// The user deposits USDC; the vault supplies it to Blend straight away.
     pub fn deposit(env: Env, amount: i128) {
         if amount <= 0 {
             panic_with_error!(&env, Error::InvalidAmount);
@@ -460,9 +460,9 @@ impl OrderVault {
         Deposited { amount }.publish(&env);
     }
 
-    /// Kullanici emirlere ayrilmamis bakiyesini (faiz dahil) her an cekebilir.
-    /// `amount = WITHDRAW_ALL` serbest bakiyenin tamamini ceker; boylece imza ile islem arasinda biriken
-    /// faiz kasada kirinti olarak kalmaz.
+    /// The user can withdraw the balance that is not reserved for orders (interest included) at any time.
+    /// `amount = WITHDRAW_ALL` withdraws the whole free balance, so interest that accrues between signing and
+    /// execution does not stay in the vault as dust.
     pub fn withdraw(env: Env, amount: i128) {
         if amount <= 0 {
             panic_with_error!(&env, Error::InvalidAmount);
@@ -479,9 +479,9 @@ impl OrderVault {
         let before = usdc.balance(&cfg.owner);
         let balance = pool_balance(&env, &cfg);
         if get_i128(&env, DataKey::Reserved) == 0 && amount >= balance {
-            // Tamamini cek: Blend bakiyeden fazla istenince tum b_token'lari yakar.
-            // Boylece simulasyon ile uygulama arasinda faiz artsa da sonuc ayni kalir
-            // (kucuk tutarli "kirinti" kaydi olusmaz).
+            // Withdraw everything: asking Blend for more than the balance burns all the b_tokens.
+            // That way the result is the same even if interest accrues between simulation and execution
+            // (no small "dust" entry is left).
             withdraw_from_pool(&env, &cfg, balance + SCALE, &cfg.owner);
         } else {
             withdraw_from_pool(&env, &cfg, amount, &cfg.owner);
@@ -506,12 +506,12 @@ impl OrderVault {
         new_order(&env, &cfg, amount_in, limit_price, min_fill, max_impact_bps, expiry, 0, 0)
     }
 
-    /// Tetikli emir: piyasa fiyati `trigger_price` seviyesine gelince calisir, en kotu fiyat
-    /// `limit_price`. Fiyatlar `place_order` ile ayni birimde (1 alinan token icin yatirilan token).
-    /// Satis kasasinda (XLM -> USDC) birim "1 USDC icin XLM" oldugundan, XLM dustukce fiyat YUKSELIR:
-    /// "XLM 0,15'in altina inerse sat" = tetik 1/0,15, limit biraz daha yukarisi (kayma payi).
-    /// `band_bps`: dolumun o anki oracle fiyatindan azami sapmasi (takas ucreti ve fiyat etkisi dahil).
-    /// Tetik kalici DEGILDIR: dolum aninda oracle fiyati tetigin gerisine donmusse emir bekler.
+    /// Triggered order: runs when the market price reaches `trigger_price`, with `limit_price` as the worst
+    /// price. Prices are in the same unit as `place_order` (deposited token for 1 token bought).
+    /// In a sell vault (XLM -> USDC) the unit is "XLM for 1 USDC", so the price RISES as XLM falls:
+    /// "sell if XLM drops below 0.15" = trigger 1/0.15, limit a little above it (room for slippage).
+    /// `band_bps`: the fill's largest deviation from the oracle price at that moment (swap fee and price impact included).
+    /// The trigger is NOT sticky: if the oracle price has moved back behind the trigger when filling, the order waits.
     #[allow(clippy::too_many_arguments)]
     pub fn place_stop_order(
         env: Env,
@@ -534,14 +534,14 @@ impl OrderVault {
         if !(STOP_BAND_MIN_BPS..=STOP_BAND_MAX_BPS).contains(&band_bps) {
             panic_with_error!(&env, Error::InvalidBand);
         }
-        // Oracle iki tokeni de fiyatlayamiyorsa emir hic tetiklenemez; bastan reddet.
+        // If the oracle cannot price both tokens the order could never trigger; reject it up front.
         oracle_prices(&env, &cfg);
         new_order(&env, &cfg, amount_in, limit_price, min_fill, max_impact_bps, expiry, trigger_price, band_bps)
     }
 
-    /// Zincirleme emir: normal limit emir; dolunca cikan token `then_vault` kasasina yatirilir ve
-    /// orada `then_limit` limitli, `then_duration` saniye gecerli bir emir acilir. Hedef kasanin
-    /// sahibi bu kasayi `set_feeder` ile onaylamis olmalidir; aksi halde token cuzdana gider.
+    /// Follow-up order: a normal limit order; when it fills, the output token is deposited into `then_vault` and an
+    /// order with limit `then_limit`, valid for `then_duration` seconds, is opened there. The target vault's
+    /// owner must have approved this vault with `set_feeder`; otherwise the token goes to the wallet.
     #[allow(clippy::too_many_arguments)]
     pub fn place_order_then(
         env: Env,
@@ -570,15 +570,15 @@ impl OrderVault {
         {
             panic_with_error!(&env, Error::InvalidFollowUp);
         }
-        // Zincir zararina satis emri acamaz: iki limitin carpimi 1'i gecerse satis fiyati alis fiyatinin
-        // altindadir (iki limit birbirinin tersi birimdedir).
+        // The chain cannot open a sell order at a loss: if the product of the two limits is above 1, the sell price is
+        // below the buy price (the two limits are in inverse units).
         if limit_price * then_limit > SCALE * SCALE {
             panic_with_error!(&env, Error::InvalidFollowUp);
         }
-        // Hedef, kardes fabrikada bu sahibin KAYITLI kasasi olmali. Hedefin kendi beyani (get_config)
-        // tek basina yeterli degildir: sahte bir sozlesme "sahibim sensin" diyebilir ve oltalama ile
-        // imzalatilan bir emrin ciktisini kendine cekebilirdi. Kardes fabrika ayarlanmadiysa zincirleme
-        // emir verilemez.
+        // The target must be this owner's REGISTERED vault in the sibling factory. The target's own statement (get_config)
+        // is not enough: a fake contract could say "you are my owner" and pull in the output of an order
+        // signed through phishing. If the sibling factory is not set, follow-up orders cannot be
+        // placed.
         let registered = match GuardClient::new(&env, &cfg.guard).try_sibling() {
             Ok(Ok(Some(f))) => {
                 matches!(GuardClient::new(&env, &f).try_vault_of(&cfg.owner), Ok(Ok(Some(v))) if v == then_vault)
@@ -588,7 +588,7 @@ impl OrderVault {
         if !registered {
             panic_with_error!(&env, Error::InvalidFollowUp);
         }
-        // Ayrica hedef bu emrin aldigi tokeni yatirilan token olarak kabul etmeli.
+        // The target must also accept the token this order buys as its deposited token.
         match FollowVaultClient::new(&env, &then_vault).try_get_config() {
             Ok(Ok(t)) if t.owner == cfg.owner && t.usdc == cfg.xlm => {}
             _ => panic_with_error!(&env, Error::InvalidFollowUp),
@@ -601,8 +601,8 @@ impl OrderVault {
         id
     }
 
-    /// Sahip, bu kasaya para yatirip emir acabilecek tek kasayi secer (or. kendi alim kasasi).
-    /// `None` izni kaldirir.
+    /// The owner chooses the only vault that may deposit into this vault and open an order (e.g. their own buy vault).
+    /// `None` removes the permission.
     pub fn set_feeder(env: Env, feeder: Option<Address>) {
         let cfg = config(&env);
         cfg.owner.require_auth();
@@ -614,9 +614,9 @@ impl OrderVault {
         FeederChanged { feeder }.publish(&env);
     }
 
-    /// Besleyici kasa cagirir: `amount` tokeni `from`dan alir, Blend'e yatirir ve verilen limitle
-    /// emir acar. Para yalnizca kasaya girer; sahibin parasi disari cikamaz. Yeni emir oldugu icin
-    /// duraklatma kuralina tabidir.
+    /// Called by the feeder vault: takes `amount` of the token from `from`, supplies it to Blend and opens an order
+    /// with the given limit. Funds only come into the vault; the owner's funds cannot leave. As a new order it is
+    /// subject to the pause rule.
     pub fn receive_and_order(
         env: Env,
         from: Address,
@@ -644,7 +644,7 @@ impl OrderVault {
         update_stats(&env, |st| st.total_deposited += amount);
         Deposited { amount }.publish(&env);
 
-        // Blend b_token yuvarlamasi ve tampon yuzunden emre ayrilabilen tutar `amount`tan biraz az olabilir.
+        // Because of Blend's b_token rounding and the buffer, the amount reserved for the order can be slightly less than `amount`.
         let room = orderable_of(&env, &cfg);
         let size = if amount < room { amount } else { room };
         if size <= 0 {
@@ -656,8 +656,8 @@ impl OrderVault {
         id
     }
 
-    /// Sahip acik emrini iptal eder. Suresi dolmus emri HERKES kapatabilir: emir zaten doldurulamaz,
-    /// kapatmak yalnizca ayrilan tutari sahibinin serbest bakiyesine geri acar (para yerinden oynamaz).
+    /// The owner cancels an open order. ANYONE can close an expired order: it cannot be filled anyway, and
+    /// closing it only releases the reserved amount back to the owner's free balance (no funds move).
     pub fn cancel_order(env: Env, order_id: u32) {
         let cfg = config(&env);
         let mut order = load_order(&env, order_id);
@@ -675,11 +675,11 @@ impl OrderVault {
         OrderCancelled { order_id, remaining }.publish(&env);
     }
 
-    /// Herkes cagirabilir. Cagiran yalnizca emri, dolum miktarini ve dolum ucretinin gidecegi adresi
-    /// (`executor`) secer; alici, limit ve tutar sozlesmede sabittir.
-    /// Dolum ucreti: takas limitten iyi sonuc verdiyse aradaki farkin en fazla `exec_fee` kadari
-    /// `executor`a gider. Sahip her durumda en az limitinin karsiligini alir.
-    /// Doner: kullaniciya gonderilen XLM miktari (ucret dusulmus).
+    /// Anyone can call. The caller only chooses the order, the fill size and the address the fill fee goes to
+    /// (`executor`); the recipient, the limit and the amount are fixed in the contract.
+    /// Fill fee: if the swap came out better than the limit, at most `exec_fee` of the difference goes to
+    /// `executor`. The owner always gets at least what the limit promises.
+    /// Returns: the amount of XLM sent to the user (after the fee).
     pub fn execute(env: Env, executor: Address, order_id: u32, fill_amount: i128) -> i128 {
         let cfg = config(&env);
         let mut order = load_order(&env, order_id);
@@ -697,9 +697,9 @@ impl OrderVault {
         if fill_amount > remaining {
             panic_with_error!(&env, Error::FillTooLarge);
         }
-        // Asgari dolum kurali: emrin tamamini bitiren dolum disinda her dolum en az `min_fill` olmali
-        // ve geride `min_fill`den kucuk bir kalan birakmamali (yoksa "kalan - 1" dolumuyla emir
-        // doldurulmasi anlamsiz bir kirintiyla acik birakilabilirdi).
+        // Minimum fill rule: every fill except the one that completes the order must be at least `min_fill` and
+        // must not leave less than `min_fill` behind (otherwise a "remaining - 1" fill could leave the order
+        // open with a meaningless crumb).
         let left = remaining - fill_amount;
         if left != 0 && (fill_amount < order.min_fill || left < order.min_fill) {
             panic_with_error!(&env, Error::FillTooSmall);
@@ -712,55 +712,55 @@ impl OrderVault {
         let router = RouterClient::new(&env, &cfg.router);
         let path = vec![&env, cfg.usdc.clone(), cfg.xlm.clone()];
 
-        // 0a) Tetikli emir: oracle fiyati tetik seviyesine gelmeden dolum yok.
+        // 0a) Triggered order: no fill before the oracle price reaches the trigger level.
         let oracle = if order.trigger_price > 0 { Some(check_trigger(&env, &cfg, order.trigger_price)) } else { None };
-        // 0b) Fiyat etkisi korumasi: buyuk dolumu sig havuza basmayi engeller.
+        // 0b) Price impact guard: stops a large fill being pushed through a shallow pool.
         if order.max_impact_bps < BPS {
             check_impact(&env, &router, &path, fill_amount, order.max_impact_bps);
         }
 
-        // 1) Blend'den cek.
+        // 1) Withdraw from Blend.
         let usdc_before = usdc.balance(&me);
         withdraw_from_pool(&env, &cfg, fill_amount, &me);
         if usdc.balance(&me) - usdc_before < fill_amount {
             panic_with_error!(&env, Error::PoolShortfall);
         }
 
-        // 2) Soroswap'ta takas et. Router asgari cikisi saglayamazsa hata verir
-        //    ve tum islem (Blend cekimi dahil) geri alinir.
+        // 2) Swap on Soroswap. If the router cannot deliver the minimum output it fails
+        //    and the whole transaction (the Blend withdrawal included) is reverted.
         let pair = router.router_pair_for(&cfg.usdc, &cfg.xlm);
         let xlm_before = xlm.balance(&me);
         let deadline = env.ledger().timestamp() + SWAP_DEADLINE_SECS;
-        // Bu yetki yalnizca birebir ayni transfere (kasa -> cift, bu miktar) uyar ve bu cagri
-        // cercevesi bitince gecersiz olur; baska bir islem icin kullanilamaz.
+        // This authorization matches only this exact transfer (vault -> pair, this amount) and ends with this
+        // call frame; it cannot be used for anything else.
         env.authorize_as_current_contract(vec![
             &env,
             transfer_auth(&env, &cfg.usdc, &me, &pair, fill_amount),
         ]);
         router.swap_exact_tokens_for_tokens(&fill_amount, &min_out, &path, &me, &deadline);
 
-        // 3) Router'a guvenmeden kendimiz de kontrol ederiz.
+        // 3) We check it ourselves too, without trusting the router.
         let gross = xlm.balance(&me) - xlm_before;
         if gross < min_out {
             panic_with_error!(&env, Error::LimitNotMet);
         }
-        // Sahibin almasi gereken en az miktar: limitin karsiligi (tetikli emirde ayrica oracle bandi).
+        // The least the owner must receive: what the limit promises (plus the oracle band for a triggered order).
         let mut floor = min_out;
-        // 3b) Tetikli emir: cikan miktar oracle'a gore adil miktardan en fazla secilen bant kadar az olabilir.
+        // 3b) Triggered order: the output may be below the fair amount by the oracle by at most the chosen band.
         if let Some((p_in, p_out)) = oracle {
             let fair = fill_amount * p_in / p_out;
             let band_min = fair * ((BPS - order.stop_band_bps) as i128);
             if gross * (BPS as i128) < band_min {
                 panic_with_error!(&env, Error::PriceDeviation);
             }
-            // Yukari yuvarlanir: ucret dusuldukten sonra da bant kosulu saglanir.
+            // Rounded up: the band condition still holds after the fee is taken.
             let band_floor = (band_min + (BPS as i128) - 1) / (BPS as i128);
             if band_floor > floor {
                 floor = band_floor;
             }
         }
-        // 3c) Dolum ucreti: yalnizca `floor`un ustunde kalan kisimdan, en fazla `exec_fee`. Dolumu yapan
-        //     ucreti alamiyorsa (or. trustline yok) dolum durmaz; ucret sahibinde kalir.
+        // 3c) Fill fee: only from what is above `floor`, at most `exec_fee`. If the filler cannot
+        //     receive the fee (e.g. no trustline) the fill does not stop; the fee stays with the owner.
         let mut fee = gross - floor;
         if fee > cfg.exec_fee {
             fee = cfg.exec_fee;
@@ -771,10 +771,10 @@ impl OrderVault {
             ExecFeePaid { order_id, executor, amount: fee }.publish(&env);
         }
 
-        // 4) Cikan token sahibine gider; zincirleme emirde sahibin sectigi kasaya yatirilir.
-        //    Aktarim basarisiz olursa (izin yok, duraklatma, yanlis token...) geri alinir ve
-        //    token yine sahibin cuzdanina gider. Cuzdan da alamiyorsa (or. trustline yok) token
-        //    kasada bekler; dolum bu yuzden durmaz, sahibi `sweep` ile alir.
+        // 4) The output token goes to the owner; for a follow-up order it is deposited into the vault the owner chose.
+        //    If the hand-over fails (no permission, pause, wrong token...) it is rolled back and the token
+        //    goes to the owner's wallet as before. If the wallet cannot receive it either (e.g. no trustline) the
+        //    token waits in the vault; the fill does not stop, the owner collects it with `sweep`.
         let mut delivered = false;
         if let Some(f) = env.storage().persistent().get::<DataKey, FollowUp>(&DataKey::FollowUp(order_id)) {
             env.storage().persistent().extend_ttl(&DataKey::FollowUp(order_id), BUMP_THRESHOLD, BUMP_TO);
@@ -813,7 +813,7 @@ impl OrderVault {
         out
     }
 
-    // ---------------- okuma fonksiyonlari ----------------
+    // ---------------- read functions ----------------
 
     pub fn get_config(env: Env) -> Config {
         config(&env)
@@ -823,9 +823,9 @@ impl OrderVault {
         load_order(&env, order_id)
     }
 
-    /// Kasada (Blend disinda) duran tokeni sahibine gonderir: cuzdanin alamadigi dolum ciktisi (`Held`)
-    /// veya yanlislikla gonderilen token. Yalnizca kasanin iki tokeni icin calisir; kasa baska hicbir
-    /// sozlesmeyi cagirmaz.
+    /// Sends a token sitting in the vault (outside Blend) to the owner: fill output the wallet could not receive (`Held`)
+    /// or a token sent by mistake. Works only for the vault's two tokens; the vault calls no other
+    /// contract.
     pub fn sweep(env: Env, token: Address) -> i128 {
         let cfg = config(&env);
         cfg.owner.require_auth();
@@ -842,7 +842,7 @@ impl OrderVault {
         bal
     }
 
-    /// Blend'in dagittigi odulleri (BLND) dogrudan sahibin cuzdanina alir.
+    /// Claims the rewards Blend distributes (BLND) straight to the owner's wallet.
     pub fn claim_rewards(env: Env, reserve_token_ids: Vec<u32>) -> i128 {
         let cfg = config(&env);
         cfg.owner.require_auth();
@@ -852,7 +852,7 @@ impl OrderVault {
         amount
     }
 
-    /// Zincirleme emir ayari (yoksa None).
+    /// Follow-up order setting (None if there is none).
     pub fn get_follow_up(env: Env, order_id: u32) -> Option<FollowUp> {
         env.storage().persistent().get(&DataKey::FollowUp(order_id))
     }
@@ -861,12 +861,12 @@ impl OrderVault {
         env.storage().instance().get(&DataKey::Feeder)
     }
 
-    /// Yatirilan anapara (cekilen ve harcanan dusulmus).
+    /// Principal deposited (minus what was withdrawn and spent).
     pub fn deposited(env: Env) -> i128 {
         get_i128(&env, DataKey::Deposited)
     }
 
-    /// Bugune kadar verilen emir sayisi (emir numaralari 0..order_count).
+    /// Number of orders placed so far (order ids are 0..order_count).
     pub fn order_count(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::NextId).unwrap_or(0)
     }
@@ -879,37 +879,37 @@ impl OrderVault {
         get_i128(&env, DataKey::Reserved)
     }
 
-    /// Blend'deki guncel bakiye (anapara + faiz).
+    /// Current balance on Blend (principal + interest).
     pub fn balance(env: Env) -> i128 {
         pool_balance(&env, &config(&env))
     }
 
-    /// Kazanilan faiz (bakiye - anapara). Havuz zarari varsa negatif olabilir.
+    /// Interest earned (balance - principal). Can be negative if the pool took a loss.
     pub fn earned(env: Env) -> i128 {
         pool_balance(&env, &config(&env)) - get_i128(&env, DataKey::Deposited)
     }
 
-    /// Cekilebilir tutar.
+    /// Amount that can be withdrawn.
     pub fn free_balance(env: Env) -> i128 {
         free_of(&env, &config(&env))
     }
 
-    /// Yeni emre ayrilabilir tutar (serbest bakiye eksi yuvarlama tamponu).
+    /// Amount that can be reserved for a new order (free balance minus the rounding buffer).
     pub fn orderable_balance(env: Env) -> i128 {
         orderable_of(&env, &config(&env))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Yardimcilar
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// Limit fiyattan asgari XLM cikisi (yukari yuvarlanir, kullanici asla eksik almaz).
+/// Minimum XLM output at the limit price (rounded up, the user never gets less).
 pub fn min_out_for(amount_in: i128, limit_price: i128) -> i128 {
     (amount_in * SCALE + limit_price - 1) / limit_price
 }
 
-/// Tum emir turleri buradan acilir (yetki kontrolu cagiranda).
+/// Every order type is opened here (authorization is checked by the caller).
 #[allow(clippy::too_many_arguments)]
 fn new_order(
     env: &Env,
@@ -922,15 +922,15 @@ fn new_order(
     trigger_price: i128,
     stop_band_bps: u32,
 ) -> u32 {
-    // Duraklatma yalnizca yeni emirleri durdurur; cekim, iptal ve mevcut emirlerin
-    // doldurulmasi her zaman calisir.
+    // The pause only stops new orders; withdrawals, cancellations and fills of existing
+    // orders always work.
     if GuardClient::new(env, &cfg.guard).is_paused() {
         panic_with_error!(env, Error::Paused);
     }
     if amount_in <= 0 || min_fill <= 0 || min_fill > amount_in {
         panic_with_error!(env, Error::InvalidAmount);
     }
-    // En fazla MAX_FILLS parca: min_fill >= ceil(amount_in / MAX_FILLS).
+    // At most MAX_FILLS pieces: min_fill >= ceil(amount_in / MAX_FILLS).
     if min_fill < (amount_in - 1) / MAX_FILLS + 1 {
         panic_with_error!(env, Error::InvalidAmount);
     }
@@ -944,7 +944,7 @@ fn new_order(
     if expiry <= now || expiry - now > MAX_ORDER_SECS {
         panic_with_error!(env, Error::InvalidExpiry);
     }
-    // Ayni bakiye iki emirde harcanamaz; yuvarlama tamponu emre ayrilamaz.
+    // The same balance cannot be spent by two orders; the rounding buffer cannot be reserved for an order.
     if amount_in > orderable_of(env, cfg) {
         panic_with_error!(env, Error::InsufficientFree);
     }
@@ -982,17 +982,17 @@ fn set_i128(env: &Env, key: DataKey, value: i128) {
     env.storage().instance().set(&key, &value);
 }
 
-/// Anapara once duser; anaparadan fazlasi faizden karsilanmis sayilir.
+/// Principal goes down first; anything beyond the principal counts as paid from interest.
 fn reduce_principal(env: &Env, amount: i128) {
     let d = get_i128(env, DataKey::Deposited);
     set_i128(env, DataKey::Deposited, if amount >= d { 0 } else { d - amount });
 }
 
-/// Emirlere ayrilamayan ve acik emir varken cekilemeyen tampon (0,001 token). Blend her cekimde
-/// yakilan b_token'i yukari yuvarlar: her dolum rezervden en fazla `ceil(b_rate / 1e12)` birim fazla
-/// eksiltir. Bir emir en fazla MAX_FILLS parcada doldugu icin bu tampon, ayni anda acik yuzlerce
-/// emrin yuvarlama kaybini karsilar; tampon olmasa son parca "havuzda eksik" hatasiyla bekleyebilirdi.
-/// Acik emir kalmayinca tampon da cekilebilir (kullanicinin parasidir, yalnizca emre baglanamaz).
+/// A buffer that cannot be reserved for orders or withdrawn while orders are open (0.001 token). Blend rounds the
+/// b_tokens burned up on every withdrawal: each fill takes up to `ceil(b_rate / 1e12)` units more from the
+/// reserve. An order fills in at most MAX_FILLS pieces, so this buffer covers the rounding loss of hundreds of
+/// orders open at once; without it the last piece could wait with a "pool shortfall" error.
+/// Once no order is open the buffer can be withdrawn too (it is the user's money, it just cannot be tied to an order).
 pub const ROUNDING_BUFFER: i128 = 10_000;
 
 fn update_stats(env: &Env, f: impl FnOnce(&mut Stats)) {
@@ -1012,7 +1012,7 @@ fn free_of(env: &Env, cfg: &Config) -> i128 {
     }
 }
 
-/// Yeni emre ayrilabilir tutar: tampon, acik emir olmasa da dusulur (ilk emir de tampon birakir).
+/// Amount that can be reserved for a new order: the buffer is deducted even with no open order (the first order leaves a buffer too).
 fn orderable_of(env: &Env, cfg: &Config) -> i128 {
     let room = pool_balance(env, cfg) - get_i128(env, DataKey::Reserved) - ROUNDING_BUFFER;
     if room < 0 {
@@ -1022,7 +1022,7 @@ fn orderable_of(env: &Env, cfg: &Config) -> i128 {
     }
 }
 
-/// Map olarak okunan Blend yapisindan bir alan.
+/// One field of a Blend struct read as a Map.
 fn field<T: TryFromVal<Env, Val>>(env: &Env, m: &Map<Symbol, Val>, name: &str) -> T {
     let v = match m.get(Symbol::new(env, name)) {
         Some(v) => v,
@@ -1034,7 +1034,7 @@ fn field<T: TryFromVal<Env, Val>>(env: &Env, m: &Map<Symbol, Val>, name: &str) -
     }
 }
 
-/// Kasanin Blend'deki USDC bakiyesi = b_token * b_rate (asagi yuvarlanir).
+/// The vault's USDC balance on Blend = b_token * b_rate (rounded down).
 fn pool_balance(env: &Env, cfg: &Config) -> i128 {
     let pool = BlendPoolClient::new(env, &cfg.pool);
     let reserve = pool.get_reserve(&cfg.usdc);
@@ -1049,8 +1049,8 @@ fn pool_balance(env: &Env, cfg: &Config) -> i128 {
     b_tokens * b_rate / B_RATE_SCALE
 }
 
-/// Dolumun fiyat etkisi: kucuk bir deneme miktarinin birim fiyatiyla karsilastirilir.
-/// Iki teklif de takas ucretini icerdigi icin olculen fark yalnizca havuz derinliginden gelir.
+/// Price impact of a fill: compared with the unit price of a small probe amount.
+/// Both quotes include the swap fee, so the measured difference comes from pool depth alone.
 fn check_impact(env: &Env, router: &RouterClient, path: &Vec<Address>, fill: i128, max_bps: u32) {
     let probe = fill / 100;
     if probe == 0 {
@@ -1064,13 +1064,13 @@ fn check_impact(env: &Env, router: &RouterClient, path: &Vec<Address>, fill: i12
     }
 }
 
-/// Piyasa fiyati (1 alinan token icin yatirilan token, 7 ondalik) tetik seviyesinde mi?
-/// Fiyat Blend havuzunun oracle'indan okunur. Havuzun anlik fiyati KULLANILMAZ: o, ayni islem
-/// icinde al-sat yapilarak oynatilabilir ve tetik sahte sekilde calistirilabilir.
-/// Tetik kontrolu; gecerse (yatirilan token fiyati, alinan token fiyati) dondurur.
+/// Is the market price (deposited token for 1 token bought, 7 decimals) at the trigger level?
+/// The price is read from the Blend pool's oracle. The pool's spot price is NOT used: it can be moved by
+/// buying and selling within the same transaction, and the trigger could be set off falsely.
+/// Trigger check; if it passes, returns (price of the deposited token, price of the bought token).
 fn check_trigger(env: &Env, cfg: &Config, trigger: i128) -> (i128, i128) {
     let (p_in, p_out) = oracle_prices(env, cfg);
-    // Iki fiyat da ayni oracle'dan (ayni ondalik), oran birimsizdir.
+    // Both prices come from the same oracle (same decimals); the ratio has no unit.
     let market = p_out * SCALE / p_in;
     if market < trigger {
         panic_with_error!(env, Error::TriggerNotMet);
@@ -1078,7 +1078,7 @@ fn check_trigger(env: &Env, cfg: &Config, trigger: i128) -> (i128, i128) {
     (p_in, p_out)
 }
 
-/// Blend havuzunun oracle'indan iki tokenin guncel fiyati.
+/// Current prices of the two tokens from the Blend pool's oracle.
 fn oracle_prices(env: &Env, cfg: &Config) -> (i128, i128) {
     let pc = BlendPoolClient::new(env, &cfg.pool).get_config();
     let oracle: Address = field(env, &pc, "oracle");
@@ -1115,7 +1115,7 @@ fn bump_instance(env: &Env) {
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
-/// Kasanin bir alt cagrida token transferini kendi adina yetkilendirmesi.
+/// The vault authorizing a token transfer on its own behalf in a sub-call.
 fn transfer_auth(
     env: &Env,
     token: &Address,

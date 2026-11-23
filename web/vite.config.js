@@ -2,16 +2,16 @@ import fs from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
-// Stellar Wallets Kit (xBull, Albedo, Lobstr, Freighter...) kuruluysa kullanilir; yoksa yalnizca Freighter.
-// BERTHLY_NO_KIT=1 ile zorla kapatilabilir (derleme sorunu olursa build-web.sh bunu kullanir).
+// Stellar Wallets Kit (xBull, Albedo, Lobstr, Varial...) is used if installed; otherwise Varial (Freighter) only.
+// BERTHLY_NO_KIT=1 forces it off (build-web.sh uses this if the build has a problem).
 const kitDir = resolve(import.meta.dirname, "node_modules/@creit-tech/stellar-wallets-kit");
-// Varsayilan: Freighter API (Freighter ve onu taklit eden Varial gibi cuzdanlar). Coklu cuzdan penceresi
-// gercek cuzdanlarla denenene kadar kapali; acmak icin IORA_KIT=1 ile derle.
+// Default: the Freighter API (Varial, formerly Freighter). The multi-wallet window stays
+// off until it has been tried with real wallets; build with IORA_KIT=1 to turn it on.
 const hasKit = fs.existsSync(kitDir) && process.env.IORA_KIT === "1" && !process.env.BERTHLY_NO_KIT;
 const stub = resolve(import.meta.dirname, "src/kit-stub.js");
 
-// Derleme kimligi: sayfaya gomulur ve dist/version.json'a yazilir. Acik kalan eski sayfa ikisini
-// karsilastirip yeni surum yayinlandigini anlar (src/main.js staleBuild).
+// Build id: embedded in the page and written to dist/version.json. A page left open compares the two
+// and learns that a new version was published (src/main.js staleBuild).
 const BUILD_ID = String(Date.now());
 const versionFile = {
   name: "iora-version-file",
@@ -29,7 +29,7 @@ export default defineConfig({
       ? {
           "swk-sdk": "@creit-tech/stellar-wallets-kit/sdk",
           "swk-modules": "@creit-tech/stellar-wallets-kit/modules/utils",
-          // MetaMask modulu kiti npm adiyla (@creit.tech) arar; JSR'den kurulan ayni pakete yonlendir.
+          // The MetaMask module looks for the kit under its npm name (@creit.tech); point it to the same package installed from JSR.
           "@creit.tech/stellar-wallets-kit": "@creit-tech/stellar-wallets-kit",
         }
       : { "swk-sdk": stub, "swk-modules": stub },

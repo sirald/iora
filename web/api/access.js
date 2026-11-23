@@ -1,12 +1,12 @@
-// Testnet uygulamasina erisim kontrolu (davet kodu veya izinli cuzdan).
-// Kodlar ve cuzdanlar sunucuda gizli ortam degiskenlerinde durur, sitenin kodunda gorunmez:
-//   IORA_ACCESS_CODES    virgulle ayrilmis davet kodlari (buyuk/kucuk harf fark etmez)
-//   IORA_ALLOWED_WALLETS virgulle ayrilmis Stellar adresleri (G...)
-//   IORA_ACCESS_SECRET   erisim biletlerini imzalamak icin rastgele uzun bir metin
-// Not: bu bir giris kapisidir, guvenlik siniri degil. Kontratlar zincirde herkese aciktir.
-// Cuzdanla alinan bilet o cuzdana baglidir: uygulama, bagli cuzdan biletteki adresle ayni degilse
-// kapiyi yeniden kapatir. Baska birinin adresini yazan kisi o cuzdanla islem imzalayamayacagi icin
-// uygulamayi kullanamaz.
+// Access control for the testnet app (invite code or allowed wallet).
+// Codes and wallets live in secret environment variables on the server; they do not appear in the site's code:
+//   IORA_ACCESS_CODES    comma-separated invite codes (case does not matter)
+//   IORA_ALLOWED_WALLETS comma-separated Stellar addresses (G...)
+//   IORA_ACCESS_SECRET   a long random text used to sign access tickets
+// Note: this is an entry gate, not a security boundary. The contracts are open to everyone on-chain.
+// A ticket obtained with a wallet is bound to that wallet: if the connected wallet is not the address in the
+// ticket, the app closes the gate again. Someone who types another person's address cannot sign transactions
+// with that wallet, so they cannot use the app.
 const crypto = require("crypto");
 
 const DAYS = 30;
@@ -23,7 +23,7 @@ function issue(sub, secret) {
   return `${payload}.${sign(payload, secret)}`;
 }
 
-/** Gecerliyse biletin sahibini ("code" ya da cuzdan adresi) dondurur, degilse null. */
+/** Returns the ticket's subject ("code" or a wallet address) if it is valid, otherwise null. */
 function verify(token, secret) {
   const [payload, sig] = String(token || "").split(".");
   if (!payload || !sig || !same(sig, sign(payload, secret))) return null;
@@ -57,7 +57,7 @@ module.exports = async (req, res) => {
 
   if (code) {
     const ok = list(process.env.IORA_ACCESS_CODES).some((c) => same(c.toLowerCase(), code));
-    // Tahmin denemelerini yavaslat
+    // Slow down guessing attempts
     if (!ok) await new Promise((r) => setTimeout(r, 800));
     return res.status(200).json(ok ? { ok: true, token: issue("code", secret) } : { ok: false });
   }

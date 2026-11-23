@@ -1,12 +1,12 @@
-// Ana sayfadaki canli testnet rakamlari: zincirden ucretsiz okuma (simulasyon), imza yok.
-// Sayfa bu bolume yaklasinca dinamik olarak yuklenir; boylece Stellar SDK ana sayfayi yavaslatmaz.
+// Live testnet numbers on the home page: a free read from the chain (simulation), no signature.
+// Loaded dynamically when the page comes near this section, so the Stellar SDK does not slow the home page down.
 import "./polyfill.js";
 import { Account, BASE_FEE, Contract, Networks, TransactionBuilder, nativeToScVal, rpc, scValToNative, xdr, Address } from "@stellar/stellar-sdk";
 import { makeServer, RPC_FALLBACK, RPC_PRIMARY } from "./rpc.js";
 
 const E = import.meta.env;
 const server = makeServer([E.VITE_RPC_URL, E.VITE_RPC_FALLBACK, RPC_PRIMARY, RPC_FALLBACK]);
-// Okuma icin herhangi bir mevcut hesap yeterli; USDC ihraccisi her zaman vardir.
+// Any existing account is enough for reading; the USDC issuer always exists.
 const SOURCE = E.VITE_USDC_ISSUER || "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56";
 const MAX_VAULTS = 150;
 
@@ -21,7 +21,7 @@ async function read(id, method, args = []) {
 }
 const u32 = (n) => nativeToScVal(n, { type: "u32" });
 
-// Ayni anda en fazla `n` istek
+// At most `n` requests at the same time
 async function pool(items, n, fn) {
   const out = new Array(items.length);
   let i = 0;

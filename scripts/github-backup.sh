@@ -35,14 +35,14 @@ git config --global user.email > /dev/null || git config --global user.email "${
 [ -d .git ] || git init -q -b main
 git add -A
 # Files with old names and the local backup folder leave the repository (they stay on this machine)
-git rm -r -q --cached --ignore-unmatch yedek berthly.sh moor.sh NOTLAR.md web/dist > /dev/null 2>&1
+git rm -r -q --cached --ignore-unmatch backups berthly.sh moor.sh NOTES.md web/dist > /dev/null 2>&1
 # Anything that .gitignore excludes now but was committed earlier also leaves the repository (testnet run logs, old backups)
 git ls-files -ci --exclude-standard -z | xargs -0 -r git rm -q --cached -- > /dev/null 2>&1
 
 # 5) Secret check: stop if a file about to be pushed contains a key.
 # Stellar secret key, Telegram bot token (even inside a URL), the access secret and key files.
 LEAK=$(git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 -r grep -lE 'S[A-Z2-7]{55}|[0-9]{8,10}:[A-Za-z0-9_-]{35}|TELEGRAM_BOT_TOKEN=[0-9]|IORA_ACCESS_SECRET=[A-Za-z0-9]{8,}|KEEPER_SECRET=[S]|DISCORD_TOKEN=[A-Za-z0-9]|[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}' 2>/dev/null)
-LEAK="$LEAK$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(\.env[^/]*|erisim\.env[^/]*|server\.env|[^/]*\.(pem|key))$' )"
+LEAK="$LEAK$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(\.env[^/]*|access\.env[^/]*|server\.env|[^/]*\.(pem|key))$' )"
 if [ -n "$LEAK" ]; then
   echo "STOPPED: these files may contain a secret key; nothing was pushed:"
   echo "$LEAK"
@@ -63,7 +63,7 @@ MSG
 fi
 
 # 6) Push (if the repository still has an old name, rename it to "iora")
-if git remote get-url origin 2>/dev/null | grep -qE "/(getirili-kasa|moor|berthly)(\.git)?$"; then
+if git remote get-url origin 2>/dev/null | grep -qE "/(moor|berthly)(\.git)?$"; then
   gh repo rename "$REPO" --yes > /dev/null 2>&1 && echo "The GitHub repository was renamed to 'iora'."
   git remote set-url origin "https://github.com/$LOGIN/$REPO.git"
 fi

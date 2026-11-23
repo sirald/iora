@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.." || exit 1
 source "$HOME/.cargo/env" 2>/dev/null
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # Build files are kept on the Linux side (very slow in a Windows folder).
-export CARGO_TARGET_DIR="$HOME/.cache/getirili-kasa-target"
+export CARGO_TARGET_DIR="$HOME/.cache/iora-target"
 
 {
   echo "===== $(date) ====="

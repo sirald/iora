@@ -40,7 +40,7 @@ OLD_BUY="$FACTORY"
 OLD_SELL=""
 [ -f testnet/factory-sell.env ] && OLD_SELL=$(grep -E '^FACTORY_SELL=' testnet/factory-sell.env | cut -d= -f2-)
 PREV=""
-[ -f testnet/eski-fabrikalar.env ] && PREV=$(grep -E '^OLD_FACTORIES=' testnet/eski-fabrikalar.env | cut -d= -f2-)
+[ -f testnet/old-factories.env ] && PREV=$(grep -E '^OLD_FACTORIES=' testnet/old-factories.env | cut -d= -f2-)
 
 SECRET=""
 for c in "stellar keys secret dev" "stellar keys show dev"; do
@@ -67,15 +67,15 @@ fi
 # Old factories: the keeper keeps filling them and the app offers to move funds to the wallet
 LIST=$(printf "%s\n" "$PREV" | tr ',' '\n'; echo "$OLD_BUY"; echo "$OLD_SELL")
 LIST=$(echo "$LIST" | sed '/^$/d' | awk '!seen[$0]++' | paste -sd, -)
-echo "OLD_FACTORIES=$LIST" > testnet/eski-fabrikalar.env
+echo "OLD_FACTORIES=$LIST" > testnet/old-factories.env
 # Generations: a user with funds in the previous version does not have to migrate; the app keeps using that vault.
 # Only versions with the same interface (4 and later) are listed, newest first.
 GEN_PREV=""
-[ -f testnet/nesiller.env ] && GEN_PREV=$(grep -E '^GENERATIONS=' testnet/nesiller.env | cut -d= -f2-)
+[ -f testnet/generations.env ] && GEN_PREV=$(grep -E '^GENERATIONS=' testnet/generations.env | cut -d= -f2-)
 [ -z "$GEN_PREV" ] && GEN_PREV="CB32H4RWA4DIA2NTE6W5IJATJUAYDAQ42HJDSFE6JWEM4W3BOZ4OEJM3:CDIEYJFASA2KTOGXBR2BQ27EDDXSZU35B5SBC4RVGQFLILNKUWWYVZ5D"
 if [ -n "$OLD_BUY" ] && [ -n "$OLD_SELL" ]; then
   GENS=$(printf "%s\n" "$OLD_BUY:$OLD_SELL" $(echo "$GEN_PREV" | tr ',' ' ') | awk '!seen[$0]++' | paste -sd, -)
-  echo "GENERATIONS=$GENS" > testnet/nesiller.env
+  echo "GENERATIONS=$GENS" > testnet/generations.env
   echo "Generations saved: $GENS"
 fi
 echo "Old factories saved: $LIST"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manages who can enter the testnet app. The list lives in erisim.env on this machine
+# Manages who can enter the testnet app. The list lives in access.env on this machine
 # (never committed) and goes to Vercel as secret environment variables on every publish.
 #
 #   bash scripts/access.sh new               -> creates a random invite code and adds it
@@ -11,7 +11,7 @@
 #                                               (owners of removed codes or wallets are locked out at once)
 # After add, remove or reset the site is republished (a change only takes effect after a publish).
 cd "$(dirname "$0")/.." || exit 1
-F=erisim.env
+F=access.env
 [ -f "$F" ] || printf 'IORA_ACCESS_CODES=\nIORA_ALLOWED_WALLETS=\nIORA_ACCESS_SECRET=%s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)" > "$F"
 
 get() { grep -E "^$1=" "$F" | head -1 | cut -d= -f2- | tr -d '\r'; }

@@ -1,10 +1,10 @@
-/* Iora gorunumu: "emir fisi". Bu dosya en son yuklenir ve uc sayfanin (ana sayfa, uygulama, docs) ortak
-   gorunusunu belirler (secicilerdeki ":root:root" on eki, yukleme sirasi ne olursa olsun bu kurallarin
-   sayfa kurallarini gecmesi icindir): koseli kutular, ince cizgiler, golge/gradyan/parlama yok, rakamlar tek aralikli yazi tipinde.
-   Renkler base.css'teki tokenlardan gelir. Yerlesim kurallari landing.css / style.css / docs.css'te kalir. */
+/* Iora look: the "order slip". This file loads last and sets the shared look of the three pages (home, app, docs).
+   The ":root:root" prefix in the selectors makes these rules win over the page rules whatever the load order:
+   square boxes, thin lines, no shadow/gradient/glow, numbers in a monospaced typeface.
+   Colors come from the tokens in base.css. Layout rules stay in landing.css / style.css / docs.css. */
 
-/* 1) Duz ve koseli */
-/* Koseli gorunum ana sayfa ve docs icindir; uygulama (body.appbody) yuvarlak koseli urun gorunumunu kullanir (bolum 11). */
+/* 1) Flat and square */
+/* The square look is for the home page and docs; the app (body.appbody) uses the rounded product look (section 11). */
 :root:root body:not(.appbody) *, :root:root body:not(.appbody) *::before, :root:root body:not(.appbody) *::after { border-radius: 0 !important; backdrop-filter: none !important; }
 :root:root .live, :root:root .chain-dot, :root:root .wdot, :root:root .dot, :root:root .th-ring, :root:root .spin, :root:root .spinner, :root:root input[type="radio"] { border-radius: 999px !important; }
 :root:root input[type="range"]::-webkit-slider-thumb { border-radius: 999px !important; }
@@ -13,7 +13,7 @@
 :root:root .hero::after, :root:root .glow::after, :root:root .sim::before { display: none !important; }
 :root:root .live, :root:root .chain-dot, :root:root #connect .wdot { box-shadow: none !important; }
 
-/* 2) Yazi */
+/* 2) Type */
 :root:root h1, :root:root h2, :root:root h3 { font-family: var(--display); font-weight: 500; }
 :root:root h1, :root:root h2 { background: none !important; color: var(--text); -webkit-text-fill-color: currentColor; }
 :root:root h1 { letter-spacing: -0.04em; }
@@ -21,7 +21,7 @@
 :root:root .facts dd, :root:root .costs td, :root:root .calc output, :root:root .calc b, :root:root .live-grid dd, :root:root .stat b, :root:root .num, :root:root code, :root:root kbd, :root:root .addr, :root:root .mono, :root:root #c-earn, :root:root #c-amount-v, :root:root #c-days-v, :root:root #c-apy-v { font-family: var(--mono); letter-spacing: -0.02em; }
 :root:root code { font-size: 0.92em; }
 
-/* 3) Dugmeler */
+/* 3) Buttons */
 :root:root .btn { box-shadow: inset 0 0 0 1px var(--line-2); background: transparent; color: var(--text); font-weight: 500; transition: background 0.15s, color 0.15s; }
 :root:root .btn:hover { background: var(--text); color: var(--bg); box-shadow: inset 0 0 0 1px var(--text); transform: none !important; filter: none !important; }
 :root:root .btn.primary, :root:root button.primary { background: var(--primary-1) !important; color: var(--accent-ink) !important; box-shadow: none !important; filter: none !important; font-weight: 600; }
@@ -29,13 +29,13 @@
 :root:root .nav-app { background: var(--primary-1) !important; color: var(--accent-ink) !important; box-shadow: none !important; font-weight: 500; }
 :root:root .chain-pill { background: transparent !important; box-shadow: none !important; padding-left: 0 !important; font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 
-/* 4) Kutular: golge yerine ince cizgi */
+/* 4) Boxes: a thin line instead of a shadow */
 :root:root .glow, :root:root .lift, :root:root .steps li, :root:root .rules div, :root:root .use-grid article, :root:root .panel, :root:root .setup, :root:root .ticket, :root:root .novault, :root:root .card, :root:root [class*="card"] { box-shadow: inset 0 0 0 1px var(--line) !important; }
 :root:root .glow:hover, :root:root .lift:hover { transform: none !important; box-shadow: inset 0 0 0 1px var(--line-2) !important; }
 :root:root input, :root:root select, :root:root textarea { box-shadow: none; }
 :root:root :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* 5) Ana sayfa girisi: su seviyesi ve samandira */
+/* 5) Home page hero: water level and buoy */
 :root:root .tidehero { margin: 0; min-width: 0; }
 :root:root .th-stage { position: relative; height: 520px; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent); mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent); }
 :root:root .th-meter { position: absolute; left: 12%; top: 0; display: flex; flex-direction: column; }
@@ -66,11 +66,11 @@
 }
 @media (max-width: 860px) { :root:root .th-stage { height: 460px; } }
 
-/* 6) Uygulama: kasa dagilim cubugu. Iki parca ayni renk ailesinden, acik/koyu tonla ayrilir. */
+/* 6) App: vault allocation bar. Two parts from the same color family, told apart by a light/dark tone. */
 :root:root .a-free { background: color-mix(in srgb, var(--accent) 35%, var(--bg-2)); }
 :root:root .a-res { background: var(--accent); }
 
-/* 7) Uygulama: sekmeler. Kutulu hap yerine sayfa genisliginde alt cizgili sekme satiri. */
+/* 7) App: tabs. A page-wide row of underlined tabs instead of boxed pills. */
 :root:root .appnav { width: 100%; gap: 28px; padding: 0; background: none; box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; scrollbar-width: none; }
 :root:root .appnav::-webkit-scrollbar { display: none; }
 :root:root .appnav a { flex: none; padding: 12px 0 13px; font-size: 15px; white-space: nowrap; color: var(--muted); box-shadow: none; background: none; }
@@ -78,7 +78,7 @@
 :root:root .appnav a[aria-current="page"] { color: var(--text); background: none; box-shadow: inset 0 -2px 0 var(--accent); }
 :root:root .appnav .new { background: none; padding: 0; font: 500 11px var(--mono); color: var(--accent); }
 
-/* 8) Uygulama: havuz ozeti. Sag sutunda, emirlerin altinda; sayfanin kendi varligi icin tek satir. */
+/* 8) App: pool summary. In the right column, under the orders; a single row for the page's own asset. */
 :root:root .poolbox .count { color: var(--muted); font-weight: 400; }
 :root:root .pool-grid { display: block; border: 0; padding-top: 14px; }
 :root:root .pool-grid > p { margin: 0; font-size: 14px; }
@@ -108,12 +108,12 @@
   :root:root .appnav { gap: 20px; }
 }
 
-/* 9) Uygulama: tekrar eden kutular kalkar. Piyasa (oran ve kullanim havuz ozetinde, fiyat emir formunda)
-   ve Cuzdan (ustteki cuzdan menusunde) kutulari gosterilmez; bos fiyat olcegi yer kaplamaz. */
+/* 9) App: repeated boxes are removed. The Market box (rate and utilisation are in the pool summary, the price in the
+   order form) and the Wallet box (in the wallet menu at the top) are not shown; an empty price scale takes no room. */
 :root:root .panel.market, :root:root .cols > .side > section.panel { display: none !important; }
 :root:root .ladder-panel:has(> .ladder > .empty) { display: none; }
 :root:root #plain { display: none !important; }
-/* Kasa yokken yan kutu dar bir sutunda yalniz kalmasin */
+/* Without a vault the side box must not be left alone in a narrow column */
 :root:root body:not(.has-vault) .view[data-view-pane="vault"] .cols,
 :root:root body:not(.has-svault) .sellview .cols { grid-template-columns: minmax(0, 1fr); grid-template-areas: "deck"; }
 :root:root body:not(.has-vault) .view[data-view-pane="vault"] .deck,
@@ -121,19 +121,19 @@
 :root:root body:not(.has-vault) .view[data-view-pane="vault"] .side,
 :root:root body:not(.has-svault) .sellview .side { display: none; }
 
-/* 10) Uygulama duzeni: solda emir karti, sagda acik emirler kucuk kartlar halinde (CoW Swap duzeni). */
+/* 10) App layout: order card on the left, open orders on the right as small cards (the CoW Swap layout). */
 :root:root .cols,
 :root:root body.has-svault .sellview .cols,
 :root:root .lendpage .lp-cols { grid-template-columns: 440px minmax(0, 1fr); grid-template-areas: "side deck"; gap: 36px; }
 :root:root .deck { gap: 28px; align-content: start; }
-/* Sag sutunda kutu yok: baslik + liste */
+/* No box in the right column: heading + list */
 :root:root .deck > .panel { background: none; box-shadow: none !important; padding: 0; }
 :root:root .deck > .panel > .head { padding-bottom: 10px; border-bottom: 1px solid var(--line-2); margin-bottom: 0; }
 :root:root .deck > .panel h2 { font-size: 16px; font-weight: 600; }
 :root:root .deck > .panel.safety { padding-top: 18px; border-top: 1px solid var(--line); }
 :root:root .deck > .panel.safety h2 { font-size: 14px; color: var(--muted); font-weight: 500; }
 :root:root .deck > .panel.safety li { font-size: 13.5px; }
-/* Emirler: tablo yerine iki satirlik kucuk kartlar */
+/* Orders: small two-line cards instead of a table */
 :root:root #orders, :root:root #sv-orders { overflow: visible; }
 :root:root #orders table, :root:root #sv-orders table,
 :root:root #orders tbody, :root:root #sv-orders tbody { display: block; }
@@ -180,21 +180,21 @@
 }
 :root:root #orders td, :root:root #sv-orders td { text-align: left; }
 
-/* 11) Uygulama: urun gorunumu. Morpho / CoW / Jupiter gibi uygulamalardaki ortak dil: dolu ve yuvarlak
-   yuzeyler (cizgi yerine), uc yuzey seviyesi, tek guclu ana dugme, anlam tasiyan renkler
-   (mavi = islem, yesil = kazanc, amber = emre ayrilan) ve buyuk rakam / kucuk etiket karsitligi. */
+/* 11) App: product look. The common language of apps such as Morpho / CoW / Jupiter: filled, rounded
+   surfaces (instead of lines), three surface levels, one strong primary button, colors that carry meaning
+   (blue = action, green = earnings, amber = reserved for an order) and big number / small label contrast. */
 :root:root body.appbody { --amber: #a05a00; --cta: #1f4fd1; --cta-hi: #163a9e; --card: var(--surface); --inset: var(--bg-2);
   background: radial-gradient(1100px 520px at 12% -8%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 62%), radial-gradient(900px 480px at 96% 4%, color-mix(in srgb, var(--ok) 6%, transparent), transparent 60%), var(--bg) !important; background-repeat: no-repeat !important; }
 :root[data-theme="dark"]:root body.appbody { --amber: #f0b454; --cta: #2f62ea; --cta-hi: #4676f5; --card: #0f172b; --inset: #0a1020; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):root body.appbody { --amber: #f0b454; --cta: #2f62ea; --cta-hi: #4676f5; --card: #0f172b; --inset: #0a1020; } }
 
-/* Sekmeler: hap */
+/* Tabs: pill */
 :root:root .appbody .appnav { width: fit-content; max-width: min(100%, calc(100vw - 28px)); min-width: 0; gap: 2px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; }
 :root:root .appbody .appnav a { padding: 9px 16px; border-radius: 10px; font-size: 14.5px; }
 :root:root .appbody .appnav a[aria-current="page"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); box-shadow: none; }
 :root:root .appbody .appnav .new { padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); font-family: var(--sans); }
 
-/* Kasa ozeti: renkli ust kart */
+/* Vault summary: colored top card */
 :root:root .appbody .overview { padding: 24px 28px 22px; border-radius: 22px; background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 15%, var(--card)), var(--card) 58%); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--line)); }
 :root:root .appbody .overview h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
 :root:root .appbody .vault-chip { background: color-mix(in srgb, var(--bg) 55%, transparent); box-shadow: inset 0 0 0 1px var(--line); border-radius: 12px; }
@@ -206,7 +206,7 @@
 :root:root .appbody .portfolio { border-radius: 16px; background: var(--card); }
 :root:root .appbody .novault { border-radius: 16px; }
 
-/* Emir karti */
+/* Order card */
 :root:root .appbody .ticket { border-radius: 24px; padding: 10px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line), 0 18px 50px -28px rgba(0, 0, 0, 0.55) !important; }
 :root:root .appbody .ticket .seg { border-radius: 12px; background: var(--inset); }
 :root:root .appbody .ticket .seg button { border-radius: 9px; }
@@ -219,7 +219,7 @@
 :root:root .appbody .btn.primary:disabled, :root:root .appbody button.primary:disabled { box-shadow: none !important; opacity: 0.55; }
 :root:root .appbody .btn { border-radius: 12px; }
 
-/* Sag sutun: bolumler kart, emirler tek tek kucuk kart */
+/* Right column: sections are cards, orders are small cards one by one */
 :root:root .appbody .deck { gap: 18px; }
 :root:root .appbody .deck > .panel { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; padding: 18px 20px; border-radius: 20px; }
 :root:root .appbody .deck > .panel > .head { border-bottom: 0; padding-bottom: 6px; }
@@ -238,7 +238,7 @@
 :root:root .appbody .legacy { border-radius: 18px; }
 :root:root .appbody .legacy-item { border-radius: 14px; }
 :root:root .appbody .logbox { border-radius: 14px; }
-/* Sutunlar icerikten genis olamaz (uzun satir sayfayi yana kaydirmasin) */
+/* Columns cannot be wider than their content (a long row must not push the page sideways) */
 :root:root .appbody .deck, :root:root .appbody .side { grid-template-columns: minmax(0, 1fr); }
 :root:root .appbody .deck > .panel { min-width: 0; }
 :root:root .appbody #orders, :root:root .appbody #sv-orders { overflow-x: auto; }
@@ -248,7 +248,7 @@
   :root:root .appbody .overview { padding: 20px 18px 18px; }
 }
 
-/* 12) Markets: uygulamanin ilk sayfasi. Her satir bir pazar (alim / satis), oranlar havuzdan canli. */
+/* 12) Markets: the app's first page. Each row is a market (buy / sell), rates live from the pool. */
 :root:root .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :root:root .appbody .mk-head { margin-bottom: 18px; }
 :root:root .appbody .panel.mk { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; border-radius: 20px; padding: 6px 0; overflow: hidden; }
@@ -270,7 +270,7 @@
 :root:root .appbody .mk-table .btn.primary { padding: 9px 18px; font-size: 14px; white-space: nowrap; }
 :root:root .appbody .marketspage .pool-info { margin: 14px 4px 0; }
 
-/* Emir kartinda acilir bolumler (Scaled orders, Advanced) */
+/* Collapsible sections in the order card (Scaled orders, Advanced) */
 :root:root .appbody .ticket details.adv summary { color: var(--text-2); display: flex; align-items: center; gap: 6px; list-style: none; }
 :root:root .appbody .ticket details.adv summary::-webkit-details-marker { display: none; }
 :root:root .appbody .ticket details.adv summary::after { content: "+"; margin-left: auto; font: 400 18px/1 var(--mono); color: var(--muted); }
@@ -280,7 +280,7 @@
 :root:root .appbody .panel.mk, :root:root .appbody .marketspage .pool-info { max-width: min(100%, calc(100vw - 28px)); }
 :root:root .appbody .mk .table-wrap { position: relative; }
 
-/* 13) Ek (gostermelik) pazarlar */
+/* 13) Extra (showcase) markets */
 :root:root .coin.other { background: radial-gradient(circle at 50% 50%, #fff 0 3px, transparent 3.5px), #6b7a99; }
 :root:root .appbody .mk-tags span.warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); }
 :root:root .appbody .xwarn { margin: 0 0 16px; padding: 12px 16px; border-radius: 14px; font-size: 13.5px; line-height: 1.5; color: var(--text-2); background: color-mix(in srgb, var(--amber) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); max-width: 96ch; }
@@ -288,14 +288,14 @@
 :root:root .appbody .xwarn button { margin-left: 8px; }
 :root:root .appbody .mk-table .btn:not(.primary) { padding: 9px 18px; font-size: 14px; }
 
-/* 14) Alt bilgi: logo ve telif satiri */
+/* 14) Footer: logo and copyright line */
 :root:root .bottom { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 32px; text-align: left; }
 :root:root .bottom-brand .mark { font-size: 20px; }
 :root:root .bottom-brand p, :root:root .foot-copy { margin: 10px 0 0; font-size: 13.5px; color: var(--muted); }
 :root:root .appbody .ticket .xwarn { margin: 12px 4px; font-size: 13px; }
 
-/* 15) Islem ekrani (spot borsa duzeni): ustte pazar cubugu, ortada grafik ve havuz derinligi, sagda emir karti
-   ve kasa ozeti, altta emirler / gecmis sekmeleri. Portfolio ayri sayfa. */
+/* 15) Trading screen (spot exchange layout): market bar on top, chart and pool depth in the middle, order card on the
+   right with the vault summary, orders / history tabs below. Portfolio is a separate page. */
 :root:root body.appbody { --down: #c8324a; }
 :root[data-theme="dark"]:root body.appbody { --down: #ff7285; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):root body.appbody { --down: #ff7285; } }
@@ -308,7 +308,7 @@
 :root:root .connected.appbody .pfpage.user-only { display: grid; }
 :root:root .appbody .pfpage[hidden] { display: none !important; }
 
-/* Pazar cubugu */
+/* Market bar */
 :root:root .appbody .tbar { align-items: center; gap: 12px 32px; flex-wrap: wrap; padding: 12px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 18px; }
 :root:root .connected.appbody .tbar.user-only { display: flex; }
 :root:root .appbody .tb-pair { display: flex; align-items: center; gap: 10px; }
@@ -322,7 +322,7 @@
 :root:root .appbody .tb-earn { margin-left: auto; padding: 9px 14px; border-radius: 12px; font-size: 13.5px; font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 :root:root .appbody .tb-earn b { font-family: var(--mono); font-weight: 500; color: inherit; }
 
-/* Sutunlar: sol grafik + emirler, sag emir karti */
+/* Columns: chart + orders on the left, order card on the right */
 :root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) 350px !important; grid-template-areas: "stage side" "deck side" !important; grid-template-rows: auto 1fr; gap: 14px !important; align-items: start; }
 :root:root .appbody .tradeview .tslot { grid-area: stage; min-width: 0; }
 :root:root .appbody .tradeview .side { display: grid !important; position: static; gap: 12px; max-width: none; align-content: start; }
@@ -330,7 +330,7 @@
 :root:root .appbody .tstage { display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 14px; align-items: stretch; }
 :root:root .appbody .tpanel { min-width: 0; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 18px; }
 
-/* Grafik */
+/* Chart */
 :root:root .appbody .chartcard { padding: 10px 12px 8px; }
 :root:root .appbody .chart-head { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 2px 4px 8px; min-height: 40px; }
 :root:root .appbody .tf { display: flex; gap: 2px; padding: 3px; background: var(--inset); border-radius: 10px; }
@@ -345,7 +345,7 @@
 :root:root .appbody .ch-legend i { display: inline-block; width: 18px; margin-right: 6px; vertical-align: middle; border-top: 2px dashed var(--accent); }
 :root:root .appbody .ch-legend i.s { border-color: var(--amber); }
 
-/* Havuz derinligi */
+/* Pool depth */
 :root:root .appbody .depth { padding: 14px 0 10px; }
 :root:root .appbody .depth h2 { margin: 0 14px 8px; font: 600 14px var(--sans); letter-spacing: 0; }
 :root:root .appbody #dp { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); font-variant-numeric: tabular-nums; }
@@ -363,7 +363,7 @@
 :root:root .appbody #dp .mid td { padding: 9px 14px; text-align: left; font: 500 16px var(--mono); border-block: 1px solid var(--line); }
 :root:root .appbody #dp .mid small { margin-left: 8px; font: 12px var(--sans); color: var(--muted); }
 
-/* Sag sutun: al / sat secimi, emir karti, kasa ozeti */
+/* Right column: buy / sell switch, order card, vault summary */
 :root:root .appbody .sidesw { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 14px; }
 :root:root .appbody.xmarket .sidesw { display: none; }
 :root:root .appbody .sidesw a { padding: 9px; border-radius: 10px; text-align: center; font-weight: 600; color: var(--muted); text-decoration: none; }
@@ -387,7 +387,7 @@
 :root:root .appbody .tradeview .novault[hidden] { display: none; }
 :root:root .appbody .tradeview .novault h2 { font-size: 15px; }
 
-/* Alt kart: emirler / gecmis / ozet sekmeleri */
+/* Bottom card: orders / history / summary tabs */
 :root:root .appbody .tradeview .deck > .tcard { padding: 4px 0 12px; }
 :root:root .appbody .ttabs { display: flex; gap: 24px; padding: 8px 18px 0; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 :root:root .appbody .ttabs button, :root:root .appbody .ttabs .solo { flex: none; padding: 8px 0 11px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; box-shadow: none; font: 500 14px var(--sans); color: var(--muted); white-space: nowrap; cursor: pointer; }
@@ -431,7 +431,7 @@
 :root:root .appbody .pf, :root:root .appbody .pfpage { grid-template-columns: minmax(0, 1fr); }
 :root:root .appbody .pf-card .table-wrap { overflow-x: auto; }
 
-/* 16) Emir turleri (Limit / Market / Scaled) ve kasa kartindaki Balance / Deposit / Withdraw sekmeleri */
+/* 16) Order types (Limit / Market / Scaled) and the Balance / Deposit / Withdraw tabs of the vault card */
 :root:root .appbody .ticket[data-otype="limit"] .sc-only,
 :root:root .appbody .ticket[data-otype="market"] .sc-only,
 :root:root .appbody .ticket[data-otype="scaled"] .lim-only { display: none !important; }
@@ -467,7 +467,7 @@
 :root:root .appbody .tp-box[hidden] { display: none; }
 :root:root .appbody .tp-box input.big { font-size: 22px; }
 
-/* 17) Emir formu, borsa duzeni: acilir tur secimi, sikisik alanlar, noktali yuzde cizgisi, renkli Al / Sat dugmesi */
+/* 17) Order form, exchange layout: dropdown type selector, compact fields, dotted percentage line, colored Buy / Sell button */
 :root:root .appbody .otsel { display: block; margin: 2px 0 8px; }
 :root:root .appbody .otsel select { width: 100%; appearance: none; -webkit-appearance: none; padding: 12px 38px 12px 14px; border: 0; border-radius: 12px; font: 600 15px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset);
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 20px) 54%, calc(100% - 14px) 54%; background-size: 6px 6px; background-repeat: no-repeat; }
@@ -486,7 +486,7 @@
 :root:root .appbody .tradeview .ticket .unit { font: 600 15px var(--sans); color: var(--text); }
 :root:root .appbody .tradeview .ticket .swap-arrow { display: none; }
 :root:root .appbody .tradeview #gauge { display: none !important; }
-/* Yuzde: bes noktali cizgi (0 / 25 / 50 / 75 / 100) */
+/* Percentage: a line with five dots (0 / 25 / 50 / 75 / 100) */
 :root:root .appbody .chips.pct { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 0; margin: 14px 8px 8px; }
 :root:root .appbody .chips.pct::before { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; height: 2px; margin-top: -1px; background: var(--line-2); }
 :root:root .appbody .chips.pct button { position: relative; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; font-size: 0; background: var(--card); box-shadow: inset 0 0 0 2px var(--line-2); cursor: pointer; }
@@ -495,26 +495,26 @@
 :root:root .appbody .chips.pct button[aria-pressed="true"] { background: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 25%, transparent); }
 :root:root .appbody .chips.pct button:has(~ button[aria-pressed="true"]) { background: var(--text-2); box-shadow: none; }
 :root:root .appbody .mkt .chips.pct { margin: 12px 8px 2px; }
-/* Kar al */
+/* Take profit */
 :root:root .appbody .chk { display: flex; align-items: center; gap: 10px; margin: 10px 6px 0; font-size: 14px; color: var(--text); cursor: pointer; }
 :root:root .appbody .chk input { width: 18px; height: 18px; margin: 0; accent-color: var(--cta); }
 :root:root .appbody #autosell-row:not(.open) .tp-box { display: none; }
 :root:root .appbody #autosell-row[hidden] { display: none; }
 :root:root .appbody .tp-box input.big { font-size: 18px; }
-/* Onizleme: kapali baslar */
+/* Preview: starts closed */
 :root:root .appbody details.preview { margin-top: 10px; padding: 10px 14px; border-radius: 12px; }
 :root:root .appbody details.preview > summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; margin: 0; font-size: 13px; }
 :root:root .appbody details.preview > summary::-webkit-details-marker { display: none; }
 :root:root .appbody details.preview > summary::after { content: "+"; font: 16px var(--mono); color: var(--muted); }
 :root:root .appbody details.preview[open] > summary::after { content: "−"; }
 :root:root .appbody details.preview[hidden] { display: none; }
-/* Al / Sat dugmesi */
+/* Buy / Sell button */
 :root:root .appbody .btn.primary.go-buy { background: #12a06c !important; box-shadow: none !important; border-radius: 999px; margin-top: 12px; }
 :root:root .appbody .btn.primary.go-buy:hover { background: #0e8a5d !important; }
 :root:root .appbody .btn.primary.go-sell { background: #e5384f !important; box-shadow: none !important; border-radius: 999px; margin-top: 12px; }
 :root:root .appbody .btn.primary.go-sell:hover { background: #cc2c42 !important; }
 
-/* 18) Grafik: cizgi / mum secimi, yakinlastirma, daha yuksek tuval */
+/* 18) Chart: line / candle switch, zoom, a taller canvas */
 :root:root .appbody .chart-box { height: 470px; }
 :root:root .appbody .chart-box canvas { cursor: crosshair; touch-action: pan-y; }
 :root:root .appbody .chart-head { gap: 8px 12px; }
@@ -527,24 +527,24 @@
 @media (max-width: 960px) { :root:root .appbody .chart-box { height: 330px; } :root:root .appbody .ch-tools { margin-left: 0; } }
 :root:root .appbody .chart-head .ohlc { order: 3; flex-basis: 100%; min-height: 18px; }
 
-/* 19) Kasa kartlari (bakiye, yatirma, cekme) yalnizca Portfolio sayfasinda */
+/* 19) Vault cards (balance, deposit, withdraw) only on the Portfolio page */
 :root:root .appbody .pf-vaults { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; align-items: start; }
 :root:root .appbody .pf-vaults:not(:has(> .vaultcard:not([hidden]))) { display: none; }
 :root:root .appbody .vaultcard .box { margin-top: 8px; border-radius: 12px; }
 :root:root .appbody .vaultcard [data-pane] > .btn { margin-top: 10px; }
 
-/* 20. Eski sayfa uyarisi ve Portfolio'da eski kasa notu */
+/* 20. Stale page warning and the old-vault note on Portfolio */
 .stale { position: sticky; top: 0; z-index: 200; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 18px; padding: 12px 16px; font-size: 14px; line-height: 1.45; color: var(--text); background: var(--surface); box-shadow: inset 0 -1px 0 var(--line), inset 0 3px 0 var(--accent); }
 .stale .btn { padding: 8px 16px; }
 .pf-old { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin: 0 0 16px; padding: 14px 18px; border-radius: 16px; font-size: 14px; line-height: 1.5; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line), inset 3px 0 0 var(--accent); }
 .pf-old span { flex: 1 1 320px; min-width: 0; }
 
-/* 21. Surum 7: "cikti kasada kalsin" secenegi yalnizca tek kasada gorunur */
+/* 21. Version 7: the "keep the output in the vault" option is shown only with a single vault */
 .keeprow { display: none; margin: 10px 0 2px; font-size: 13px; }
 body.v7 .keeprow { display: flex; }
 body.xmarket .keeprow { display: none; }
 
-/* 22. Lend & Borrow: varlik basina tutarlar */
+/* 22. Lend & Borrow: amounts per asset */
 .lp-break { display: block; margin-top: 6px; font-size: 12.5px; line-height: 1.45; color: var(--muted, #8b94a7); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .lp-break:empty { display: none; }
 .lp-usd { display: block; font-size: 12px; }

@@ -11,9 +11,9 @@ source ../testnet/factory.env || { echo "testnet/factory.env not found"; exit 1;
 # Sell factory of the earlier two-vault design, if present
 [ -f ../testnet/factory-sell.env ] && source ../testnet/factory-sell.env
 # Factories of earlier contract versions (the app offers to move funds out of an old vault)
-[ -f ../testnet/eski-fabrikalar.env ] && source ../testnet/eski-fabrikalar.env
+[ -f ../testnet/old-factories.env ] && source ../testnet/old-factories.env
 # Earlier factory generations that use the same interface (buy:sell): a user with funds there stays there
-[ -f ../testnet/nesiller.env ] && source ../testnet/nesiller.env
+[ -f ../testnet/generations.env ] && source ../testnet/generations.env
 # Extra showcase markets of the earlier design
 [ -f ../testnet/markets.env ] && source ../testnet/markets.env
 # Other coins that trade against USDC (BTC, EURC ...): set up by scripts/create-test-markets.sh

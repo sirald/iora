@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepares the repository for going public: creates a clean repository WITHOUT history.
 #
-# Why: old commits contain internal notes (NOTLAR.md). If the repository were opened as it is, anyone could read them.
+# Why: old commits contain internal notes (NOTES.md). If the repository were opened as it is, anyone could read them.
 # What it does:
 #   1) Renames the current GitHub repository to "<name>-archive". It stays private and keeps the full history as a backup.
 #   2) Creates a new repository with the same name and pushes only the CURRENT STATE as a single commit (no history).
@@ -29,7 +29,7 @@ fi
 [ "$(git branch --show-current)" = "main" ] || { echo "You are not on the main branch."; exit 1; }
 
 # 2) Things that must not be in the published files.
-BAD=$(git ls-files | grep -E '^(NOTLAR\.md|yedek/|web/dist/|discord-bot/|scripts/archive/)|(^|/)(\.env[^/]*|erisim\.env[^/]*|server\.env|test-result\.txt|keeper\.log|durum\.json|[^/]*\.(pem|key))$' || true)
+BAD=$(git ls-files | grep -E '^(NOTES\.md|backups/|web/dist/|discord-bot/|scripts/archive/)|(^|/)(\.env[^/]*|access\.env[^/]*|server\.env|test-result\.txt|keeper\.log|status\.json|[^/]*\.(pem|key))$' || true)
 if [ -n "$BAD" ]; then
   echo "STOPPED: these files must not be in the repository. Run  bash scripts/github-backup.sh  first:"
   echo "$BAD"

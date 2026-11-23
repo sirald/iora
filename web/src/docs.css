@@ -1,4 +1,4 @@
-/* Belgeler: gruplu kenar menusu, okuma odakli koyu duzen */
+/* Docs: grouped side menu, dark layout made for reading */
 .docs-wrap {
   max-width: 1180px;
   margin: 0 auto;
@@ -77,7 +77,7 @@ code {
 .copy { margin-left: 8px; font: 500 12px var(--sans); padding: 2px 9px; border-radius: 999px; border: 0; background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--line-2); cursor: pointer; }
 .copy:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
-/* Karsilastirma tablosu */
+/* Comparison table */
 .cmp { width: 100%; min-width: 640px; border-collapse: separate; border-spacing: 0; font-size: 14px; }
 .cmp th, .cmp td { padding: 12px 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 .cmp thead th { font-weight: 500; color: var(--text); font-size: 14px; }
@@ -87,7 +87,7 @@ code {
 .cmp .us { color: var(--text); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .cmp thead .us { border-radius: 12px 12px 0 0; box-shadow: inset 0 2px 0 var(--signal); }
 
-/* Yasam dongusu semasi */
+/* Lifecycle diagram */
 .flow { margin: 8px 0 22px; }
 .flow svg { width: 100%; height: auto; display: block; }
 .flow .node rect { fill: var(--surface-2); stroke: var(--line-2); }
@@ -143,7 +143,7 @@ details p { margin: 10px 0 4px; }
 .road li.goal::before { box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent); }
 .road li.goal b { color: var(--accent); }
 
-/* Gelistirici bolumleri ayiran not */
+/* Note that separates the developer sections */
 .dev-note { margin: 56px 0 8px; padding: 22px 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .dev-note .muted { margin: 0; }
 .dev-note-title { margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }

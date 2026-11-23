@@ -3,7 +3,7 @@ import "./hero.js";
 import "./motion.js";
 import "./skin.css";
 
-// Canli testnet rakamlari: bolume yaklasinca zincirden okunur; okunamazsa bolum gizli kalir.
+// Live testnet numbers: read from the chain when the section comes near; if they cannot be read, the section stays hidden.
 const live = document.getElementById("live");
 if (live && import.meta.env.VITE_FACTORY) {
   live.hidden = false;
@@ -73,13 +73,13 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-// Bekleyen emrin kazanci: emir defteri ile Iora karsilastirmasi (ornek oranla)
+// What a waiting order earns: order book compared with Iora (at an example rate)
 const calc = document.getElementById("calc");
 if (calc) {
   const $ = (id) => document.getElementById(id);
   const usd = (v, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
   const update = () => {
-    // Tutar kaydiricisi katlanarak buyur: 100 USDC -> 1.000.000 USDC (0..100 konum), iki anlamli basamaga yuvarlanir.
+    // The amount slider grows exponentially: 100 USDC -> 1,000,000 USDC (positions 0..100), rounded to two significant digits.
     const raw = 100 * Math.pow(10, Number($("c-amount").value) / 25);
     const mag = Math.pow(10, Math.floor(Math.log10(raw)) - 1);
     const amount = Math.round(raw / mag) * mag;
@@ -90,7 +90,7 @@ if (calc) {
     $("c-days-v").textContent = `${days} day${days === 1 ? "" : "s"}`;
     $("c-apy-v").textContent = `${usd(apy * 100, 1)}% a year`;
     $("c-earn").textContent = `+${usd(earned)} USDC`;
-    // Cubuk: kazancin tutara orani, kaydiricilarin en yuksek degerine gore
+    // Bar: earnings relative to the amount, scaled to the sliders' highest values
     const share = (apy * days) / 365 / ((0.15 * 180) / 365);
     $("c-bar").style.setProperty("--w", `${(6 + 94 * share).toFixed(1)}%`);
   };
