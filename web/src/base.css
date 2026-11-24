@@ -108,7 +108,7 @@ html { scroll-behavior: smooth; background: var(--bg); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 a { color: var(--accent); }
-:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 10px; }
 ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 
 .top {
@@ -134,7 +134,7 @@ a { color: var(--accent); }
   width: 28px;
   height: 28px;
   flex: none;
-  border-radius: 4px;
+  border-radius: 10px;
   background: url(/logo.svg) center / contain no-repeat;
 }
 .top nav { display: flex; gap: 26px; align-items: center; font-size: 14.5px; }

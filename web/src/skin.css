@@ -5,7 +5,8 @@
 
 /* 1) Flat and square */
 /* The square look is for the home page and docs; the app (body.appbody) uses the rounded product look (section 11). */
-:root:root body:not(.appbody) *, :root:root body:not(.appbody) *::before, :root:root body:not(.appbody) *::after { border-radius: 0 !important; backdrop-filter: none !important; }
+/* (The docs page used to be forced square here; nothing on the site has sharp corners any more.) */
+:root:root body:not(.appbody) *, :root:root body:not(.appbody) *::before, :root:root body:not(.appbody) *::after { backdrop-filter: none !important; }
 :root:root .live, :root:root .chain-dot, :root:root .wdot, :root:root .dot, :root:root .th-ring, :root:root .spin, :root:root .spinner, :root:root input[type="radio"] { border-radius: 999px !important; }
 :root:root input[type="range"]::-webkit-slider-thumb { border-radius: 999px !important; }
 :root:root input[type="range"]::-moz-range-thumb { border-radius: 999px !important; }
@@ -189,44 +190,44 @@
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]):root body.appbody { --amber: #f0b454; --cta: #2f62ea; --cta-hi: #4676f5; --card: #0f172b; --inset: #0a1020; } }
 
 /* Tabs: pill */
-:root:root .appbody .appnav { width: fit-content; max-width: min(100%, calc(100vw - 28px)); min-width: 0; gap: 2px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; }
-:root:root .appbody .appnav a { padding: 9px 16px; border-radius: 6px; font-size: 14.5px; }
+:root:root .appbody .appnav { width: fit-content; max-width: min(100%, calc(100vw - 28px)); min-width: 0; gap: 2px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
+:root:root .appbody .appnav a { padding: 9px 16px; border-radius: 12px; font-size: 14.5px; }
 :root:root .appbody .appnav a[aria-current="page"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); box-shadow: none; }
 :root:root .appbody .appnav .new { padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); font-family: var(--sans); }
 
 /* Vault summary: colored top card */
-:root:root .appbody .overview { padding: 24px 28px 22px; border-radius: 8px; background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 15%, var(--card)), var(--card) 58%); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--line)); }
+:root:root .appbody .overview { padding: 24px 28px 22px; border-radius: 16px; background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 15%, var(--card)), var(--card) 58%); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--line)); }
 :root:root .appbody .overview h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
-:root:root .appbody .vault-chip { background: color-mix(in srgb, var(--bg) 55%, transparent); box-shadow: inset 0 0 0 1px var(--line); border-radius: 6px; }
+:root:root .appbody .vault-chip { background: color-mix(in srgb, var(--bg) 55%, transparent); box-shadow: inset 0 0 0 1px var(--line); border-radius: 12px; }
 :root:root .appbody .alloc-bar { height: 10px; border-radius: 999px; gap: 3px; background: none; }
 :root:root .appbody .alloc-bar span { border-radius: 999px; }
 :root:root .appbody .a-free { background: var(--accent); }
 :root:root .appbody .a-res { background: var(--amber); }
-:root:root .appbody .alloc-legend .sw { border-radius: 4px; }
-:root:root .appbody .portfolio { border-radius: 8px; background: var(--card); }
-:root:root .appbody .novault { border-radius: 8px; }
+:root:root .appbody .alloc-legend .sw { border-radius: 10px; }
+:root:root .appbody .portfolio { border-radius: 16px; background: var(--card); }
+:root:root .appbody .novault { border-radius: 16px; }
 
 /* Order card */
-:root:root .appbody .ticket { border-radius: 8px; padding: 10px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line), 0 18px 50px -28px rgba(0, 0, 0, 0.55) !important; }
-:root:root .appbody .ticket .seg { border-radius: 6px; background: var(--inset); }
-:root:root .appbody .ticket .seg button { border-radius: 6px; }
-:root:root .appbody .box { border-radius: 8px; background: var(--inset); box-shadow: inset 0 0 0 1px transparent !important; }
+:root:root .appbody .ticket { border-radius: 16px; padding: 10px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line), 0 18px 50px -28px rgba(0, 0, 0, 0.55) !important; }
+:root:root .appbody .ticket .seg { border-radius: 12px; background: var(--inset); }
+:root:root .appbody .ticket .seg button { border-radius: 12px; }
+:root:root .appbody .box { border-radius: 16px; background: var(--inset); box-shadow: inset 0 0 0 1px transparent !important; }
 :root:root .appbody .box:focus-within { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent) !important; }
 /* One focus mark per field: the box's own line shows where you are, so the input inside draws none of its own
    (the two together read as a box inside a box). */
 :root:root .appbody .box input:focus-visible, :root:root .appbody .box select:focus-visible { outline: none; box-shadow: none; }
 :root:root .appbody .box.out { background: color-mix(in srgb, var(--ok) 6%, var(--inset)); }
-:root:root .appbody .ticket .chips button, :root:root .appbody .ticket .opts button { border-radius: 4px; }
-:root:root .appbody .btn.primary, :root:root .appbody button.primary { background: var(--cta) !important; color: #fff !important; border-radius: 8px; font-weight: 600; box-shadow: 0 10px 26px -12px color-mix(in srgb, var(--cta) 80%, transparent) !important; }
+:root:root .appbody .ticket .chips button, :root:root .appbody .ticket .opts button { border-radius: 10px; }
+:root:root .appbody .btn.primary, :root:root .appbody button.primary { background: var(--cta) !important; color: #fff !important; border-radius: 16px; font-weight: 600; box-shadow: 0 10px 26px -12px color-mix(in srgb, var(--cta) 80%, transparent) !important; }
 :root:root .appbody .btn.primary:hover, :root:root .appbody button.primary:hover { background: var(--cta-hi) !important; }
 :root:root .appbody .btn.primary:disabled, :root:root .appbody button.primary:disabled { box-shadow: none !important; opacity: 0.55; }
-:root:root .appbody .btn { border-radius: 6px; }
+:root:root .appbody .btn { border-radius: 12px; }
 
 /* Right column: sections are cards, orders are small cards one by one */
 :root:root .appbody .deck { gap: 18px; }
-:root:root .appbody .deck > .panel { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; padding: 18px 20px; border-radius: 8px; }
+:root:root .appbody .deck > .panel { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; padding: 18px 20px; border-radius: 16px; }
 :root:root .appbody .deck > .panel > .head { border-bottom: 0; padding-bottom: 6px; }
-:root:root .appbody #orders tr, :root:root .appbody #sv-orders tr { padding: 12px 14px; margin-top: 8px; border: 0; border-radius: 8px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody #orders tr, :root:root .appbody #sv-orders tr { padding: 12px 14px; margin-top: 8px; border: 0; border-radius: 16px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root .appbody #orders tr.is-open, :root:root .appbody #sv-orders tr.is-open { box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px var(--line); }
 :root:root .appbody #orders tr.is-done, :root:root .appbody #sv-orders tr.is-done { opacity: 0.8; }
 :root:root .appbody .bar { height: 6px; border-radius: 999px; }
@@ -238,9 +239,9 @@
 :root:root .appbody .pool-card dd.pos { color: var(--ok); font-size: 20px; }
 :root:root .appbody .pool-util-bar, :root:root .appbody .pool-util-bar span { border-radius: 999px; }
 :root:root .appbody .pool-util-bar { height: 6px; }
-:root:root .appbody .legacy { border-radius: 8px; }
-:root:root .appbody .legacy-item { border-radius: 8px; }
-:root:root .appbody .logbox { border-radius: 8px; }
+:root:root .appbody .legacy { border-radius: 16px; }
+:root:root .appbody .legacy-item { border-radius: 16px; }
+:root:root .appbody .logbox { border-radius: 16px; }
 /* Columns cannot be wider than their content (a long row must not push the page sideways) */
 :root:root .appbody .deck, :root:root .appbody .side { grid-template-columns: minmax(0, 1fr); }
 :root:root .appbody .deck > .panel { min-width: 0; }
@@ -254,7 +255,7 @@
 /* 12) Markets: the app's first page. Each row is a market (buy / sell), rates live from the pool. */
 :root:root .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :root:root .appbody .mk-head { margin-bottom: 18px; }
-:root:root .appbody .panel.mk { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; border-radius: 8px; padding: 6px 0; overflow: hidden; }
+:root:root .appbody .panel.mk { background: var(--card); box-shadow: inset 0 0 0 1px var(--line) !important; border-radius: 16px; padding: 6px 0; overflow: hidden; }
 :root:root .appbody .mk .table-wrap { overflow-x: auto; }
 :root:root .appbody .mk-table { width: 100%; min-width: 860px; border-collapse: collapse; }
 :root:root .appbody .mk-table th { padding: 12px 22px; font-size: 12.5px; font-weight: 400; color: var(--muted); text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -286,7 +287,7 @@
 /* 13) Extra (showcase) markets */
 :root:root .coin.other { background: radial-gradient(circle at 50% 50%, #fff 0 3px, transparent 3.5px), #6b7a99; }
 :root:root .appbody .mk-tags span.warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); }
-:root:root .appbody .xwarn { margin: 0 0 16px; padding: 12px 16px; border-radius: 8px; font-size: 13.5px; line-height: 1.5; color: var(--text-2); background: color-mix(in srgb, var(--amber) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); max-width: 96ch; }
+:root:root .appbody .xwarn { margin: 0 0 16px; padding: 12px 16px; border-radius: 16px; font-size: 13.5px; line-height: 1.5; color: var(--text-2); background: color-mix(in srgb, var(--amber) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 35%, transparent); max-width: 96ch; }
 :root:root .appbody .xwarn b { color: var(--amber); }
 :root:root .appbody .xwarn button { margin-left: 8px; }
 :root:root .appbody .mk-table .btn:not(.primary) { padding: 9px 18px; font-size: 14px; }
@@ -312,17 +313,17 @@
 :root:root .appbody .pfpage[hidden] { display: none !important; }
 
 /* Market bar */
-:root:root .appbody .tbar { align-items: center; gap: 12px 32px; flex-wrap: wrap; padding: 12px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; }
+:root:root .appbody .tbar { align-items: center; gap: 12px 32px; flex-wrap: wrap; padding: 12px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
 :root:root .connected.appbody .tbar.user-only { display: flex; }
 :root:root .appbody .tb-pair { display: flex; align-items: center; gap: 10px; }
-:root:root .appbody .pairsel { appearance: none; -webkit-appearance: none; padding: 8px 34px 8px 12px; border: 0; border-radius: 6px; font: 600 16px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset); box-shadow: inset 0 0 0 1px var(--line);
+:root:root .appbody .pairsel { appearance: none; -webkit-appearance: none; padding: 8px 34px 8px 12px; border: 0; border-radius: 12px; font: 600 16px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset); box-shadow: inset 0 0 0 1px var(--line);
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 54%, calc(100% - 12px) 54%; background-size: 5px 5px; background-repeat: no-repeat; }
 :root:root .appbody .tb-px { display: grid; gap: 0; }
 :root:root .appbody .tb-px b { font: 500 26px/1.15 var(--mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 :root:root .appbody .tb-px small, :root:root .appbody .tb-stat span { font-size: 12px; color: var(--muted); }
 :root:root .appbody .tb-stat { display: grid; gap: 2px; }
 :root:root .appbody .tb-stat b { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
-:root:root .appbody .tb-earn { margin-left: auto; padding: 9px 14px; border-radius: 6px; font-size: 13.5px; font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+:root:root .appbody .tb-earn { margin-left: auto; padding: 9px 14px; border-radius: 12px; font-size: 13.5px; font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 :root:root .appbody .tb-earn b { font-family: var(--mono); font-weight: 500; color: inherit; }
 
 /* Columns: chart + orders on the left, order card on the right */
@@ -331,19 +332,19 @@
 :root:root .appbody .tradeview .side { display: grid !important; position: static; gap: 12px; max-width: none; align-content: start; }
 :root:root .appbody .tradeview .deck { max-width: none !important; gap: 14px; }
 :root:root .appbody .tstage { display: grid; grid-template-columns: minmax(0, 1fr) 264px; gap: 14px; align-items: stretch; }
-:root:root .appbody .tpanel { min-width: 0; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; }
+:root:root .appbody .tpanel { min-width: 0; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
 
 /* Chart */
 :root:root .appbody .chartcard { padding: 10px 12px 8px; }
 :root:root .appbody .chart-head { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 2px 4px 8px; min-height: 40px; }
-:root:root .appbody .tf { display: flex; gap: 2px; padding: 3px; background: var(--inset); border-radius: 6px; }
-:root:root .appbody .tf button { border: 0; background: none; box-shadow: none; padding: 4px 10px; border-radius: 4px; color: var(--muted); font: 500 12.5px var(--mono); cursor: pointer; }
+:root:root .appbody .tf { display: flex; gap: 2px; padding: 3px; background: var(--inset); border-radius: 12px; }
+:root:root .appbody .tf button { border: 0; background: none; box-shadow: none; padding: 4px 10px; border-radius: 10px; color: var(--muted); font: 500 12.5px var(--mono); cursor: pointer; }
 :root:root .appbody .tf button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root .appbody .ohlc { display: flex; gap: 4px 10px; flex-wrap: wrap; font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
 :root:root .appbody .ohlc b { font-weight: 500; color: var(--text-2); }
 :root:root .appbody .chart-box { position: relative; height: 430px; }
 :root:root .appbody .chart-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; }
-:root:root .appbody .ch-note { margin: 8px 4px 2px; padding: 8px 12px; border-radius: 6px; font-size: 12.5px; line-height: 1.45; color: var(--text-2); background: var(--inset); }
+:root:root .appbody .ch-note { margin: 8px 4px 2px; padding: 8px 12px; border-radius: 12px; font-size: 12.5px; line-height: 1.45; color: var(--text-2); background: var(--inset); }
 :root:root .appbody .ch-legend { display: flex; gap: 6px 18px; flex-wrap: wrap; padding: 6px 4px 2px; font-size: 12px; color: var(--muted); }
 :root:root .appbody .ch-legend i { display: inline-block; width: 18px; margin-right: 6px; vertical-align: middle; border-top: 2px dashed var(--accent); }
 :root:root .appbody .ch-legend i.s { border-color: var(--amber); }
@@ -367,15 +368,15 @@
 :root:root .appbody #dp .mid small { margin-left: 8px; font: 12px var(--sans); color: var(--muted); }
 
 /* Right column: buy / sell switch, order card, vault summary */
-:root:root .appbody .sidesw { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; }
+:root:root .appbody .sidesw { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
 :root:root .appbody.xmarket .sidesw { display: none; }
-:root:root .appbody .sidesw a { padding: 9px; border-radius: 6px; text-align: center; font-weight: 600; color: var(--muted); text-decoration: none; }
+:root:root .appbody .sidesw a { padding: 9px; border-radius: 12px; text-align: center; font-weight: 600; color: var(--muted); text-decoration: none; }
 :root:root .appbody .sidesw a:hover { color: var(--text); }
 :root:root .appbody .sidesw a.b[aria-current] { color: var(--ok); background: color-mix(in srgb, var(--ok) 15%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 45%, transparent); }
 :root:root .appbody .sidesw a.s[aria-current] { color: var(--down); background: color-mix(in srgb, var(--down) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--down) 45%, transparent); }
-:root:root .appbody .tradeview .ticket { border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line) !important; }
-:root:root .appbody .tradeview .box { border-radius: 8px; }
-:root:root .appbody .vaultcard { padding: 14px 16px; border-radius: 8px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .tradeview .ticket { border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line) !important; }
+:root:root .appbody .tradeview .box { border-radius: 16px; }
+:root:root .appbody .vaultcard { padding: 14px 16px; border-radius: 16px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root .appbody .vaultcard .overview-head { margin-bottom: 8px; gap: 8px; }
 :root:root .appbody .vaultcard h2 { margin: 0; font: 600 14px var(--sans); letter-spacing: 0; }
 :root:root .appbody .vaultcard .vault-chip { padding: 3px 4px 3px 10px; font-size: 12.5px; }
@@ -402,7 +403,7 @@
 /* Portfolio */
 :root:root .appbody .pf { display: grid; gap: 14px; min-width: 0; }
 :root:root .appbody .pf-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
-:root:root .appbody .pf-kpi, :root:root .appbody .pf-card, :root:root .appbody .pf-empty { min-width: 0; padding: 16px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; }
+:root:root .appbody .pf-kpi, :root:root .appbody .pf-card, :root:root .appbody .pf-empty { min-width: 0; padding: 16px 18px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); border-radius: 16px; }
 :root:root .appbody .pf-kpi { display: grid; gap: 3px; }
 :root:root .appbody .pf-kpi span, :root:root .appbody .pf-kpi > small { font-size: 12.5px; color: var(--muted); }
 :root:root .appbody .pf-kpi b { font: 500 24px/1.2 var(--mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
@@ -439,17 +440,17 @@
 :root:root .appbody .ticket[data-otype="market"] .sc-only,
 :root:root .appbody .ticket[data-otype="scaled"] .lim-only { display: none !important; }
 :root:root .appbody.xmarket #tk-sell [data-ot="market"] { display: none; }
-:root:root .appbody .tradeview .ticket .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 8px; border-radius: 6px; background: var(--inset); }
+:root:root .appbody .tradeview .ticket .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 8px; border-radius: 12px; background: var(--inset); }
 :root:root .appbody.xmarket #tk-sell .tabs { grid-template-columns: repeat(2, 1fr); }
-:root:root .appbody .tradeview .ticket .tabs button { padding: 8px 6px; border-radius: 6px; text-align: center; }
+:root:root .appbody .tradeview .ticket .tabs button { padding: 8px 6px; border-radius: 12px; text-align: center; }
 :root:root .appbody .tradeview .ticket .tabs button[aria-selected="true"] { background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root .appbody .tradeview .ticket .novault { padding: 10px 8px 8px; }
-:root:root .appbody .stepper { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 4px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .stepper { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 10px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root .appbody .stepper button { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); font: 500 16px/1 var(--mono); cursor: pointer; }
 :root:root .appbody .stepper button:hover { color: var(--accent); }
 :root:root .appbody .stepper input { width: 38px; padding: 0; border: 0; background: none; box-shadow: none; text-align: center; font: 500 15px var(--mono); color: var(--text); outline: none; }
 :root:root .appbody .sc-only .fine { margin: 8px 2px 0; }
-:root:root .appbody .ladder-preview { border-radius: 6px; background: var(--inset); }
+:root:root .appbody .ladder-preview { border-radius: 12px; background: var(--inset); }
 :root:root .appbody .ladder-preview div { grid-template-columns: 18px auto 1fr auto; }
 :root:root .appbody .mkt { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
 :root:root .appbody .mkt .swap-top { display: grid; gap: 8px; padding: 4px 6px 2px; }
@@ -472,16 +473,16 @@
 
 /* 17) Order form, exchange layout: dropdown type selector, compact fields, dotted percentage line, colored Buy / Sell button */
 :root:root .appbody .otsel { display: block; margin: 2px 0 8px; }
-:root:root .appbody .otsel select { width: 100%; appearance: none; -webkit-appearance: none; padding: 12px 38px 12px 14px; border: 0; border-radius: 6px; font: 600 15px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset);
+:root:root .appbody .otsel select { width: 100%; appearance: none; -webkit-appearance: none; padding: 12px 38px 12px 14px; border: 0; border-radius: 12px; font: 600 15px var(--sans); color: var(--text); cursor: pointer; background-color: var(--inset);
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 20px) 54%, calc(100% - 14px) 54%; background-size: 6px 6px; background-repeat: no-repeat; }
 :root:root .appbody .avrow, :root:root .appbody .maxrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 2px 6px 8px; font-size: 13.5px; color: var(--muted); }
 :root:root .appbody .avval { display: inline-flex; align-items: center; gap: 8px; }
 :root:root .appbody .avval .link { font: 500 13.5px var(--mono); color: var(--text); text-decoration: none; }
 :root:root .appbody .plus { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: none; box-shadow: inset 0 0 0 1.5px var(--text-2); color: var(--text); font: 500 15px/1 var(--mono); cursor: pointer; }
 :root:root .appbody .plus:hover { box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--accent); }
-:root:root .appbody .maxrow { margin: 8px 0 2px; padding: 9px 14px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line-2); font-size: 12.5px; }
+:root:root .appbody .maxrow { margin: 8px 0 2px; padding: 9px 14px; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line-2); font-size: 12.5px; }
 :root:root .appbody .maxrow b { font: 500 12.5px var(--mono); color: var(--text); }
-:root:root .appbody .tradeview .ticket .box { padding: 9px 14px 10px; margin-top: 8px; border-radius: 6px; }
+:root:root .appbody .tradeview .ticket .box { padding: 9px 14px 10px; margin-top: 8px; border-radius: 12px; }
 :root:root .appbody .tradeview .ticket .box:has(> .chips.pct) { padding-bottom: 10px; }
 :root:root .appbody .tradeview .ticket .box-top { font-size: 12px; margin-bottom: 0; }
 :root:root .appbody .tradeview .ticket input.big { font: 500 18px var(--mono); letter-spacing: -0.01em; padding: 2px 0 0; }
@@ -505,16 +506,16 @@
 :root:root .appbody #autosell-row[hidden] { display: none; }
 :root:root .appbody .tp-box input.big { font-size: 18px; }
 /* Preview: starts closed */
-:root:root .appbody details.preview { margin-top: 10px; padding: 10px 14px; border-radius: 6px; }
+:root:root .appbody details.preview { margin-top: 10px; padding: 10px 14px; border-radius: 12px; }
 :root:root .appbody details.preview > summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; margin: 0; font-size: 13px; }
 :root:root .appbody details.preview > summary::-webkit-details-marker { display: none; }
 :root:root .appbody details.preview > summary::after { content: "+"; font: 16px var(--mono); color: var(--muted); }
 :root:root .appbody details.preview[open] > summary::after { content: "−"; }
 :root:root .appbody details.preview[hidden] { display: none; }
 /* Buy / Sell button */
-:root:root .appbody .btn.primary.go-buy { background: #12a06c !important; box-shadow: none !important; border-radius: 4px; margin-top: 12px; }
+:root:root .appbody .btn.primary.go-buy { background: #12a06c !important; box-shadow: none !important; border-radius: 10px; margin-top: 12px; }
 :root:root .appbody .btn.primary.go-buy:hover { background: #0e8a5d !important; }
-:root:root .appbody .btn.primary.go-sell { background: #e5384f !important; box-shadow: none !important; border-radius: 4px; margin-top: 12px; }
+:root:root .appbody .btn.primary.go-sell { background: #e5384f !important; box-shadow: none !important; border-radius: 10px; margin-top: 12px; }
 :root:root .appbody .btn.primary.go-sell:hover { background: #cc2c42 !important; }
 
 /* 18) Chart: line / candle switch, zoom, a taller canvas */
@@ -522,7 +523,7 @@
 :root:root .appbody .chart-box canvas { cursor: crosshair; touch-action: pan-y; }
 :root:root .appbody .chart-head { gap: 8px 12px; }
 :root:root .appbody .ch-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-:root:root .appbody .ch-btn { padding: 5px 11px; border: 0; border-radius: 4px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
+:root:root .appbody .ch-btn { padding: 5px 11px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
 :root:root .appbody .ch-btn[hidden] { display: none; }
 :root:root .appbody #ch-zoom button { width: 28px; padding: 4px 0; font-size: 14px; }
 :root:root .appbody .ohlc { font-size: 12.5px; align-items: baseline; }
@@ -533,13 +534,13 @@
 /* 19) Vault cards (balance, deposit, withdraw) only on the Portfolio page */
 :root:root .appbody .pf-vaults { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; align-items: start; }
 :root:root .appbody .pf-vaults:not(:has(> .vaultcard:not([hidden]))) { display: none; }
-:root:root .appbody .vaultcard .box { margin-top: 8px; border-radius: 6px; }
+:root:root .appbody .vaultcard .box { margin-top: 8px; border-radius: 12px; }
 :root:root .appbody .vaultcard [data-pane] > .btn { margin-top: 10px; }
 
 /* 20. Stale page warning and the old-vault note on Portfolio */
 .stale { position: sticky; top: 0; z-index: 200; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 18px; padding: 12px 16px; font-size: 14px; line-height: 1.45; color: var(--text); background: var(--surface); box-shadow: inset 0 -1px 0 var(--line), inset 0 3px 0 var(--accent); }
 .stale .btn { padding: 8px 16px; }
-.pf-old { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin: 0 0 16px; padding: 14px 18px; border-radius: 8px; font-size: 14px; line-height: 1.5; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line), inset 3px 0 0 var(--accent); }
+.pf-old { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin: 0 0 16px; padding: 14px 18px; border-radius: 16px; font-size: 14px; line-height: 1.5; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line), inset 3px 0 0 var(--accent); }
 .pf-old span { flex: 1 1 320px; min-width: 0; }
 
 /* 21. Version 7: the "keep the output in the vault" option is shown only with a single vault */
@@ -561,8 +562,8 @@ body.xmarket .keeprow { display: none; }
 :root:root body.appbody > header.top { position: sticky; top: 0; z-index: 40; box-sizing: border-box; height: 72px; max-width: none; margin: 0; padding: 0 max(var(--app-gut), calc((100% - 1600px) / 2)); flex-wrap: nowrap; background: var(--bg); border-bottom: 1px solid var(--line); }
 :root:root body.appbody .shell { box-sizing: border-box; max-width: none; width: min(100% - 2 * var(--app-gut), 1600px); padding-left: 0; padding-right: 0; }
 :root:root body.appbody > footer.bottom { box-sizing: border-box; max-width: none; width: min(100% - 2 * var(--app-gut), 1600px); padding-left: 0; padding-right: 0; }
-:root:root body.appbody .theme-toggle { width: 44px; height: 44px; border-radius: 4px; }
-:root:root body.appbody .top .btn { border-radius: 4px; }
+:root:root body.appbody .theme-toggle { width: 44px; height: 44px; border-radius: 10px; }
+:root:root body.appbody .top .btn { border-radius: 10px; }
 /* the app's pages: plain links with a line under the current one, as in the home page's bar */
 :root:root .appbody .appnav { gap: 28px; padding: 0; background: none; box-shadow: none; border-radius: 0; }
 :root:root .appbody .appnav a { padding: 8px 0; border-radius: 0; background: none; color: var(--muted); font: 500 15px/1.2 var(--sans); }
@@ -589,26 +590,26 @@ body.xmarket .keeprow { display: none; }
   :root:not([data-theme="light"]):root:root body.appbody { --bg-2: #1e222a; --surface: #242830; --surface-2: #2a2e37; --line: #30343d; --line-2: #4a4f5a; --text: #f1f3f8; --text-2: #cdd2dc; --muted: #9aa1ad; --card: #242830; --inset: #1b2029; }
 }
 
-/* 14) Trade layout: the price chart on the left, the order form on the right, the order list under both.
-       The pool depth table is not shown. */
-:root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 440px) !important; grid-template-areas: "stage side" "deck deck" !important; grid-template-rows: auto auto !important; gap: 24px !important; align-items: start; }
+/* 14) Trade layout: the price chart on the left with the order list under it, the order form on the right over
+       the full height. The pool depth table is not shown. */
+:root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) minmax(0, 440px) !important; grid-template-areas: "stage side" "deck side" !important; grid-template-rows: auto 1fr !important; gap: 24px !important; align-items: start; }
 :root:root:root .appbody .tradeview .cols > .tslot { display: block !important; grid-area: stage; min-width: 0; }
 :root:root:root .appbody .tradeview .cols > .side { grid-area: side; width: auto; max-width: none; position: static; }
-:root:root:root .appbody .tradeview .cols > .deck { grid-area: deck; }
+:root:root:root .appbody .tradeview .cols > .deck { grid-area: deck; min-width: 0; }
 :root:root:root .appbody .tradeview .tslot .tstage { display: block !important; }
 :root:root:root .appbody .tradeview .tslot .tpanel.depth { display: none !important; }
 :root:root:root .appbody .tradeview .tslot .chartcard { width: auto; max-width: none; height: 100%; min-height: 560px; }
 @media (max-width: 1000px) {
-  :root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) !important; grid-template-areas: "side" "stage" "deck" !important; }
+  :root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) !important; grid-template-areas: "side" "stage" "deck" !important; grid-template-rows: auto !important; }
   :root:root:root .appbody .tradeview .tslot .chartcard { min-height: 0; }
 }
 
 /* 15) Take profit as a percentage: quick targets under the take profit price */
 :root:root .appbody .tp-pct { display: flex; gap: 6px; margin-top: 10px; }
-:root:root .appbody .tp-pct button { flex: 1 1 0; padding: 7px 0; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--text-2); font: 500 13px var(--mono); cursor: pointer; }
+:root:root .appbody .tp-pct button { flex: 1 1 0; padding: 7px 0; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text-2); font: 500 13px var(--mono); cursor: pointer; }
 :root:root .appbody .tp-pct button:hover { border-color: var(--line-2); color: var(--text); }
 :root:root .appbody .tp-pct button[aria-pressed="true"] { border-color: var(--ok); color: var(--ok); }
-:root:root .appbody .tp-pct .tp-own { flex: 1.3 1 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 500 13px var(--mono); }
+:root:root .appbody .tp-pct .tp-own { flex: 1.3 1 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font: 500 13px var(--mono); }
 :root:root .appbody .tp-pct .tp-own:focus-within { border-color: var(--accent); }
 :root:root .appbody .tp-pct .tp-own input { width: 100%; min-width: 0; border: 0; background: none; color: var(--text); font: inherit; outline: none; box-shadow: none; text-align: right; }
 :root:root .appbody .tp-gain { margin: 8px 2px 0; color: var(--ok); }
@@ -618,7 +619,7 @@ body.xmarket .keeprow { display: none; }
        any value from 0 to 100, the five dots are marks */
 :root:root .appbody .tradeview .ticket .otsel { display: none; }
 :root:root .appbody .tradeview .ticket > .tabs { display: grid; grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
-:root:root .appbody .tradeview .ticket > .tabs button { border-radius: 4px; font-weight: 500; color: var(--muted); }
+:root:root .appbody .tradeview .ticket > .tabs button { border-radius: 10px; font-weight: 500; color: var(--muted); }
 :root:root .appbody .tradeview .ticket > .tabs button[aria-selected="true"] { color: var(--text); }
 :root:root .appbody .chips.pct { margin-bottom: 22px; }
 :root:root .appbody .chips.pct::after { content: ""; position: absolute; left: 6px; top: 50%; height: 2px; margin-top: -1px; width: calc((100% - 12px) * var(--p, 0) / 100); background: var(--text-2); }
@@ -640,7 +641,7 @@ body.xmarket .keeprow { display: none; }
 :root:root .appbody .ticket .dca .box { margin: 0; }
 :root:root .appbody .ticket .dca .opt { color: var(--muted); font-weight: 400; }
 :root:root .appbody .ticket .dca .dca-av { font-size: 12.5px; color: var(--muted); }
-:root:root .appbody .ticket .dca .dca-unit { flex: none; width: auto; padding: 7px 10px; border: 0; border-radius: 4px; background: var(--card); color: var(--text); font: 500 14px var(--sans); box-shadow: inset 0 0 0 1px var(--line); }
+:root:root .appbody .ticket .dca .dca-unit { flex: none; width: auto; padding: 7px 10px; border: 0; border-radius: 10px; background: var(--card); color: var(--text); font: 500 14px var(--sans); box-shadow: inset 0 0 0 1px var(--line); }
 :root:root:root .appbody .ticket .dca dl.dca-sum { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 6px 2px 4px; }
 :root:root:root .appbody .ticket .dca dl.dca-sum > div { display: flex; width: 100%; justify-content: space-between; gap: 12px; font-size: 13.5px; }
 :root:root .appbody .ticket .dca .dca-sum dt { color: var(--muted); }
@@ -653,10 +654,45 @@ body.xmarket .keeprow { display: none; }
 :root:root:root .appbody .stepper button:hover { background: var(--card); color: var(--text); }
 :root:root:root .appbody .stepper button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 :root:root:root .appbody .stepper input { width: auto; min-width: 0; height: auto; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; text-align: center; font: 500 15px var(--mono); color: var(--text); outline: none; }
-:root:root .appbody #slip-chips .slip-own { display: inline-flex; align-items: center; gap: 3px; width: 76px; padding: 0 8px; height: 26px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); font: 500 12.5px var(--mono); }
+:root:root .appbody #slip-chips .slip-own { display: inline-flex; align-items: center; gap: 3px; width: 76px; padding: 0 8px; height: 26px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); font: 500 12.5px var(--mono); }
 :root:root .appbody #slip-chips .slip-own:focus-within { box-shadow: inset 0 0 0 1px var(--accent); }
 :root:root .appbody #slip-chips .slip-own.on { box-shadow: inset 0 0 0 1px var(--accent); color: var(--text); }
 :root:root .appbody #slip-chips .slip-own.bad { box-shadow: inset 0 0 0 1px var(--err); }
 :root:root .appbody #slip-chips .slip-own input { width: 100%; min-width: 0; padding: 0; border: 0; background: none; box-shadow: none; outline: none; text-align: right; font: inherit; color: var(--text); }
 :root:root:root .appbody .mkt .chips.pct { margin-bottom: 22px; }
-:root:root .appbody #slip-chips .slip-save { padding: 0 8px; height: 26px; border: 0; border-radius: 4px; background: transparent; box-shadow: none; color: var(--accent); font: 500 12.5px var(--sans); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+:root:root .appbody #slip-chips .slip-save { padding: 0 8px; height: 26px; border: 0; border-radius: 10px; background: transparent; box-shadow: none; color: var(--accent); font: 500 12.5px var(--sans); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+/* 19) Market tab: the Rate / Minimum received / Route rows stay inside the card (values wrap instead of running
+       past the edge), and the Route value has a second, quieter line */
+:root:root:root .appbody .mkt .swap-info { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 14px; align-items: start; width: auto; max-width: 100%; min-width: 0; box-sizing: border-box; margin: 14px 6px 0; }
+:root:root:root .appbody .mkt .swap-info dt { margin: 0; white-space: nowrap; color: var(--muted); font-size: 13.5px; }
+:root:root:root .appbody .mkt .swap-info dd { margin: 0; min-width: 0; text-align: right; white-space: normal; overflow-wrap: anywhere; font: 500 13.5px/1.35 var(--mono); color: var(--text); }
+:root:root:root .appbody .mkt .swap-info dd small { display: block; margin-top: 2px; font: 400 12px/1.3 var(--sans); color: var(--muted); }
+:root:root:root .appbody .tradeview .ticket .mkt-slot, :root:root:root .appbody .tradeview .ticket .mkt-slot > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
+:root:root .appbody #slip-chips { flex-wrap: wrap; row-gap: 6px; }
+:root:root .appbody #slip-chips .slip-own { width: 88px; }
+
+/* 20) Market tab: a rate line that can be turned round, a route button that opens the shares by venue, the price
+       impact under the amount received */
+:root:root:root .appbody .mkt .swap-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); min-width: 0; }
+:root:root:root .appbody .mkt .swap-meta button { min-width: 0; padding: 0; border: 0; background: none; box-shadow: none; color: var(--text); font: 500 13px/1.3 var(--mono); cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:root:root:root .appbody .mkt .swap-meta .swap-route { flex: none; color: var(--accent); font-family: var(--sans); text-align: right; }
+:root:root:root .appbody .mkt .swap-meta .swap-route::after { content: " ▾"; }
+:root:root:root .appbody .mkt .swap-meta .swap-route[aria-expanded="true"]::after { content: " ▴"; }
+:root:root:root .appbody .mkt .swap-meta button:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+:root:root:root .appbody .mkt .swap-meta button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+:root:root:root .appbody .mkt .swap-route-more { display: grid; gap: 6px; margin: 6px 0 0; padding: 10px 12px; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); }
+:root:root:root .appbody .mkt .swap-route-more[hidden] { display: none; }
+:root:root:root .appbody .mkt .swap-route-more > div { position: relative; display: flex; justify-content: space-between; gap: 12px; padding-bottom: 6px; font-size: 13px; color: var(--text-2); }
+:root:root:root .appbody .mkt .swap-route-more b { font: 500 13px var(--mono); color: var(--text); }
+:root:root:root .appbody .mkt .swap-route-more i { position: absolute; left: 0; bottom: 0; height: 2px; width: var(--w, 0%); background: var(--accent); border-radius: 1px; }
+:root:root:root .appbody .mkt .swap-impact { min-height: 16px; margin: 4px 2px 0; font: 400 12px/1.3 var(--mono); color: var(--muted); }
+:root:root:root .appbody .mkt .swap-impact.bad { color: var(--err); }
+
+/* 21) Nothing on the page has sharp corners: the radii above were doubled (cards 16px, fields 12px, small controls
+       10px). The few things that must stay tighter than that: */
+:root:root .appbody input[type="checkbox"] { border-radius: 6px; }
+:root:root:root .appbody .tradeview .ticket > .tabs { border-radius: 14px; padding: 4px; }
+:root:root:root .appbody .tradeview .ticket > .tabs button { border-radius: 10px; }
+:root:root .appbody .sidesw, :root:root .appbody .sidesw a { border-radius: 14px; }
+:root:root .appbody .chart-box, :root:root .appbody .chartcard { border-radius: 16px; }

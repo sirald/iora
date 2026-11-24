@@ -315,7 +315,6 @@
                   <button type="button" data-slip="0.5">0.5%</button>
                   <button type="button" data-slip="1" aria-pressed="true">1%</button>
                   <label class="slip-own"><input id="slip-own" inputmode="decimal" placeholder="other" autocomplete="off" aria-label="Your own maximum slippage, in percent" /><span>%</span></label>
-                  <button type="button" class="slip-save" id="slip-save" hidden>Set as default</button>
                 </div>
               </div>
               <div class="box">
@@ -327,15 +326,19 @@
               <div class="box out">
                 <div class="box-top"><span>You receive</span><span>Balance <span id="swap-bal-out">—</span></span></div>
                 <div class="box-main"><output id="swap-out" class="big">0</output><span class="token"><i class="coin usdc" id="swap-coin-out" aria-hidden="true"></i><span id="swap-sym-out">USDC</span></span></div>
+                <div class="swap-impact" id="swap-impact" aria-live="polite"></div>
               </div>
+              <div class="swap-meta">
+                <button type="button" class="swap-rate" id="swap-rate" title="Show the rate the other way round">—</button>
+                <button type="button" class="swap-route" id="swap-route" aria-expanded="false" aria-controls="swap-route-more" title="Where your swap goes">—</button>
+              </div>
+              <div class="swap-route-more" id="swap-route-more" hidden></div>
               <dl class="mini swap-info">
-                <dt>Rate</dt><dd id="swap-rate">—</dd>
                 <dt>Minimum received <i class="tip" tabindex="0" data-tip="If the price moves more than your slippage setting before the swap lands, it is cancelled and nothing is spent.">i</i></dt><dd id="swap-min">—</dd>
-                <dt>Route <i class="tip" tabindex="0" data-tip="The swap goes to the trading venue that quotes the most for your amount right now.">i</i></dt><dd id="swap-route">—</dd>
               </dl>
               <p id="swap-note" class="lp-note"></p>
               <button id="swap-go" class="btn primary block">Swap</button>
-              <p class="fine">A market order trades right now, straight from your wallet, at the trading venue that pays the most for your amount (or split over several). It does not use your vault. Prices in the test pools don't follow the real market.</p>
+              <p class="fine">A market order trades right now, straight from your wallet, along the route that pays the most for your amount. The quote refreshes every 10 seconds. It does not use your vault. Prices in the test pools don't follow the real market.</p>
               </div>
             </div>
             <div data-pane="dca" class="dca" hidden>

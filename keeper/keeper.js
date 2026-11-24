@@ -1296,8 +1296,6 @@ function venueAuths(template, amount) {
 const callVal = (contractId, func, args, auths) =>
   structVal({ contract: addrVal(contractId), func: symVal(func), args: xdr.ScVal.scvVec(args), auths: xdr.ScVal.scvVec(auths) });
 
-// How finely a fill is divided when it is spread over several pools (4 = steps of 25%).
-const VENUE_SLICES = Math.max(2, Math.min(10, Number(cfg.VENUE_SLICES || 4)));
 let fillerVersion; // 1: plain routes; 2: routes may end with the `sweep` instruction (needed for an intermediate token)
 async function fillerV() {
   if (fillerVersion !== undefined) return fillerVersion;
@@ -1370,38 +1368,100 @@ async function sourcesFor(tin, tout, only = null) {
   return list;
 }
 /**
- * Spreads `amount` over the pools greedily, slice by slice: each slice goes to the pool that pays the most for it
- * on top of what that pool already took. Returns { q, parts: [{ src, amount }] } or null.
+ * Spreads `amount` over the pools in whatever shares pay the most (12% here, 20% there, 68% in a third: no
+ * fixed steps). Each pool is asked what it pays at a few sizes, which gives its price curve; the amount is then
+ * handed out in 1% steps, each to the pool whose curve pays the most for it on top of what that pool already
+ * took. That part is arithmetic, not network calls. Finally the chosen amounts are quoted for real.
+ * Returns { q, parts: [{ src, amount }] } or null.
  */
-async function spread(sources, amount, slices) {
-  if (!sources.length) return null;
-  const step = amount / BigInt(slices);
-  if (step <= 0n) return null;
-  // Pools that pay less than half of the best one for the first slice are left out: empty and tiny pools would
-  // otherwise be asked again for every slice and never win one.
-  const first = await Promise.all(sources.map((src) => src.quote(step)));
-  const top = first.reduce((m, q) => (q !== null && q > m ? q : m), 0n);
-  sources = sources.filter((src, i) => first[i] !== null && first[i] * 2n >= top && first[i] > 0n);
-  if (!sources.length) return null;
-  const taken = sources.map(() => 0n);
-  const got = sources.map(() => 0n);
-  for (let s = 0; s < slices; s++) {
-    const size = s === slices - 1 ? amount - step * BigInt(slices - 1) : step;
-    const next = await Promise.all(sources.map((src, i) => src.quote(taken[i] + size)));
-    let pick = -1;
-    let gain = -1n;
-    next.forEach((q, i) => {
-      if (q !== null && q - got[i] > gain) {
-        gain = q - got[i];
-        pick = i;
-      }
-    });
-    if (pick < 0) return null;
-    taken[pick] += size;
-    got[pick] = next[pick];
+const SPREAD_POINTS = [2n, 5n, 10n, 20n, 35n, 50n, 70n, 100n]; // percent of the amount at which each pool is asked
+const SPREAD_MIN_SHARE = 2n; // a pool that would get less than this share is not worth its own step
+const SPREAD_MAX_LEGS = 4;
+function curveAt(pts, x) {
+  // Between two samples the curve of a pool is taken as a*x/(b+x), the shape of a constant-product pool, fitted
+  // through those two samples (exact for such pools, close for others); a straight line where that does not fit.
+  const X = Number(x);
+  const last = pts[pts.length - 1];
+  if (X >= Number(last[0])) return Number(last[1]);
+  let i = 1;
+  while (i < pts.length - 1 && X > Number(pts[i][0])) i++;
+  const lo = i === 1 ? (pts.length > 2 ? pts[1] : null) : pts[i - 1];
+  const hi = i === 1 ? (pts.length > 2 ? pts[2] : null) : pts[i];
+  if (lo && hi) {
+    const [x0, q0, x1, q1] = [Number(lo[0]), Number(lo[1]), Number(hi[0]), Number(hi[1])];
+    const den = q0 * x1 - q1 * x0;
+    if (den > 0 && q1 > q0) {
+      const b = (x0 * x1 * (q1 - q0)) / den;
+      const a = (q0 * (b + x0)) / x0;
+      if (b > 0 && a > 0) return (a * X) / (b + X);
+    }
   }
-  const parts = sources.map((src, i) => ({ src, amount: taken[i] })).filter((p) => p.amount > 0n);
-  return { q: got.reduce((a, b) => a + b, 0n), parts };
+  const [xa, qa, xb, qb] = [Number(pts[i - 1][0]), Number(pts[i - 1][1]), Number(pts[i][0]), Number(pts[i][1])];
+  return qa + ((qb - qa) * (X - xa)) / (xb - xa);
+}
+async function spread(sources, amount) {
+  if (!sources.length || amount <= 0n) return null;
+  // Pools that pay less than half of the best one for a tenth of the amount are left out (empty and tiny pools).
+  const tenth = amount / 10n > 0n ? amount / 10n : amount;
+  const first = await Promise.all(sources.map((src) => src.quote(tenth)));
+  const top = first.reduce((m, q) => (q !== null && q > m ? q : m), 0n);
+  sources = sources.filter((src, i) => first[i] !== null && first[i] > 0n && first[i] * 2n >= top);
+  if (!sources.length) return null;
+  if (sources.length === 1) {
+    const q = await sources[0].quote(amount);
+    return q !== null && q > 0n ? { q, parts: [{ src: sources[0], amount }] } : null;
+  }
+  // each pool's curve: (0, 0) and what it pays at the sample sizes, as far as it can quote
+  const curves = await Promise.all(
+    sources.map(async (src) => {
+      const pts = [[0n, 0n]];
+      for (const p of SPREAD_POINTS) {
+        const x = (amount * p) / 100n;
+        if (x <= pts[pts.length - 1][0]) continue;
+        const q = await src.quote(x);
+        if (q === null || q <= pts[pts.length - 1][1]) break; // cannot take more than this
+        pts.push([x, q]);
+      }
+      return pts;
+    }),
+  );
+  const taken = sources.map(() => 0n);
+  const unit = amount / 100n;
+  if (unit > 0n) {
+    for (let s = 0; s < 100; s++) {
+      const size = s === 99 ? amount - unit * 99n : unit;
+      let pick = -1;
+      let gain = -1;
+      curves.forEach((pts, i) => {
+        if (pts.length < 2 || taken[i] + size > pts[pts.length - 1][0]) return;
+        const g = curveAt(pts, taken[i] + size) - curveAt(pts, taken[i]);
+        if (g > gain) {
+          gain = g;
+          pick = i;
+        }
+      });
+      if (pick < 0) break;
+      taken[pick] += size;
+    }
+  }
+  // small shares fold into the largest one, and at most SPREAD_MAX_LEGS pools take part
+  let order = sources.map((_, i) => i).filter((i) => taken[i] > 0n).sort((a, b) => (taken[b] > taken[a] ? 1 : taken[b] < taken[a] ? -1 : 0));
+  const keep = order.filter((i, n) => n < SPREAD_MAX_LEGS && taken[i] * 100n >= amount * SPREAD_MIN_SHARE);
+  let split = null;
+  if (keep.length) {
+    const used = keep.reduce((a, i) => a + taken[i], 0n);
+    const parts = keep.map((i, n) => ({ src: sources[i], amount: taken[i] + (n === 0 ? amount - used : 0n) }));
+    const qs = await Promise.all(parts.map((p) => p.src.quote(p.amount)));
+    if (!qs.includes(null)) split = { q: qs.reduce((a, b) => a + b, 0n), parts };
+  }
+  // the curve is an estimate between samples: the best single pool is kept if it turns out to pay as much
+  let single = null;
+  curves.forEach((pts, i) => {
+    const last = pts[pts.length - 1];
+    if (last[0] === amount && (!single || last[1] > single.q)) single = { q: last[1], parts: [{ src: sources[i], amount }] };
+  });
+  if (split && single) return split.q > single.q ? split : single;
+  return split || single;
 }
 /** The single pool that pays the most for the whole amount: { src, q } or null. */
 async function bestSingle(sources, amount) {
@@ -1442,7 +1502,7 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
       best = { q: qs.reduce((x, y) => x + y, 0n), steps: parts.map((p) => () => p.src.step(p.amount)), text: partsText(parts, fill) };
     } else {
       if (sources.length) {
-        const sp = await spread(sources, fill, VENUE_SLICES);
+        const sp = await spread(sources, fill);
         if (sp) best = { q: sp.q, steps: sp.parts.map((p) => () => p.src.step(p.amount)), text: partsText(sp.parts, fill) };
       }
       // through an intermediate token, each leg in its best pool

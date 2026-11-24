@@ -3085,6 +3085,7 @@ async function splitSources(tin, tout) {
   if (pair) {
     list.push({
       label: "Soroswap",
+      venue: "Soroswap",
       quote: async (a) => {
         const r = await rawRead(C.router, "router_get_amounts_out", [i128(a), addrVec([tin, tout])]);
         return r.ok ? BigInt(r.value[r.value.length - 1]) : null;
@@ -3104,6 +3105,7 @@ async function splitSources(tin, tout) {
     if (!template) continue;
     list.push({
       label: hashes.length > 1 ? `Aquarius ${Array.from(hash.slice(0, 2)).map((x) => x.toString(16).padStart(2, "0")).join("")}` : "Aquarius",
+      venue: "Aquarius",
       quote: async (a) => {
         const r = await rawRead(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(a)]);
         return r.ok && r.value !== undefined ? BigInt(r.value) : null;
@@ -3113,34 +3115,129 @@ async function splitSources(tin, tout) {
   }
   return list;
 }
-/** Spreads the amount over the pools slice by slice, each slice to the pool that pays the most for it. */
+/**
+ * Spreads the amount over the pools in whatever shares pay the most (no fixed steps: 12% here, 20% there, 68% in
+ * a third). Each pool is asked what it pays at a few sizes, which gives its price curve; the amount is then
+ * handed out in 1% steps, each to the pool whose curve pays the most for it. Finally the chosen amounts are
+ * quoted for real. Returns { out, parts, text } when at least two pools take part, otherwise null.
+ */
+const SPLIT_POINTS = [2n, 5n, 10n, 20n, 35n, 50n, 70n, 100n];
+function curveAt(pts, x) {
+  // Between two samples the curve of a pool is taken as a*x/(b+x), the shape of a constant-product pool, fitted
+  // through those two samples (exact for such pools, close for others); a straight line where that does not fit.
+  const X = Number(x);
+  const last = pts[pts.length - 1];
+  if (X >= Number(last[0])) return Number(last[1]);
+  let i = 1;
+  while (i < pts.length - 1 && X > Number(pts[i][0])) i++;
+  const lo = i === 1 ? (pts.length > 2 ? pts[1] : null) : pts[i - 1];
+  const hi = i === 1 ? (pts.length > 2 ? pts[2] : null) : pts[i];
+  if (lo && hi) {
+    const [x0, q0, x1, q1] = [Number(lo[0]), Number(lo[1]), Number(hi[0]), Number(hi[1])];
+    const den = q0 * x1 - q1 * x0;
+    if (den > 0 && q1 > q0) {
+      const b = (x0 * x1 * (q1 - q0)) / den;
+      const a = (q0 * (b + x0)) / x0;
+      if (b > 0 && a > 0) return (a * X) / (b + X);
+    }
+  }
+  const [xa, qa, xb, qb] = [Number(pts[i - 1][0]), Number(pts[i - 1][1]), Number(pts[i][0]), Number(pts[i][1])];
+  return qa + ((qb - qa) * (X - xa)) / (xb - xa);
+}
 async function bestSplit(tin, tout, amount) {
   if ((await fillerVersion()) < 3 || !AQUA_ROUTER) return null;
-  const sources = await splitSources(tin, tout);
+  let sources = await splitSources(tin, tout);
+  if (sources.length < 2 || amount < 100n) return null;
+  const tenth = amount / 10n;
+  const first = await Promise.all(sources.map((src) => src.quote(tenth)));
+  const top = first.reduce((mx, q) => (q !== null && q > mx ? q : mx), 0n);
+  sources = sources.filter((src, i) => first[i] !== null && first[i] > 0n && first[i] * 2n >= top);
   if (sources.length < 2) return null;
-  const step = amount / BigInt(SPLIT_SLICES);
-  if (step <= 0n) return null;
+  const curves = await Promise.all(
+    sources.map(async (src) => {
+      const pts = [[0n, 0n]];
+      for (const p of SPLIT_POINTS) {
+        const x = (amount * p) / 100n;
+        if (x <= pts[pts.length - 1][0]) continue;
+        const q = await src.quote(x);
+        if (q === null || q <= pts[pts.length - 1][1]) break;
+        pts.push([x, q]);
+      }
+      return pts;
+    }),
+  );
   const taken = sources.map(() => 0n);
-  const got = sources.map(() => 0n);
-  for (let s = 0; s < SPLIT_SLICES; s++) {
-    const size = s === SPLIT_SLICES - 1 ? amount - step * BigInt(SPLIT_SLICES - 1) : step;
-    const next = await Promise.all(sources.map((src, i) => src.quote(taken[i] + size)));
+  const unit = amount / 100n;
+  for (let s = 0; s < 100; s++) {
+    const size = s === 99 ? amount - unit * 99n : unit;
     let pick = -1;
-    let gain = -1n;
-    next.forEach((q, i) => {
-      if (q !== null && q - got[i] > gain) {
-        gain = q - got[i];
+    let gain = -1;
+    curves.forEach((pts, i) => {
+      if (pts.length < 2 || taken[i] + size > pts[pts.length - 1][0]) return;
+      const g = curveAt(pts, taken[i] + size) - curveAt(pts, taken[i]);
+      if (g > gain) {
+        gain = g;
         pick = i;
       }
     });
     if (pick < 0) return null;
     taken[pick] += size;
-    got[pick] = next[pick];
   }
-  const parts = sources.map((src, i) => ({ src, amount: taken[i] })).filter((p) => p.amount > 0n);
-  if (parts.length < 2) return null;
-  return { out: got.reduce((a, b) => a + b, 0n), parts, text: parts.map((p) => `${p.src.label} ${Number((p.amount * 100n) / amount)}%`).join(" + ") };
+  // shares under 2% fold into the largest one; at most 4 pools take part
+  const order = sources.map((_, i) => i).filter((i) => taken[i] > 0n).sort((a, b) => (taken[b] > taken[a] ? 1 : taken[b] < taken[a] ? -1 : 0));
+  const keep = order.filter((i, n) => n < 4 && taken[i] * 100n >= amount * 2n);
+  if (keep.length < 2) return null;
+  const used = keep.reduce((a, i) => a + taken[i], 0n);
+  const parts = keep.map((i, n) => ({ src: sources[i], amount: taken[i] + (n === 0 ? amount - used : 0n) }));
+  const qs = await Promise.all(parts.map((p) => p.src.quote(p.amount)));
+  if (qs.includes(null)) return null;
+  return { out: qs.reduce((a, b) => a + b, 0n), parts, text: parts.map((p) => `${p.src.label} ${Number((p.amount * 1000n) / amount) / 10}%`).join(" + ") };
 }
+
+/** The rate line; a click turns it round ("1 XLM = 0.12 USDC" / "1 USDC = 8.1 XLM"). */
+function showRate() {
+  const r = SW.rate;
+  if (!r) return;
+  const [x, y, v] = SW.rateFlip ? [r.b, r.a, 1 / r.rate] : [r.a, r.b, r.rate];
+  $("swap-rate").textContent = `1 ${x} = ${v.toLocaleString("en-US", { maximumSignificantDigits: 6 })} ${y} ⇄`;
+}
+$("swap-rate").onclick = () => {
+  SW.rateFlip = !SW.rateFlip;
+  showRate();
+};
+/**
+ * The route button says only how many pools the best route uses; a click opens the shares by venue. Several pools
+ * of one venue are added up: which pool it is does not help the reader.
+ */
+function showRoute(parts) {
+  const more = $("swap-route-more");
+  if (!parts) {
+    $("swap-route").textContent = "—";
+    more.hidden = true;
+    $("swap-route").setAttribute("aria-expanded", "false");
+    return;
+  }
+  const by = new Map();
+  for (const p of parts) by.set(p.venue, (by.get(p.venue) || 0) + p.share);
+  const n = parts.length;
+  $("swap-route").textContent = n > 1 ? `Best route · ${n} pools` : "Best route · 1 pool";
+  more.innerHTML = [...by.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .map(([venue, share]) => `<div><span>${esc(venue)}</span><b>${(Math.round(share * 10) / 10).toLocaleString("en-US")}%</b><i style="--w:${Math.min(100, share).toFixed(1)}%"></i></div>`)
+    .join("");
+}
+$("swap-route").onclick = () => {
+  const more = $("swap-route-more");
+  if (!more.innerHTML) return;
+  more.hidden = !more.hidden;
+  $("swap-route").setAttribute("aria-expanded", String(!more.hidden));
+};
+// The quote is asked again every 10 seconds while the Market tab is open with an amount in it.
+setInterval(() => {
+  const input = $("swap-in");
+  if (document.hidden || busy || !me || !input.offsetParent || !String(input.value).trim()) return;
+  doQuote();
+}, 10_000);
 
 async function doQuote() {
   swSyms();
@@ -3153,6 +3250,8 @@ async function doQuote() {
     $("swap-out").textContent = "0";
     $("swap-rate").textContent = "—";
     $("swap-min").textContent = "—";
+    showRoute(null);
+    $("swap-impact").textContent = "";
     return;
   }
   const amt = toUnits(raw);
@@ -3171,20 +3270,23 @@ async function doQuote() {
   let out = SW.venue.name === "Aquarius" ? aq.out : soro;
   // A split over several pools is used only when it clearly beats the best single pool (it costs a little more network fee).
   const split = aq && soro !== null ? await bestSplit(tin, tout, amt).catch(() => null) : null;
+  // Where the swap goes: one pool, or several in the shares that pay the most.
   if (split && split.out * 10000n > out * 10005n) {
     SW.venue = { name: "split", parts: split.parts, text: split.text };
-    $("swap-route").textContent = `${split.text}, testnet (${(((Number(split.out) - Number(out)) / Number(out)) * 100).toFixed(2)}% more than the best single pool)`;
+    showRoute(split.parts.map((p) => ({ venue: p.src.venue, share: Number((p.amount * 1000n) / amt) / 10 })));
     out = split.out;
-  } else
-    $("swap-route").textContent =
-      SW.venue.name === "Aquarius"
-        ? `Aquarius, testnet${soro !== null ? ` (${(((Number(aq.out) - Number(soro)) / Number(soro)) * 100).toFixed(2)}% more than Soroswap)` : ""}`
-        : `Soroswap, testnet${aq ? ` (${(((Number(soro) - Number(aq.out)) / Number(aq.out)) * 100).toFixed(2)}% more than Aquarius)` : ""}`;
+  } else showRoute([{ venue: SW.venue.name, share: 100 }]);
   SW.out = out;
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   $("swap-out").textContent = (Number(out) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 });
   const rate = Number(out) / Number(amt);
-  $("swap-rate").textContent = `1 ${a} ≈ ${rate.toLocaleString("en-US", { maximumFractionDigits: 6 })} ${b}`;
+  SW.rate = { a, b, rate };
+  showRate();
+  // How far this trade's price is from the price of a small trade (the cost of the size itself).
+  const spot = SW.dir === "xu" ? SV.mkt || (marketPrice ? marketPrice : null) : marketPrice ? 1 / marketPrice : null;
+  const impact = spot ? (rate / spot - 1) * 100 : null;
+  $("swap-impact").textContent = impact === null || !Number.isFinite(impact) ? "" : `Price impact ${impact > -0.005 ? "0.00" : impact.toFixed(2)}%`;
+  $("swap-impact").classList.toggle("bad", impact !== null && impact < -3);
   const min = (out * BigInt(Math.round((100 - SW.slip) * 100))) / 10000n;
   $("swap-min").textContent = `${(Number(min) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${b}`;
   const bal = SW.dir === "xu" ? walletXlm : walletUsdc;
@@ -3211,10 +3313,11 @@ $("swap-max").onclick = () => {
   $("swap-in").value = v > 0n ? toPlain(v) : "";
   doQuote();
 };
-// Maximum slippage: 0.5%, 1%, or an own value from 0.01% to 50%. "Set as default" keeps the current value in this
-// browser, so the Market tab opens with it next time. An empty or invalid own value falls back to the default.
+// Maximum slippage: 0.5%, 1%, or an own value from 0.01% to 50%. Whatever is chosen is kept in this browser and
+// is there again the next time the page opens; nothing has to be confirmed. An invalid own value is ignored
+// (the last valid choice stays in force), an emptied field goes back to 1%.
 const SLIP_KEY = "iora-slip";
-const slipDefault = () => {
+const slipSaved = () => {
   try {
     const v = Number(localStorage.getItem(SLIP_KEY));
     return v >= 0.01 && v <= 50 ? v : 1;
@@ -3222,16 +3325,18 @@ const slipDefault = () => {
     return 1;
   }
 };
-function setSlip(v, { own = false } = {}) {
+function setSlip(v, { own = false, save = true } = {}) {
   SW.slip = v;
+  if (save) {
+    try {
+      localStorage.setItem(SLIP_KEY, String(v));
+    } catch {}
+  }
   const chip = [...document.querySelectorAll("#slip-chips [data-slip]")].find((o) => Number(o.dataset.slip) === v);
   for (const o of document.querySelectorAll("#slip-chips [data-slip]")) o.setAttribute("aria-pressed", String(o === chip && !own));
   if (!own) $("slip-own").value = chip ? "" : String(v);
   $("slip-own").parentElement.classList.toggle("on", own || !chip);
   $("slip-own").parentElement.classList.remove("bad");
-  const def = slipDefault();
-  $("slip-save").hidden = v === def;
-  $("slip-save").textContent = "Set as default";
   doQuote();
 }
 for (const c of document.querySelectorAll("#slip-chips [data-slip]")) c.onclick = () => setSlip(Number(c.dataset.slip));
@@ -3239,20 +3344,10 @@ $("slip-own").addEventListener("input", () => {
   const raw = $("slip-own").value.trim().replace(",", ".");
   const v = /^\d*\.?\d+$/.test(raw) ? Number(raw) : NaN;
   if (v >= 0.01 && v <= 50) return setSlip(Math.round(v * 100) / 100, { own: true });
-  if (!raw) return setSlip(slipDefault());
-  SW.slip = slipDefault();
-  $("slip-own").parentElement.classList.add("bad");
-  $("slip-save").hidden = true;
-  doQuote();
+  if (!raw) return setSlip(1);
+  $("slip-own").parentElement.classList.add("bad"); // not a usable number: the last valid choice stays
 });
-$("slip-save").onclick = () => {
-  try {
-    localStorage.setItem(SLIP_KEY, String(SW.slip));
-  } catch {}
-  $("slip-save").textContent = `Default: ${SW.slip}%`;
-  setTimeout(() => ($("slip-save").hidden = true), 1400);
-};
-if (slipDefault() !== 1) queueMicrotask(() => setSlip(slipDefault()));
+if (slipSaved() !== 1) queueMicrotask(() => setSlip(slipSaved(), { save: false }));
 $("swap-go").onclick = async () => {
   if (!me) return log("Connect your wallet first.", "err");
   const raw = String($("swap-in").value).trim().replace(",", ".");
