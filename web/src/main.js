@@ -158,6 +158,7 @@ function v7Translate(contractId, method, args) {
       return { id: h.id, method, args: [S, ...args] };
     case "place_order":
     case "place_stop_order":
+    case "place_dca":
       return { id: h.id, method, args: [S, B, ...args, nativeToScVal(KEEP.on, { type: "bool" })] };
     case "place_order_then":
       // Old: (amount, limit, minimum fill, impact, lifetime, TARGET VAULT, next limit, next impact, next lifetime)
@@ -263,6 +264,8 @@ const VAULT_ERRORS = {
   27: "This coin is not on Iora's list of coins that can be traded",
   28: "Invalid swap route",
   29: "The vault still holds this coin, or an open order uses it",
+  31: "The next part of this scheduled order is not due yet",
+  33: "The time between two orders must be between 1 minute and 28 days",
 };
 // Contract version (testnet/factory.env VAULT_V). Version 4 signatures: the band parameter for a stop loss,
 // the "withdraw everything" special value for withdraw, collecting output waiting in the vault (sweep).
@@ -1253,6 +1256,60 @@ $("tp-px").addEventListener("input", () => {
   AUTO.px = v > 0n ? v : 0n;
   updateTicket();
 });
+// Take profit as a percentage: "+10%" sets the take profit price 10% above the buy price and follows the buy
+// price while it is being typed. Typing a take profit price by hand switches the percentage off.
+let tpPct = null;
+function tpBuyPrice() {
+  try {
+    const v = $("olimit").value.trim();
+    return v ? toUnits(v) : 0n;
+  } catch {
+    return 0n;
+  }
+}
+function tpNote() {
+  const base = tpBuyPrice();
+  const el = $("tp-gain");
+  const show = base > 0n && AUTO.px > 0n;
+  el.hidden = !show;
+  if (!show) return;
+  const pct = (Number(AUTO.px - base) / Number(base)) * 100;
+  el.textContent = AUTO.px > base ? `Sells ${pct.toFixed(pct < 10 ? 2 : 1).replace(/\.?0+$/, "")}% above your buy price.` : "The take profit price must be above your buy price.";
+  el.classList.toggle("bad", AUTO.px <= base);
+}
+function tpApply() {
+  for (const b of $("tp-pct").querySelectorAll("button")) b.setAttribute("aria-pressed", String(tpPct !== null && Number(b.dataset.p) === tpPct));
+  if (tpPct === null) return tpNote();
+  const base = tpBuyPrice();
+  if (base > 0n) {
+    // rounded up to 4 decimals, so the target is never below the percentage asked for
+    const px = Math.ceil((Number(base) / 1e7) * (1 + tpPct / 100) * 1e4 - 1e-9) / 1e4;
+    $("tp-px").value = px.toFixed(4);
+    AUTO.px = toUnits(px.toFixed(4));
+    updateTicket();
+  }
+  tpNote();
+}
+$("tp-pct").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (!tpBuyPrice()) return log("Type your buy price first; the take profit is set above it.", "err");
+  tpPct = Number(b.dataset.p);
+  $("tp-own").value = "";
+  tpApply();
+});
+$("tp-own").addEventListener("input", () => {
+  const v = parseFloat($("tp-own").value.replace(",", "."));
+  tpPct = v > 0 && v <= 1000 ? v : null;
+  tpApply();
+});
+$("tp-px").addEventListener("input", () => {
+  tpPct = null;
+  $("tp-own").value = "";
+  tpApply();
+});
+$("olimit").addEventListener("input", tpApply);
+$("olimit").addEventListener("change", tpApply);
 const AUTO_DAYS = 30;
 /** Take profit price -> limit of the order in the sell vault (sell vault unit: XLM for 1 USDC). */
 function autoSellLimit() {
@@ -1836,7 +1893,62 @@ async function readOrders(v) {
   );
   const rows = [];
   reads.forEach((r, id) => r.ok && !r.value.foreign && rows.push({ id, ...r.value }));
+  await attachSchedules(v, rows);
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled orders (DCA), version 11 vaults
+// ---------------------------------------------------------------------------
+// A DCA order is an ordinary order with a schedule: it holds one part at a time, fills one part per interval and
+// reserves the next part itself while the vault can cover it. `get_schedule` tells which orders are DCA.
+const DCA_NO_LIMIT = U * 1_000_000_000n; // the contract's highest price: "no price limit" (the oracle band protects instead)
+const DCA_BAND_BPS = 300; // without a price limit every part must be within 3% of the oracle price
+const DCA_MIN_EVERY = 60;
+const DCA_MAX_EVERY = 28 * 86400;
+const DCA_DAYS = 365; // a plan stops by itself after a year at the latest
+const vaultVer = new Map(); // vault address -> version (0: older than 8)
+const doneSchedules = new Map(); // "vault:id" -> schedule | null, for orders that can no longer change
+async function vaultVersion(v) {
+  const h = sideOf(v);
+  if (!h) return 0;
+  if (vaultVer.has(h.id)) return vaultVer.get(h.id);
+  const r = await rawRead(h.id, "version");
+  const n = r.ok ? Number(r.value) : 0;
+  if (r.ok) vaultVer.set(h.id, n);
+  return n;
+}
+async function attachSchedules(v, rows) {
+  if (!rows.length || (await vaultVersion(v)) < 11) return;
+  await Promise.all(
+    rows.map(async (o) => {
+      const k = `${v}:${o.id}`;
+      if (doneSchedules.has(k)) return void (o.dca = doneSchedules.get(k));
+      const r = await read(v, "get_schedule", [u32(o.id)]);
+      if (!r.ok) return;
+      const s = r.value ? { every: Number(r.value.every), part: BigInt(r.value.part), fills: Number(r.value.fills), done: Number(r.value.done), next: Number(r.value.next) } : null;
+      o.dca = s;
+      if (!s || doneOrders.has(k)) doneSchedules.set(k, s);
+    }),
+  );
+}
+const dcaSpan = (sec) => {
+  const f = (n, w) => `${+n.toFixed(1)} ${w}${+n.toFixed(1) === 1 ? "" : "s"}`;
+  return sec < 3600 ? f(sec / 60, "minute") : sec < 86400 ? f(sec / 3600, "hour") : sec < 604800 ? f(sec / 86400, "day") : f(sec / 604800, "week");
+};
+/** Cells of a DCA order's row in the order lists (null for an ordinary order). */
+function dcaCells(o, sym, sell, open) {
+  const s = o.dca;
+  if (!s) return null;
+  const lim = BigInt(o.limit_price);
+  const bound = lim >= DCA_NO_LIMIT ? "any price near the oracle price" : sell ? `≥ ${px4(sellPrice(lim))}` : `≤ ${fmt(lim)}`;
+  const wait = s.next - Date.now() / 1000;
+  const next = !open ? "" : wait <= 0 ? " · next: due now" : ` · next in ${dcaSpan(wait)}`;
+  return {
+    amt: `${fmt(s.part, 2)} ${esc(sym)}<span class="then-note">each time</span>`,
+    lim: `<span class="tag dca">DCA</span> every ${dcaSpan(s.every)}<span class="then-note">${bound}${next}</span>`,
+    prog: `${s.done}${s.fills ? ` of ${s.fills}` : ""} done`,
+  };
 }
 
 let lastOrders = null; // { v, rows, fus }: the orders last read (to draw without reading again)
@@ -1893,12 +2005,13 @@ function paintOrders() {
       if (filled > 0n) {
         const px = Number(filled) / Number(BigInt(o.filled_out));
         const better = (1 - px / (Number(BigInt(o.limit_price)) / 1e7)) * 100;
-        avg = `${px.toLocaleString("en-US", { maximumFractionDigits: 4 })} <span class="muted">${better.toFixed(1)}% better</span>`;
+        avg = `${px.toLocaleString("en-US", { maximumFractionDigits: 4 })}${BigInt(o.limit_price) >= DCA_NO_LIMIT ? "" : ` <span class="muted">${better.toFixed(1)}% better</span>`}`;
       }
       const pct = Number((filled * 100n) / BigInt(o.amount_in));
+      const d = dcaCells(o, "USDC", false, status === "Open" && !expired);
       if (status === "Open" && !expired) {
         openCount++;
-        openOrders.push({ id: o.id, left: Number(BigInt(o.amount_in) - filled) / 1e7, limit: Number(BigInt(o.limit_price)) / 1e7, expiry: Number(o.expiry) });
+        if (BigInt(o.limit_price) < DCA_NO_LIMIT) openOrders.push({ id: o.id, left: Number(BigInt(o.amount_in) - filled) / 1e7, limit: Number(BigInt(o.limit_price)) / 1e7, expiry: Number(o.expiry) });
       }
       const left = Number(o.expiry) - now;
       const exp =
@@ -1922,9 +2035,9 @@ function paintOrders() {
       }
       return `<tr class="${status === "Open" && !expired ? "is-open" : "is-done"}">
         <td>#${o.id}</td>
-        <td>${fmt(o.amount_in, 2)} USDC</td>
-        <td>≤ ${fmt(o.limit_price)}${fus.has(o.id) ? `<span class="then-note">take profit ≥ ${px4(sellPrice(BigInt(fus.get(o.id).limit_price)))}</span>` : ""}</td>
-        <td><div class="bar"><span style="width:${pct}%"></span></div>${pct}%<span class="muted">${fmt(o.filled_out, 2)} ${BS}</span></td>
+        <td>${d ? d.amt : `${fmt(o.amount_in, 2)} USDC`}</td>
+        <td>${d ? d.lim : `≤ ${fmt(o.limit_price)}`}${fus.has(o.id) ? `<span class="then-note">take profit ≥ ${px4(sellPrice(BigInt(fus.get(o.id).limit_price)))}</span>` : ""}</td>
+        <td><div class="bar"><span style="width:${pct}%"></span></div>${d ? d.prog : `${pct}%`}<span class="muted">${fmt(o.filled_out, 2)} ${BS}</span></td>
         <td>${avg}</td>
         <td>${waitCell}</td>
         <td>${exp}</td>
@@ -3623,7 +3736,7 @@ async function renderSellOrders() {
       if (sold > 0n) {
         const got = Number(BigInt(o.filled_out)) / Number(sold);
         const better = (got / sellPrice(BigInt(o.limit_price)) - 1) * 100;
-        avg = `${px4(got)} <span class="muted">${better.toFixed(1)}% better</span>`;
+        avg = `${px4(got)}${BigInt(o.limit_price) >= DCA_NO_LIMIT ? "" : ` <span class="muted">${better.toFixed(1)}% better</span>`}`;
       }
       const left = Number(o.expiry) - now;
       const exp = status !== "Open" ? "—" : expired ? "Ended" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
@@ -3632,11 +3745,12 @@ async function renderSellOrders() {
         const base = Number(BigInt(o.amount_in) - sold) / 1e7;
         waitCell = `<span class="earn-cell">+${((base * SV.apr) / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} / day</span>`;
       }
+      const d = dcaCells(o, BS, true, status === "Open" && !expired);
       return `<tr class="${status === "Open" && !expired ? "is-open" : "is-done"}">
         <td>#${o.id}</td>
-        <td>${fmt(o.amount_in, 2)} ${BS}</td>
-        <td>${BigInt(o.trigger_price || 0) > 0n ? `<span class="tag stop">Stop</span> ≤ ${px4(sellPrice(BigInt(o.trigger_price)))}<span class="then-note">not below ${px4(sellPrice(BigInt(o.limit_price)))}</span>` : `≥ ${px4(sellPrice(BigInt(o.limit_price)))}`}</td>
-        <td><div class="bar"><span style="width:${pct}%"></span></div>${pct}%<span class="muted">${fmt(o.filled_out, outDp(2))} ${SV.out.sym}</span></td>
+        <td>${d ? d.amt : `${fmt(o.amount_in, 2)} ${BS}`}</td>
+        <td>${d ? d.lim : BigInt(o.trigger_price || 0) > 0n ? `<span class="tag stop">Stop</span> ≤ ${px4(sellPrice(BigInt(o.trigger_price)))}<span class="then-note">not below ${px4(sellPrice(BigInt(o.limit_price)))}</span>` : `≥ ${px4(sellPrice(BigInt(o.limit_price)))}`}</td>
+        <td><div class="bar"><span style="width:${pct}%"></span></div>${d ? d.prog : `${pct}%`}<span class="muted">${fmt(o.filled_out, outDp(2))} ${SV.out.sym}</span></td>
         <td>${avg}</td>
         <td>${waitCell}</td>
         <td>${exp}</td>
@@ -4521,7 +4635,7 @@ async function tradeLines() {
     console.warn("order lines", e);
   }
   if (TR.key !== key) return;
-  TR.lines = out.filter((o) => o.price > 0);
+  TR.lines = out.filter((o) => o.price > 1e-6 && o.price < 1e6); // a DCA order without a price limit has no line
   drawChart();
 }
 
@@ -4688,6 +4802,90 @@ for (const [countId, distId, st] of [["ocount", "odist", LADDER], ["sv-ocount", 
     };
   }
 }
+// DCA forms (buy and sell): one part per interval, for as long as the vault covers the next part.
+for (const s of [
+  { p: "dca", sell: false, v: () => vault, room: () => (freeUnits !== null ? buyRoom() : null), sym: () => "USDC", dep: "dep", errs: VAULT_ERRORS, after: () => refresh() },
+  { p: "sv-dca", sell: true, v: () => SV.vault, room: () => (SV.free !== null ? sellRoom() : null), sym: () => BS, dep: "sv-dep", errs: SELL_ERRORS, after: async () => { await refreshSell(); renderPortfolio(); } },
+]) {
+  const el = (id) => $(`${s.p}-${id}`);
+  const w = s.sell ? "sale" : "buy";
+  const read1 = () => {
+    let part = 0n;
+    try {
+      part = el("part").value.trim() ? toUnits(el("part").value) : 0n;
+    } catch {}
+    const every = (parseInt(el("every").value, 10) || 0) * Number(el("unit").value);
+    const nRaw = el("n").value.trim();
+    const n = nRaw ? parseInt(nRaw, 10) : 0;
+    return { part, every, n, nRaw };
+  };
+  const paint = () => {
+    for (const u of el("part").closest(".dca").querySelectorAll("[data-dca-unit]")) u.textContent = s.sym();
+    const room = s.room();
+    el("av").textContent = room === null ? "" : `Available ${fmt(room, 2)} ${s.sym()}`;
+    const { part, every, n } = read1();
+    if (!(part > 0n) || room === null) {
+      el("cover").textContent = "—";
+      el("len").textContent = "—";
+      return;
+    }
+    const fits = Number(room / part);
+    const k = n > 0 ? Math.min(n, fits) : fits;
+    el("cover").textContent = `${k.toLocaleString("en-US")} ${w}${k === 1 ? "" : "s"}${n > 0 && fits >= n ? "" : " at this size"}`;
+    el("len").textContent = k > 1 && every > 0 ? `about ${dcaSpan(Math.min(every * (k - 1), DCA_DAYS * 86400))}${every * (k - 1) > DCA_DAYS * 86400 ? " (a plan stops after a year)" : ""}` : k === 1 ? `one ${w}` : "—";
+  };
+  for (const id of ["part", "every", "n", "px"]) el(id).addEventListener("input", paint);
+  el("unit").addEventListener("change", paint);
+  for (const t of document.querySelectorAll(`[data-tab="${s.p}"]`)) t.addEventListener("click", paint);
+  el("go").onclick = async () => {
+    if (!me) return log("Connect your wallet first.", "err");
+    const v = s.v();
+    if (!v) return log(`Open your vault first: deposit ${esc(s.sym())} on the Portfolio page.`, "err");
+    if ((await vaultVersion(v)) < 11)
+      return log("DCA needs the newest vault, and your funds are in an older one. Cancel your open orders and withdraw everything on the Portfolio page; your next deposit opens a new vault that has DCA.", "err");
+    const { part, every, n, nRaw } = read1();
+    if (part < MIN_ORDER) return log(`Type how much to ${s.sell ? "sell" : "spend"} each time (at least ${fmt(MIN_ORDER, 1)} ${esc(s.sym())}).`, "err");
+    if (!(every >= DCA_MIN_EVERY && every <= DCA_MAX_EVERY)) return log("The time between two orders must be between 1 minute and 28 days.", "err");
+    if (nRaw && !(/^\d+$/.test(nRaw) && n >= 1 && n <= 1_000_000)) return log(`"Stop after" must be a whole number of ${w}s, or empty for no end.`, "err");
+    let px = 0n;
+    try {
+      px = el("px").value.trim() ? toUnits(el("px").value) : 0n;
+    } catch (e) {
+      return log(esc(e.message), "err");
+    }
+    const limit = px > 0n ? (s.sell ? sellLimit(px) : px) : DCA_NO_LIMIT;
+    if (limit <= 0n || limit > DCA_NO_LIMIT) return log("That price is out of range.", "err");
+    const room = s.room();
+    if (room !== null && part > room) {
+      if (offerDeposit(s.dep, part - room, s.sym())) return;
+      return log(`Your vault holds ${fmt(room, 2)} ${esc(s.sym())} for orders; one ${w} of ${fmt(part, 2)} needs more. Lower the amount or deposit first.`, "err");
+    }
+    const priceRow = px > 0n ? `${s.sell ? "at or above" : "at or below"} ${fmt(px)} USDC per ${esc(BS)}` : `any price within ${DCA_BAND_BPS / 100}% of the oracle price`;
+    if (
+      !(await ask({
+        title: `Start DCA ${s.sell ? "sell" : "buy"}`,
+        rows: [
+          [s.sell ? "Sell each time" : "Spend each time", `${fmt(part, 2)} ${esc(s.sym())}`],
+          ["How often", `every ${dcaSpan(every)}, the first one right away`],
+          ["Until", n > 0 ? `${n} ${w}${n === 1 ? "" : "s"}, or your vault runs out` : "your vault cannot cover the next one"],
+          ["Price", priceRow],
+        ],
+        notes: [
+          `Only the next ${w} is set aside; the rest of your balance stays free and keeps earning.`,
+          "You can stop the plan at any time with Cancel in the order list. It stops by itself after a year at the latest.",
+          ...(px > 0n ? [] : [`With no price limit, a ${w} is skipped while the pool price is more than ${DCA_BAND_BPS / 100}% away from the oracle price, and filled once it is back.`]),
+        ],
+        confirm: "Start",
+      }))
+    )
+      return;
+    const expiry = Math.floor(Date.now() / 1000) + DCA_DAYS * 86400;
+    const ok = await call(v, "place_dca", [i128(part), u32(n), u64(every), i128(limit), u32(300), u32(px > 0n ? 0 : DCA_BAND_BPS), u64(expiry)], `Start DCA ${s.sell ? "sell" : "buy"}`, s.errs);
+    if (ok) el("part").value = "";
+    await s.after();
+    paint();
+  };
+}
 $("olimit2").addEventListener("input", updateTicket);
 $("sv-px2").addEventListener("input", updateSellTicket);
 // The "get USDC" button on the Test funds page: Trade > Sell > Market
@@ -4697,22 +4895,51 @@ $("go-mkt-sell").addEventListener("click", () => setTimeout(() => document.query
 // (The old "Market / -5% / -10% / -20%" price buttons were removed; clicking the market price label fills in the price.)
 {
   const pctOf = (units, p) => (units * BigInt(p)) / 100n;
-  const mark = (box, on) => {
-    for (const o of box.querySelectorAll("[data-p]")) o.setAttribute("aria-pressed", String(o === on));
-  };
+  // A slider from 0 to 100 in steps of 1 lies over the line; the five dots are only marks on it.
   const wire = (boxId, inputId, max, after) => {
     const box = $(boxId), input = $(inputId);
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = "0";
+    range.max = "100";
+    range.step = "1";
+    range.value = "0";
+    range.className = "pct-range";
+    range.setAttribute("aria-label", box.getAttribute("aria-label") || "Share of your available balance to use");
+    const out = document.createElement("output");
+    out.className = "pct-out";
+    box.removeAttribute("role");
+    box.append(range, out);
     for (const b of box.querySelectorAll("[data-p]")) {
-      b.onclick = () => {
-        const m = max();
-        if (m === null) return;
-        const v = pctOf(m, Number(b.dataset.p));
-        input.value = v > 0n ? trim7(v) : "";
-        after();
-        mark(box, b); // "after" does not fire the input event; the selected button stays marked
-      };
+      b.tabIndex = -1;
+      b.setAttribute("aria-hidden", "true");
     }
-    input.addEventListener("input", () => mark(box, null)); // typing by hand clears the mark
+    const show = (p) => {
+      range.value = String(p);
+      box.style.setProperty("--p", String(p));
+      out.textContent = p > 0 ? `${p}%` : "";
+      range.setAttribute("aria-valuetext", `${p}%`);
+      for (const b of box.querySelectorAll("[data-p]")) b.classList.toggle("on", p > 0 && Number(b.dataset.p) <= p);
+    };
+    range.addEventListener("input", () => {
+      const m = max();
+      if (m === null) return show(0);
+      const p = Number(range.value);
+      const v = pctOf(m, p);
+      input.value = v > 0n ? trim7(v) : "";
+      after(); // "after" does not fire the input event; the slider keeps its place
+      show(p);
+    });
+    // Typing an amount by hand moves the slider to the share that amount is.
+    input.addEventListener("input", () => {
+      let p = 0;
+      try {
+        const m = max();
+        const u = input.value.trim() ? toUnits(input.value) : 0n;
+        if (m !== null && m > 0n) p = Math.max(0, Math.min(100, Number((u * 100n) / m)));
+      } catch {}
+      show(p);
+    });
   };
   wire("amt-pct", "oamount", () => (freeUnits !== null ? buyRoom() : null), updateTicket);
   wire("sv-amt-pct", "sv-amt", () => (SV.free !== null ? sellRoom() : null), updateSellTicket);
@@ -4783,6 +5010,7 @@ $("tp-on").onchange = () => {
   const on = $("tp-on").checked;
   $("autosell-row").classList.toggle("open", on);
   if (on) return $("tp-px").focus();
+  $("tp-own").value = "";
   $("tp-px").value = "";
   $("tp-px").dispatchEvent(new Event("input", { bubbles: true }));
 };

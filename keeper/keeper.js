@@ -170,6 +170,8 @@ const ERR = {
   23: "BadDecimals",
   24: "InvalidBand",
   30: "SelfFill",
+  31: "TooEarly",
+  33: "InvalidSchedule",
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -704,19 +706,47 @@ async function pair(vault) {
   // Version 8: `execute` takes a fourth argument (the intermediate token, or none). `version` reports the vault
   // version; version 7 vaults do not have this function.
   // Version 10: the vault also has `take` and `cross` (fills without a pool).
+  // Version 11: scheduled orders (DCA); `get_schedule` tells which orders fill in timed parts.
   let v8 = false;
   let v10 = false;
+  let v11 = false;
   if (fees !== undefined) {
     const ver = await read(vault, "version");
     v8 = ver.ok && Number(ver.value) >= 8;
     v10 = ver.ok && Number(ver.value) >= 10;
+    v11 = ver.ok && Number(ver.value) >= 11;
   }
   const p =
     fees !== undefined
-      ? { v7: true, v5: true, v8, v10, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
+      ? { v7: true, v5: true, v8, v10, v11, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
       : { tin: String(r.value.usdc), tout: String(r.value.xlm), v5: fee !== undefined, fee: fee !== undefined ? BigInt(fee) : 0n };
   pairOf.set(vault, p);
   return p;
+}
+
+// ----- scheduled orders (DCA, version 11 vaults) -----
+// The contract enforces the schedule (a part cannot fill early; the order always holds exactly one part, and
+// reserves the next one itself after a fill while the vault can cover it); the keeper only needs to know when
+// the next part is due. "vault:id" -> schedule, or null for an
+// ordinary order. A schedule changes only when a part fills, so it is read again after every fill attempt.
+const schedules = new Map();
+// The keeper's clock against the ledger's: a part is tried a few seconds after it falls due.
+const DCA_CLOCK_MARGIN_SEC = 6;
+
+async function scheduleOf(vault, id, refresh = false) {
+  const key = `${vault}:${id}`;
+  if (!refresh && schedules.has(key)) return schedules.get(key);
+  const pc = await pair(vault);
+  if (!pc.v11) {
+    schedules.set(key, null);
+    return null;
+  }
+  const r = await read(vault, "get_schedule", [u32(id)]);
+  if (!r.ok) return schedules.get(key) ?? null; // not cached on a failed read: asked again next time
+  const v = r.value;
+  const sch = v ? { every: Number(v.every), part: BigInt(v.part), fills: Number(v.fills), done: Number(v.done), next: Number(v.next) } : null;
+  schedules.set(key, sch);
+  return sch;
 }
 
 /**
@@ -838,6 +868,8 @@ async function ordersToCheck(vault) {
     st.orders.set(id, { id, ...o });
     orders.push({ id, ...o });
   }
+  // Scheduled orders must be known before the crossing pass (they are left to the pool pass).
+  for (const o of orders) await scheduleOf(vault, o.id);
   st.open = st.open.filter((id) => !closed.has(`${vault}:${id}`));
   for (const id of st.orders.keys()) if (!st.open.includes(id)) st.orders.delete(id);
   return orders;
@@ -1009,7 +1041,13 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   const minFill = BigInt(o.min_fill);
   const maxImpact = BigInt(o.max_impact_bps);
   const trigger = BigInt(o.trigger_price ?? 0);
-  const sizes = candidates(remaining, minFill > minFillFor(tin) ? minFill : minFillFor(tin), minFill);
+  // Scheduled order (DCA): nothing to do until the next part is due, and then exactly one part is filled.
+  let sch = await scheduleOf(vault, o.id);
+  if (sch && now >= sch.next + DCA_CLOCK_MARGIN_SEC) sch = await scheduleOf(vault, o.id, true); // someone else may have filled it
+  if (sch && now < sch.next + DCA_CLOCK_MARGIN_SEC) return waiting(vault, o, tag, remaining, tin, "scheduled order: the next part is not due yet");
+  const part = remaining; // a scheduled order always holds exactly one part
+  if (sch && part < minFillFor(tin)) return waiting(vault, o, tag, remaining, tin, "scheduled order: one part is below the smallest fill the keeper sends");
+  const sizes = sch ? [part] : candidates(remaining, minFill > minFillFor(tin) ? minFill : minFillFor(tin), minFill);
   const smallest = sizes[sizes.length - 1];
 
   // Local price check first: no network call for an order whose limit is clearly not met (see "local price check").
@@ -1082,6 +1120,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     const single = () => write(vault, "execute", execArgs(fill, via), true);
     const r = pc.v8 ? await fillOrder(vault, o.id, fill, via, single) : await single();
     dirty.add(vault); // whatever happened, read this vault's orders again on the next scan
+    if (sch) schedules.delete(key); // the schedule moves when a part fills: read it again
     if (r.ok) {
       stats.fills++;
       stuck.delete(key);
@@ -1106,6 +1145,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     }
     if (r.code === 16) return waiting(vault, o, tag, remaining, tin, "the trigger price (oracle) has not been reached yet");
     if (r.code === 19) return waiting(vault, o, tag, remaining, tin, "no oracle price available");
+    if (r.code === 31) return waiting(vault, o, tag, remaining, tin, "scheduled order: the next part is not due yet");
     if (r.code === 4 || r.code === 5) {
       closed.add(key); // the order is no longer open, or has expired according to the chain
       return "closed";
@@ -1292,6 +1332,7 @@ async function crossPass(vaults) {
       const key = `${v}:${id}`;
       if (!o || closed.has(key)) continue;
       if (BigInt(o.trigger_price ?? 0) > 0n) continue; // stop orders are left to the pool pass
+      if (pc.v11 && schedules.get(key) !== null) continue; // scheduled orders (or not known yet) are left to the pool pass
       if (now > Number(o.expiry)) continue;
       const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
       if (remaining <= 0n) continue;

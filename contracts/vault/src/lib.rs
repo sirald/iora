@@ -1,4 +1,15 @@
-//! Iora vault, version 10: ONE multi-asset vault per user.
+//! Iora vault, version 11: ONE multi-asset vault per user.
+//!
+//! New in version 11 (on top of version 10): orders on a schedule ("DCA", buying or selling in equal parts).
+//! - `place_dca` opens an order that sells one part of a token every `every` seconds, for as long as the vault
+//!   can cover the next part (or for a fixed number of parts). Only ONE part is reserved at a time; the rest of
+//!   the balance stays free, keeps earning and can be withdrawn. When the vault cannot cover the next part the
+//!   plan ends by itself.
+//! - The schedule is enforced here, not by the keeper: a part cannot fill before its time, and a fill is always
+//!   exactly one part. Everything else is the order as before: anyone may fill it (`execute`, `take`, `cross`),
+//!   the owner cancels at any time, and the price limit holds on every part.
+//! - A scheduled order can also carry an oracle band (as stop orders do): a part fills only if its output is
+//!   within the band of the oracle price at that moment. This protects a plan whose price limit is far away.
 //!
 //! New in version 10 (on top of version 9): an order can be filled WITHOUT a pool.
 //! - `take`: anyone pays the bought token straight into the vault and receives the sold token. The vault checks the
@@ -78,6 +89,10 @@ pub const STOP_BAND_MIN_BPS: u32 = 50;
 pub const STOP_BAND_MAX_BPS: u32 = 1_000;
 /// Stop order: the limit can be at most this far from the trigger (10%).
 pub const STOP_MAX_GAP_BPS: i128 = 1_000;
+
+/// Scheduled order (DCA): time between two parts (1 minute - 28 days; an order's entry lives 30 days past its last fill).
+pub const DCA_MIN_EVERY: u64 = 60;
+pub const DCA_MAX_EVERY: u64 = 28 * 86_400;
 
 /// For an asset held on Blend: the buffer that cannot be placed into orders or withdrawn while an order is open (0.001 token). Blend rounds
 /// the burned b_tokens up on every withdrawal; the buffer absorbs the rounding loss of partial fills. Once no
@@ -206,6 +221,10 @@ pub enum Error {
     TokenInUse = 29,
     /// `take` / `cross`: a vault cannot pay itself.
     SelfFill = 30,
+    /// Scheduled order: the next part is not due yet.
+    TooEarly = 31,
+    /// Scheduled order: the interval is outside the allowed range.
+    InvalidSchedule = 33,
 }
 
 #[contracttype]
@@ -247,7 +266,8 @@ pub struct Order {
     pub status: OrderStatus,
     /// 0: plain limit order. >0: stop order; it does not fill until the oracle price (`sell` per 1 `buy`) reaches this value.
     pub trigger_price: i128,
-    /// Stop orders only: maximum deviation of a fill from the oracle price (basis points). 0 for plain orders.
+    /// Maximum deviation of a fill from the oracle price (basis points). Always set on a stop order, optional on
+    /// a scheduled order, 0 otherwise (0: the oracle is not consulted).
     pub stop_band_bps: u32,
     /// true: the output stays in the vault (supplied to Blend if it is a reserve); false: it goes to the owner's wallet.
     pub keep: bool,
@@ -262,6 +282,23 @@ pub struct FollowUp {
     pub max_impact_bps: u32,
     /// Lifetime of the reverse order (seconds), counted from the fill.
     pub duration: u64,
+}
+
+/// Schedule of a DCA order: one part of `part` every `every` seconds. The order itself always holds exactly one
+/// part (`amount_in - filled_in`); `filled_in` and `filled_out` are the plan's totals so far.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Schedule {
+    /// Seconds between two parts.
+    pub every: u64,
+    /// Size of one part, in the sold token.
+    pub part: i128,
+    /// Number of parts after which the plan ends; 0: it runs for as long as the vault can cover the next part.
+    pub fills: u32,
+    /// Parts filled so far.
+    pub done: u32,
+    /// Earliest time of the next part (ledger timestamp).
+    pub next: u64,
 }
 
 /// State of one asset in the vault (one read for the interface).
@@ -309,6 +346,8 @@ enum DataKey {
     Order(u32),
     /// Follow-up settings (by order id).
     FollowUp(u32),
+    /// Schedule of a DCA order (by order id).
+    Schedule(u32),
 }
 
 #[contractevent]
@@ -336,6 +375,17 @@ pub struct OrderPlaced {
     pub buy: Address,
     pub amount_in: i128,
     pub limit_price: i128,
+}
+
+/// The order just placed is a scheduled one (DCA).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DcaPlaced {
+    #[topic]
+    pub order_id: u32,
+    pub fills: u32,
+    pub every: u64,
+    pub part: i128,
 }
 
 #[contractevent]
@@ -492,7 +542,7 @@ impl Vault {
     ) -> u32 {
         let cfg = config(&env);
         cfg.owner.require_auth();
-        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry);
+        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry, MAX_FILLS);
         write_order(&env, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry, 0, 0, keep)
     }
 
@@ -525,7 +575,7 @@ impl Vault {
         if !(STOP_BAND_MIN_BPS..=STOP_BAND_MAX_BPS).contains(&band_bps) {
             panic_with_error!(&env, Error::InvalidBand);
         }
-        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry);
+        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry, MAX_FILLS);
         // If the oracle cannot price both tokens the order could never trigger; reject it up front.
         oracle_prices(&env, &cfg, &sell, &buy);
         write_order(&env, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry, trigger_price, band_bps, keep)
@@ -550,7 +600,7 @@ impl Vault {
     ) -> u32 {
         let cfg = config(&env);
         cfg.owner.require_auth();
-        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry);
+        check_order(&env, &cfg, &sell, &buy, amount_in, limit_price, min_fill, max_impact_bps, expiry, MAX_FILLS);
         if then_limit <= 0
             || then_limit > MAX_PRICE
             || then_impact_bps == 0
@@ -570,6 +620,61 @@ impl Vault {
         let key = DataKey::FollowUp(id);
         env.storage().persistent().set(&key, &f);
         env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        id
+    }
+
+    /// Scheduled order ("DCA"): sells `part` of `sell` for `buy` every `every` seconds; the first part is due at
+    /// once. It works for buying and for selling: the direction is simply which token is sold.
+    /// `fills`: the plan ends after this many parts; 0 means it runs for as long as the vault can cover the next
+    /// part. Only one part is reserved at a time: after each fill the next part is reserved if the free balance
+    /// covers it, and if it does not the plan ends (the order closes as filled). Everything else in the vault
+    /// stays free, keeps earning and can be withdrawn; withdrawing it is how the owner lets a plan run out.
+    /// `limit_price`: the most `sell` paid per 1 `buy` on any part (a price cap when buying, a floor when
+    /// selling, in the same unit as `place_order`). While the market is beyond it the plan waits; a part that
+    /// was due fills as soon as the price allows, and the parts after it keep the interval.
+    /// `band_bps`: if not 0, every part must also be within this distance of the oracle price at that moment
+    /// (50 - 1000). Use it when the limit is far from the market; with `limit_price = MAX_PRICE` the band is
+    /// the only price protection, so the two cannot both be left open.
+    /// `expiry`: the plan stops then at the latest (at most MAX_ORDER_SECS from now).
+    /// Returns the order id; the order is read, cancelled and filled like any other.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_dca(
+        env: Env,
+        sell: Address,
+        buy: Address,
+        part: i128,
+        fills: u32,
+        every: u64,
+        limit_price: i128,
+        max_impact_bps: u32,
+        band_bps: u32,
+        expiry: u64,
+        keep: bool,
+    ) -> u32 {
+        let cfg = config(&env);
+        cfg.owner.require_auth();
+        if !(DCA_MIN_EVERY..=DCA_MAX_EVERY).contains(&every) {
+            panic_with_error!(&env, Error::InvalidSchedule);
+        }
+        if band_bps != 0 && !(STOP_BAND_MIN_BPS..=STOP_BAND_MAX_BPS).contains(&band_bps) {
+            panic_with_error!(&env, Error::InvalidBand);
+        }
+        // No price protection at all is not accepted: either a real limit or an oracle band.
+        if band_bps == 0 && limit_price >= MAX_PRICE {
+            panic_with_error!(&env, Error::InvalidPrice);
+        }
+        // The order holds one part and fills whole (minimum fill = the part): the vault must cover the first part now.
+        check_order(&env, &cfg, &sell, &buy, part, limit_price, part, max_impact_bps, expiry, MAX_FILLS);
+        if band_bps != 0 {
+            // If the oracle cannot price both tokens no part could ever fill; reject it up front.
+            oracle_prices(&env, &cfg, &sell, &buy);
+        }
+        let id = write_order(&env, &sell, &buy, part, limit_price, part, max_impact_bps, expiry, 0, band_bps, keep);
+        let key = DataKey::Schedule(id);
+        let now = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &Schedule { every, part, fills, done: 0, next: now });
+        env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        DcaPlaced { order_id: id, fills, every, part }.publish(&env);
         id
     }
 
@@ -752,6 +857,11 @@ impl Vault {
         env.storage().persistent().get(&DataKey::FollowUp(order_id))
     }
 
+    /// Schedule of a DCA order (None for any other order).
+    pub fn get_schedule(env: Env, order_id: u32) -> Option<Schedule> {
+        env.storage().persistent().get(&DataKey::Schedule(order_id))
+    }
+
     /// Number of orders placed so far (order ids are 0..order_count).
     pub fn order_count(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::NextId).unwrap_or(0)
@@ -792,7 +902,7 @@ impl Vault {
 
     /// Version of the vault code (keepers pick the `execute` signature from it).
     pub fn version(_env: Env) -> u32 {
-        10
+        11
     }
 
     /// The owner takes a token off the vault's list, freeing one of its MAX_TOKENS places. Only a token the
@@ -861,14 +971,34 @@ fn open_for_fill(env: &Env, order_id: u32, fill_amount: i128) -> Order {
     if left != 0 && (fill_amount < order.min_fill || left < order.min_fill) {
         panic_with_error!(env, Error::FillTooSmall);
     }
+    // Scheduled order: not before the part is due. (A fill is always the whole part: the order holds exactly one
+    // part and that part is its minimum fill.) The schedule moves on here; if the fill fails later the whole
+    // transaction is undone, this included.
+    let key = DataKey::Schedule(order_id);
+    if let Some(mut s) = env.storage().persistent().get::<DataKey, Schedule>(&key) {
+        let now = env.ledger().timestamp();
+        if now < s.next {
+            panic_with_error!(env, Error::TooEarly);
+        }
+        s.done += 1;
+        // Parts keep their interval; a part that filled late does not let the next ones bunch up.
+        s.next += s.every;
+        if s.next <= now {
+            s.next = now + s.every;
+        }
+        env.storage().persistent().set(&key, &s);
+        env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
     order
 }
 
-/// Stop order: no fill until the oracle price reaches the trigger. Returns the oracle prices for the band check
-/// (None for a plain order).
+/// Stop order: no fill until the oracle price reaches the trigger. Returns the oracle prices for the band check:
+/// always for a stop order, for a scheduled order only if it has a band, None for a plain order.
 fn trigger_of(env: &Env, cfg: &Config, order: &Order) -> Option<(i128, i128)> {
     if order.trigger_price > 0 {
         Some(check_trigger(env, cfg, &order.sell, &order.buy, order.trigger_price))
+    } else if order.stop_band_bps > 0 {
+        Some(oracle_prices(env, cfg, &order.sell, &order.buy))
     } else {
         None
     }
@@ -909,7 +1039,7 @@ fn settle(
     }
     // The least the owner must receive: what the limit promises (and, for a stop order, the oracle band).
     let mut floor = min_out;
-    // Stop order: the output may be below the oracle-fair amount by at most the chosen band.
+    // Stop order or banded scheduled order: the output may be below the oracle-fair amount by at most the chosen band.
     if let Some((p_in, p_out)) = oracle {
         let fair = fill_amount * p_in / p_out;
         let band_min = fair * ((BPS - order.stop_band_bps) as i128);
@@ -938,12 +1068,21 @@ fn settle(
     // Order accounting (the sold side).
     order.filled_in += fill_amount;
     order.filled_out += out;
-    if order.filled_in == order.amount_in {
-        order.status = OrderStatus::Filled;
-    }
-    save_order(env, order_id, &order);
     add_i128(env, DataKey::Reserved(order.sell.clone()), -fill_amount);
     reduce_principal(env, &order.sell, fill_amount);
+    if order.filled_in == order.amount_in {
+        order.status = OrderStatus::Filled;
+        // Scheduled order: the next part is reserved now if the plan has parts left and the vault can cover it
+        // (the sold token has already left the vault at this point); otherwise the plan ends here.
+        if let Some(s) = env.storage().persistent().get::<DataKey, Schedule>(&DataKey::Schedule(order_id)) {
+            if (s.fills == 0 || s.done < s.fills) && orderable_of(env, cfg, &order.sell) >= s.part {
+                order.amount_in += s.part;
+                order.status = OrderStatus::Open;
+                add_i128(env, DataKey::Reserved(order.sell.clone()), s.part);
+            }
+        }
+    }
+    save_order(env, order_id, &order);
     update_stats(env, &order.sell, |st| st.total_spent += fill_amount);
     update_stats(env, &order.buy, |st| st.total_received += out);
 
@@ -991,6 +1130,7 @@ fn check_order(
     min_fill: i128,
     max_impact_bps: u32,
     expiry: u64,
+    max_fills: i128,
 ) {
     // Pausing only stops new orders; withdrawals, cancellations and fills of existing orders always work.
     if GuardClient::new(env, &cfg.guard).is_paused() {
@@ -1007,8 +1147,8 @@ fn check_order(
     if amount_in <= 0 || min_fill <= 0 || min_fill > amount_in {
         panic_with_error!(env, Error::InvalidAmount);
     }
-    // At most MAX_FILLS pieces: min_fill >= ceil(amount_in / MAX_FILLS).
-    if min_fill < (amount_in - 1) / MAX_FILLS + 1 {
+    // At most `max_fills` pieces: min_fill >= ceil(amount_in / max_fills).
+    if min_fill < (amount_in - 1) / max_fills + 1 {
         panic_with_error!(env, Error::InvalidAmount);
     }
     if limit_price <= 0 || limit_price > MAX_PRICE {

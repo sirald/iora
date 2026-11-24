@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Backs the project up to a private GitHub repository. Run again to push new changes.
+# Pushes the project to its GitHub repository ("iora"). THIS REPOSITORY IS PUBLIC: everything pushed here can be
+# read by anyone. Secrets never go in (.gitignore keeps the key and settings files out, and step 5 stops the push
+# if a file looks like it holds a key or token). The internal notes go to a separate private repository with
+# scripts/github-private.sh. Run again to push new changes.
+# (If the repository does not exist yet it is created private; making it public is a setting on GitHub.)
 cd "$(dirname "$0")/.." || exit 1
 REPO="iora"
 
@@ -77,5 +81,5 @@ else
 fi
 
 echo
-echo "Repository: https://github.com/$LOGIN/$REPO"
+echo "Repository: https://github.com/$LOGIN/$REPO  (public: anyone can read what was pushed)"
 echo "Run the same command again for later backups."

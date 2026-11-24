@@ -19,12 +19,9 @@
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:site" content="@iorafinance" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- The site's typefaces are served from this site (public/fonts.css, public/fonts/). -->
+    <link rel="preload" href="/fonts/funnel-sans.woff" as="font" type="font/woff" crossorigin />
+    <link rel="stylesheet" href="/fonts.css" />
     <script src="/theme.js"></script>
     <!-- Vercel Web Analytics: no cookies, collects no personal data. Works once Analytics is turned on in the Vercel dashboard. -->
     <script defer src="/_vercel/insights/script.js"></script>
@@ -204,11 +201,12 @@
         <aside class="side">
           <div class="sidesw" role="group" aria-label="Order side"><a href="#vault" class="b" aria-current="true">Buy</a><a href="#sell" class="s">Sell</a></div>
           <section class="ticket" data-tabs id="tk-buy" data-otype="limit">
-            <label class="otsel"><span class="sr-only">Order type</span><select data-otsel aria-label="Order type"><option value="limit">Limit</option><option value="market">Market</option><option value="scaled">Scaled</option></select></label>
-            <div class="tabs" role="tablist" aria-label="Order type" hidden>
-              <button role="tab" data-tab="buy" data-ot="limit" aria-selected="true">Limit</button>
+            <label class="otsel"><span class="sr-only">Order type</span><select data-otsel aria-label="Order type"><option value="limit">Limit</option><option value="market">Market</option><option value="scaled">Scaled</option><option value="dca">DCA</option></select></label>
+            <div class="tabs" role="tablist" aria-label="Order type">
               <button role="tab" data-tab="mkt" data-ot="market" aria-selected="false">Market</button>
+              <button role="tab" data-tab="buy" data-ot="limit" aria-selected="true">Limit</button>
               <button role="tab" data-tab="buy" data-ot="scaled" aria-selected="false">Scaled</button>
+              <button role="tab" data-tab="dca" data-ot="dca" aria-selected="false">DCA</button>
             </div>
 
             <div data-pane="buy">
@@ -269,6 +267,7 @@
               </div>
 
               <div class="sc-only">
+                <p class="fine sc-what">A scaled order splits one amount into several limit orders across a price range.</p>
                 <div class="expiry">
                   <label for="ocount">Number of orders <i class="tip" tabindex="0" data-tip="The amount is split into this many limit orders, spread evenly across your price range. Each one is a separate order and needs its own signature, so the most is 10.">i</i></label>
                   <span class="stepper"><button type="button" data-step="-1" aria-label="Fewer orders">−</button><input id="ocount" inputmode="numeric" value="5" autocomplete="off" aria-describedby="ocount-hint" /><button type="button" data-step="1" aria-label="More orders">+</button></span>
@@ -289,6 +288,8 @@
               <div class="box tp-box">
                 <div class="box-top"><label for="tp-px">Take profit price <i class="tip" tabindex="0" data-tip="When this order fills, the XLM stays in your vault (no trip to your wallet) and a sell order opens at this price. It keeps earning on Blend until it sells.">i</i></label></div>
                 <div class="box-main"><input id="tp-px" class="big" inputmode="decimal" placeholder="0.00" autocomplete="off" /><span class="unit">USDC</span></div>
+                <div class="tp-pct" id="tp-pct" role="group" aria-label="Profit target above your buy price"><button type="button" data-p="2" aria-pressed="false">+2%</button><button type="button" data-p="5" aria-pressed="false">+5%</button><button type="button" data-p="10" aria-pressed="false">+10%</button><button type="button" data-p="20" aria-pressed="false">+20%</button><label class="tp-own"><input id="tp-own" inputmode="decimal" placeholder="other" autocomplete="off" aria-label="Your own profit target, in percent" /><span>%</span></label></div>
+                <p class="fine tp-gain" id="tp-gain" hidden></p>
               </div>
               </div>
 
@@ -335,6 +336,30 @@
               <button id="swap-go" class="btn primary block">Swap</button>
               <p class="fine">A market order trades right now, straight from your wallet, through the Soroswap test pool that also fills limit orders. It does not use your vault. Prices in the test pool don't follow the real market.</p>
               </div>
+            </div>
+            <div data-pane="dca" class="dca" hidden>
+              <div class="box">
+                <div class="box-top"><label for="dca-part">Spend each time</label><span class="dca-av" id="dca-av"></span></div>
+                <div class="box-main"><input id="dca-part" class="big" inputmode="decimal" placeholder="0" autocomplete="off" /><span class="unit" data-dca-unit>USDC</span></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="dca-every">One buy every</label></div>
+                <div class="box-main"><input id="dca-every" class="big" inputmode="numeric" value="1" autocomplete="off" /><select id="dca-unit" class="dca-unit" aria-label="Time unit"><option value="60">minutes</option><option value="3600">hours</option><option value="86400" selected>days</option><option value="604800">weeks</option></select></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="dca-n">Stop after <span class="opt">(optional)</span></label></div>
+                <div class="box-main"><input id="dca-n" class="big" inputmode="numeric" placeholder="no end" autocomplete="off" /><span class="unit">buys</span></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="dca-px">Only when the price is at or below <span class="opt">(optional)</span></label></div>
+                <div class="box-main"><input id="dca-px" class="big" inputmode="decimal" placeholder="no limit" autocomplete="off" /><span class="unit">USDC</span></div>
+              </div>
+              <dl class="dca-sum">
+                <div><dt>Your vault covers</dt><dd id="dca-cover">—</dd></div>
+                <div><dt>Runs for</dt><dd id="dca-len">—</dd></div>
+              </dl>
+              <button id="dca-go" class="btn primary block go-buy" type="button">Start DCA buy</button>
+              <p class="fine" id="dca-note">Only the next buy is set aside. The rest of your balance keeps earning and you can withdraw it or stop the plan at any time. The plan ends when your vault cannot cover the next buy.</p>
             </div>
           </section>
 
@@ -535,11 +560,12 @@
         <aside class="side">
           <div class="sidesw" role="group" aria-label="Order side"><a href="#vault" class="b">Buy</a><a href="#sell" class="s" aria-current="true">Sell</a></div>
           <section class="ticket" data-tabs id="tk-sell" data-otype="limit">
-            <label class="otsel"><span class="sr-only">Order type</span><select data-otsel aria-label="Order type"><option value="limit">Limit</option><option value="market">Market</option><option value="scaled">Scaled</option></select></label>
-            <div class="tabs" role="tablist" aria-label="Order type" hidden>
-              <button role="tab" data-tab="sv-sell" data-ot="limit" aria-selected="true">Limit</button>
+            <label class="otsel"><span class="sr-only">Order type</span><select data-otsel aria-label="Order type"><option value="limit">Limit</option><option value="market">Market</option><option value="scaled">Scaled</option><option value="dca">DCA</option></select></label>
+            <div class="tabs" role="tablist" aria-label="Order type">
               <button role="tab" data-tab="mkt" data-ot="market" aria-selected="false">Market</button>
+              <button role="tab" data-tab="sv-sell" data-ot="limit" aria-selected="true">Limit</button>
               <button role="tab" data-tab="sv-sell" data-ot="scaled" aria-selected="false">Scaled</button>
+              <button role="tab" data-tab="sv-dca" data-ot="dca" aria-selected="false">DCA</button>
             </div>
 
             <div data-pane="sv-sell">
@@ -594,6 +620,7 @@
               </div>
 
               <div class="sc-only">
+                <p class="fine sc-what">A scaled order splits one amount into several limit orders across a price range.</p>
                 <div class="expiry">
                   <label for="sv-ocount">Number of orders <i class="tip" tabindex="0" data-tip="The amount is split into this many limit orders, spread evenly across your price range. Each one is a separate order and needs its own signature, so the most is 10.">i</i></label>
                   <span class="stepper"><button type="button" data-step="-1" aria-label="Fewer orders">−</button><input id="sv-ocount" inputmode="numeric" value="5" autocomplete="off" aria-describedby="sv-ocount-hint" /><button type="button" data-step="1" aria-label="More orders">+</button></span>
@@ -616,6 +643,30 @@
             </div>
               </div>
             <div data-pane="mkt" class="mkt-slot" hidden></div>
+            <div data-pane="sv-dca" class="dca" hidden>
+              <div class="box">
+                <div class="box-top"><label for="sv-dca-part">Sell each time</label><span class="dca-av" id="sv-dca-av"></span></div>
+                <div class="box-main"><input id="sv-dca-part" class="big" inputmode="decimal" placeholder="0" autocomplete="off" /><span class="unit" data-dca-unit>XLM</span></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="sv-dca-every">One sale every</label></div>
+                <div class="box-main"><input id="sv-dca-every" class="big" inputmode="numeric" value="1" autocomplete="off" /><select id="sv-dca-unit" class="dca-unit" aria-label="Time unit"><option value="60">minutes</option><option value="3600">hours</option><option value="86400" selected>days</option><option value="604800">weeks</option></select></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="sv-dca-n">Stop after <span class="opt">(optional)</span></label></div>
+                <div class="box-main"><input id="sv-dca-n" class="big" inputmode="numeric" placeholder="no end" autocomplete="off" /><span class="unit">sales</span></div>
+              </div>
+              <div class="box">
+                <div class="box-top"><label for="sv-dca-px">Only when the price is at or above <span class="opt">(optional)</span></label></div>
+                <div class="box-main"><input id="sv-dca-px" class="big" inputmode="decimal" placeholder="no limit" autocomplete="off" /><span class="unit">USDC</span></div>
+              </div>
+              <dl class="dca-sum">
+                <div><dt>Your vault covers</dt><dd id="sv-dca-cover">—</dd></div>
+                <div><dt>Runs for</dt><dd id="sv-dca-len">—</dd></div>
+              </dl>
+              <button id="sv-dca-go" class="btn primary block go-sell" type="button">Start DCA sell</button>
+              <p class="fine" id="sv-dca-note">Only the next sale is set aside. The rest of your balance keeps earning and you can withdraw it or stop the plan at any time. The plan ends when your vault cannot cover the next sale.</p>
+            </div>
           </section>
 
           <section class="panel">

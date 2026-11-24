@@ -37,7 +37,8 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        main: resolve(import.meta.dirname, "index.html"),
+        // The landing page is not built by Vite: it is a static page in public/ (index.html, page.css, page.js,
+        // kit/, fonts/) and is copied to dist/ as it is.
         app: resolve(import.meta.dirname, "app.html"),
         docs: resolve(import.meta.dirname, "docs.html"),
       },

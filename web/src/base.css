@@ -15,7 +15,7 @@
   --line-2: #0b1530;
   --text: #0b1530;
   --text-2: #27314a;
-  --muted: #4a5670;
+  --muted: #47526b;
   --accent: #1f4fd1;
   --accent-hi: #1f4fd1;
   --accent-ink: #ffffff;
@@ -89,9 +89,11 @@
   }
 }
 :root {
-  --display: "IBM Plex Sans", "Inter", system-ui, sans-serif;
-  --sans: "IBM Plex Sans", "Inter", system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The home page's typefaces, self-hosted (public/fonts.css): Funnel Display for headings, Funnel Sans for text,
+     DM Mono for numbers. */
+  --display: "Funnel Display", "Inter", system-ui, sans-serif;
+  --sans: "Funnel Sans", "Inter", system-ui, sans-serif;
+  --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   /* old names */
   --chart: var(--bg);
   --chart-deep: var(--bg-2);
@@ -106,7 +108,7 @@ html { scroll-behavior: smooth; background: var(--bg); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 a { color: var(--accent); }
-:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 6px; }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
 ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 
 .top {
@@ -132,7 +134,7 @@ a { color: var(--accent); }
   width: 28px;
   height: 28px;
   flex: none;
-  border-radius: 8px;
+  border-radius: 4px;
   background: url(/logo.svg) center / contain no-repeat;
 }
 .top nav { display: flex; gap: 26px; align-items: center; font-size: 14.5px; }

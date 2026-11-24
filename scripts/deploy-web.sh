@@ -9,6 +9,8 @@ V="npx --yes vercel@latest"
 bash scripts/build-web.sh --build-only || exit 1
 
 rm -rf /tmp/iora && cp -r web/dist /tmp/iora && cp -r web/api /tmp/iora/api && cp web/vercel.json /tmp/iora/ 2>/dev/null
+# The beta function keeps sign-ups in a private Vercel Blob store; Vercel installs this dependency for the functions.
+printf '{\n  "private": true,\n  "dependencies": { "@vercel/blob": "^2.3.0" }\n}\n' > /tmp/iora/package.json
 
 if ! $V whoami > /dev/null 2>&1; then
   echo

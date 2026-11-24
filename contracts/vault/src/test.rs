@@ -875,7 +875,7 @@ fn fill_through_an_intermediate_token() {
 #[test]
 fn version_is_reported() {
     let s = setup();
-    assert_eq!(s.v.version(), 10);
+    assert_eq!(s.v.version(), 11);
 }
 
 #[test]
@@ -1067,4 +1067,172 @@ fn cross_cannot_break_either_limit() {
     // An expired order cannot be crossed.
     s.env.ledger().set_timestamp(NOW + DAY + 1);
     assert_eq!(s.v.try_cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(500 * U)), Err(Ok(ce(Error::OrderExpired))));
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled orders (DCA)
+// ---------------------------------------------------------------------------
+
+const HOUR: u64 = 3_600;
+
+#[test]
+fn dca_buys_one_part_at_a_time_until_the_vault_runs_out() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(250 * U));
+    // 100 USDC into XLM every day, with no end, paying at most 0.21 USDC per XLM.
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &0, &DAY, &2_100_000, &IMPACT, &0, &(NOW + 300 * DAY), &true);
+    // Only one part is reserved; the rest stays free.
+    assert_eq!(s.v.reserved(&s.usdc.address), 100 * U);
+    let sch = s.v.get_schedule(&id).unwrap();
+    assert_eq!((sch.part, sch.fills, sch.done, sch.every, sch.next), (100 * U, 0, 0, DAY, NOW));
+
+    // Anyone may fill, but only the whole part.
+    s.env.set_auths(&[]);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(50 * U), &None), Err(Ok(ce(Error::FillTooSmall))));
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(200 * U), &None), Err(Ok(ce(Error::FillTooLarge))));
+    // The first part is due at once.
+    assert_eq!(s.v.execute(&s.filler, &id, &(100 * U), &None), 500 * U);
+    // The next part was reserved straight away, and it is not due until a day has passed.
+    assert_eq!(s.v.reserved(&s.usdc.address), 100 * U);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Open);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::TooEarly))));
+    s.env.ledger().set_timestamp(NOW + DAY - 1);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::TooEarly))));
+    s.env.ledger().set_timestamp(NOW + DAY);
+    assert_eq!(s.v.execute(&s.filler, &id, &(100 * U), &None), 500 * U);
+
+    // 50 USDC are left: not enough for another part, so the plan ended by itself and nothing is reserved.
+    let o = s.v.get_order(&id);
+    assert_eq!(o.status, OrderStatus::Filled);
+    assert_eq!(o.filled_in, 200 * U);
+    assert_eq!(o.filled_out, 1_000 * U);
+    assert_eq!(s.v.reserved(&s.usdc.address), 0);
+    assert_eq!(s.v.balance(&s.usdc.address), 50 * U);
+    assert_eq!(s.v.balance(&s.xlm.address), 1_000 * U);
+    assert_eq!(s.v.get_schedule(&id).unwrap().done, 2);
+    s.env.ledger().set_timestamp(NOW + 2 * DAY);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::OrderNotOpen))));
+
+    // An ordinary order has no schedule.
+    s.env.mock_all_auths();
+    let plain = s.v.place_order(&s.usdc.address, &s.xlm.address, &(50 * U - ROUNDING_BUFFER), &2_000_000, &(50 * U - ROUNDING_BUFFER), &IMPACT, &(NOW + 3 * DAY), &true);
+    assert_eq!(s.v.get_schedule(&plain), None);
+}
+
+#[test]
+fn dca_with_a_fixed_number_of_parts_and_a_late_fill() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // 3 parts of 100 USDC, one a day.
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &3, &DAY, &2_100_000, &IMPACT, &0, &(NOW + 30 * DAY), &true);
+    s.v.execute(&s.filler, &id, &(100 * U), &None);
+
+    // The rest of the balance is free: the owner can withdraw it while the plan runs.
+    s.v.withdraw(&s.usdc.address, &(300 * U));
+    assert_eq!(s.v.balance(&s.usdc.address), 600 * U);
+
+    // Nobody filled for five days. The second part fills now, and the third still waits a full interval.
+    s.env.ledger().set_timestamp(NOW + 5 * DAY);
+    s.v.execute(&s.filler, &id, &(100 * U), &None);
+    assert_eq!(s.v.get_schedule(&id).unwrap().next, NOW + 6 * DAY);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::TooEarly))));
+
+    s.env.ledger().set_timestamp(NOW + 6 * DAY);
+    s.v.execute(&s.filler, &id, &(100 * U), &None);
+    // Three parts were asked for: the plan is over although the vault could cover more.
+    let o = s.v.get_order(&id);
+    assert_eq!(o.status, OrderStatus::Filled);
+    assert_eq!(o.filled_in, 300 * U);
+    assert_eq!(s.v.reserved(&s.usdc.address), 0);
+    assert_eq!(s.v.balance(&s.usdc.address), 400 * U);
+}
+
+#[test]
+fn dca_sell_waits_while_the_price_is_below_the_floor() {
+    let s = setup();
+    s.v.deposit(&s.xlm.address, &(1_000 * U));
+    // Sell 100 XLM an hour for at least 0.20 USDC per XLM (limit: at most 5 XLM per USDC).
+    let id = s.v.place_dca(&s.xlm.address, &s.usdc.address, &(100 * U), &0, &HOUR, &(5 * U), &IMPACT, &0, &(NOW + DAY), &false);
+    // The market falls to 0.19: the plan waits, the schedule does not move.
+    s.router.set_price(&s.xlm.address, &s.usdc.address, &1_900_000);
+    assert!(s.v.try_execute(&s.filler, &id, &(100 * U), &None).is_err());
+    let sch = s.v.get_schedule(&id).unwrap();
+    assert_eq!((sch.done, sch.next), (0, NOW));
+    assert_eq!(s.v.reserved(&s.xlm.address), 100 * U);
+
+    // Two hours later the price is back: the part that was due fills, and the output goes to the wallet.
+    s.env.ledger().set_timestamp(NOW + 2 * HOUR);
+    s.router.set_price(&s.xlm.address, &s.usdc.address, &2_000_000);
+    let before = s.usdc.balance(&s.owner);
+    assert_eq!(s.v.execute(&s.filler, &id, &(100 * U), &None), 20 * U);
+    assert_eq!(s.usdc.balance(&s.owner) - before, 20 * U);
+    assert_eq!(s.v.get_schedule(&id).unwrap().next, NOW + 3 * HOUR);
+
+    // The owner stops the plan: the part that was waiting is free again.
+    s.v.cancel_order(&id);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Cancelled);
+    assert_eq!(s.v.reserved(&s.xlm.address), 0);
+    assert_eq!(s.v.balance(&s.xlm.address), 900 * U);
+    s.env.ledger().set_timestamp(NOW + 3 * HOUR);
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::OrderNotOpen))));
+}
+
+#[test]
+fn dca_without_a_price_limit_is_held_to_the_oracle_band() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // No limit and no band: refused.
+    assert_eq!(
+        s.v.try_place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &0, &HOUR, &MAX_PRICE, &IMPACT, &0, &(NOW + DAY), &true),
+        Err(Ok(ce(Error::InvalidPrice)))
+    );
+    // A band needs an oracle price for both tokens.
+    assert_eq!(
+        s.v.try_place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &0, &HOUR, &MAX_PRICE, &IMPACT, &300, &(NOW + DAY), &true),
+        Err(Ok(ce(Error::OracleUnavailable)))
+    );
+    s.oracle.set_price(&s.usdc.address, &10_000_000);
+    s.oracle.set_price(&s.xlm.address, &2_000_000);
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &0, &HOUR, &MAX_PRICE, &IMPACT, &300, &(NOW + DAY), &true);
+
+    // The pool is 20% off the oracle price (someone moved it): the part does not fill.
+    s.router.set_price(&s.usdc.address, &s.xlm.address, &(4 * U));
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(100 * U), &None), Err(Ok(ce(Error::PriceDeviation))));
+    assert_eq!(s.v.get_schedule(&id).unwrap().done, 0);
+    // 2% off is inside the 3% band.
+    s.router.set_price(&s.usdc.address, &s.xlm.address, &49_000_000);
+    assert_eq!(s.v.execute(&s.filler, &id, &(100 * U), &None), 490 * U);
+    assert_eq!(s.v.get_schedule(&id).unwrap().done, 1);
+}
+
+#[test]
+fn dca_rules() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let a = &s.usdc.address;
+    let b = &s.xlm.address;
+    let end = NOW + 30 * DAY;
+    let bad = |part: i128, every: u64, expiry: u64| s.v.try_place_dca(a, b, &part, &0, &every, &2_000_000, &IMPACT, &0, &expiry, &true);
+    assert_eq!(bad(100 * U, 59, end), Err(Ok(ce(Error::InvalidSchedule))));
+    assert_eq!(bad(100 * U, 29 * DAY, end), Err(Ok(ce(Error::InvalidSchedule))));
+    assert_eq!(bad(100 * U, DAY, NOW + 367 * DAY), Err(Ok(ce(Error::InvalidExpiry))));
+    assert_eq!(bad(0, DAY, end), Err(Ok(ce(Error::InvalidAmount))));
+    // The vault must cover the first part.
+    assert_eq!(bad(1_001 * U, DAY, end), Err(Ok(ce(Error::InsufficientFree))));
+    assert_eq!(
+        s.v.try_place_dca(a, b, &(100 * U), &0, &DAY, &2_000_000, &IMPACT, &10, &end, &true),
+        Err(Ok(ce(Error::InvalidBand)))
+    );
+    // New plans stop while orders are paused, like any new order.
+    s.guard.set_paused(&true);
+    assert_eq!(bad(100 * U, DAY, end), Err(Ok(ce(Error::Paused))));
+    s.guard.set_paused(&false);
+
+    // The schedule also binds a direct fill (`take`): the whole part, and not early.
+    let id = s.v.place_dca(a, b, &(100 * U), &0, &DAY, &2_000_000, &IMPACT, &0, &end, &true);
+    let payer = Address::generate(&s.env);
+    StellarAssetClient::new(&s.env, b).mint(&payer, &(5_000 * U));
+    assert_eq!(s.v.try_take(&payer, &id, &(50 * U), &(250 * U), &s.filler), Err(Ok(ce(Error::FillTooSmall))));
+    assert_eq!(s.v.take(&payer, &id, &(100 * U), &(500 * U), &s.filler), 500 * U);
+    assert_eq!(s.v.try_take(&payer, &id, &(100 * U), &(500 * U), &s.filler), Err(Ok(ce(Error::TooEarly))));
 }

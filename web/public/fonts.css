@@ -1,0 +1,6 @@
+/* The dealt pairing (Funnel Display, Funnel Sans, DM Mono), served from the site itself: the same files
+   Google Fonts serves (SIL Open Font License, fonts/OFL-*.txt), Latin subset, so no page view calls a third party. */
+@font-face { font-family: "Funnel Display"; font-style: normal; font-weight: 300 800; font-display: swap; src: url("fonts/funnel-display.woff") format("woff"); }
+@font-face { font-family: "Funnel Sans"; font-style: normal; font-weight: 300 800; font-display: swap; src: url("fonts/funnel-sans.woff") format("woff"); }
+@font-face { font-family: "DM Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/dm-mono-400.woff") format("woff"); }
+@font-face { font-family: "DM Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/dm-mono-500.woff") format("woff"); }
