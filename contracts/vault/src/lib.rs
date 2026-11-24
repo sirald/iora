@@ -1,4 +1,10 @@
-//! Iora vault, version 12: ONE multi-asset vault per user.
+//! Iora vault, version 13: ONE multi-asset vault per user.
+//!
+//! New in version 13 (on top of version 12): an order can be filled through ANY trading venue, not only Soroswap.
+//! - `fill_via`: the vault sends the amount being filled to a separate "filler" contract, which sells it wherever
+//!   the price is best (one venue, several at once, or through an intermediate token) and sends the proceeds
+//!   back. The vault trusts the filler with nothing: it counts what came back and requires at least what the
+//!   order's limit promises, as with `take`. If less arrives, the whole transaction is undone.
 //!
 //! New in version 12 (on top of version 11): an order has no latest expiry. It used to end within a year; now the
 //! owner picks any time in the future, or the far end of time for "until I cancel it". Nothing else changed.
@@ -42,7 +48,7 @@
 //! - The fill fee (since version 5) is unchanged: whoever fills an order receives a fee only out of output above
 //!   the limit, up to a fixed cap per fill that depends on the bought token. The owner always gets the limit.
 //!
-//! Guarantees that do not change: only the owner can withdraw; anyone can call `execute`, `take` or `cross`, but
+//! Guarantees that do not change: only the owner can withdraw; anyone can call `execute`, `take`, `cross` or `fill_via`, but
 //! the caller only chooses the order, the fill amount, where the fill comes from and the address that receives the fee; the factory
 //! (guard) can only stop new orders. Withdrawals, cancellations and fills of existing orders always work.
 #![no_std]
@@ -180,6 +186,13 @@ pub trait Peer {
     fn take(env: Env, payer: Address, order_id: u32, fill_amount: i128, pay_amount: i128, executor: Address) -> i128;
 }
 
+/// A filler contract (see `fill_via`): sells `amount` of `sell`, which the vault has just sent it, for `buy`
+/// along `route` and sends the proceeds to `to`. The route is opaque to the vault.
+#[contractclient(name = "SwapperClient")]
+pub trait Swapper {
+    fn swap(env: Env, sell: Address, buy: Address, amount: i128, to: Address, route: Vec<Val>) -> i128;
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -223,7 +236,7 @@ pub enum Error {
     InvalidPath = 28,
     /// `forget`: the vault still holds the token or an open order still sells it.
     TokenInUse = 29,
-    /// `take` / `cross`: a vault cannot pay itself.
+    /// `take` / `cross` / `fill_via`: a vault cannot pay itself.
     SelfFill = 30,
     /// Scheduled order: the next part is not due yet.
     TooEarly = 31,
@@ -836,6 +849,40 @@ impl Vault {
         settle(&env, &cfg, order_id, order, fill_amount, gross, min_out, oracle, executor)
     }
 
+    /// Fills an order through a filler contract instead of the built-in Soroswap route: the vault sends
+    /// `fill_amount` of the sold token to `filler`, calls its `swap` with `route`, and counts what arrived of
+    /// the bought token. Anyone can call this and choose the filler and the route; that needs no trust, because
+    /// the rules are those of `take`: the order must be open, the fill sizes and schedules are the same, a stop
+    /// order waits for its trigger and its oracle band, and the owner receives at least what the limit promises
+    /// for `fill_amount`, or the whole transaction is undone. The most a filler can ever touch is `fill_amount`.
+    /// (The price impact setting of the order applies to the Soroswap route of `execute` only.)
+    /// The fill fee works as in `execute`: only from output above the limit, at most `fees[buy]`, to `executor`.
+    /// Returns the amount of `buy` left for the owner (fee deducted).
+    pub fn fill_via(env: Env, executor: Address, order_id: u32, fill_amount: i128, filler: Address, route: Vec<Val>) -> i128 {
+        let cfg = config(&env);
+        let order = open_for_fill(&env, order_id, fill_amount);
+        let me = env.current_contract_address();
+        if filler == me {
+            panic_with_error!(&env, Error::SelfFill);
+        }
+        let min_out = min_out_for(fill_amount, order.limit_price);
+        let oracle = trigger_of(&env, &cfg, &order);
+
+        // 1) The sold token must be on hand: idle funds first, the rest is withdrawn from Blend.
+        hold_sold(&env, &cfg, &order.sell, fill_amount);
+
+        // 2) Hand exactly the fill amount to the filler and let it trade.
+        let sell = token::Client::new(&env, &order.sell);
+        let buy = token::Client::new(&env, &order.buy);
+        let buy_before = buy.balance(&me);
+        sell.transfer(&me, &filler, &fill_amount);
+        SwapperClient::new(&env, &filler).swap(&order.sell, &order.buy, &fill_amount, &me, &route);
+
+        // 3) Count what arrived instead of trusting the filler; then limit check, fee, accounting and output as in a swap.
+        let gross = buy.balance(&me) - buy_before;
+        settle(&env, &cfg, order_id, order, fill_amount, gross, min_out, oracle, executor)
+    }
+
     /// Sends the rewards Blend distributes (BLND) straight to the owner's wallet.
     pub fn claim_rewards(env: Env, reserve_token_ids: Vec<u32>) -> i128 {
         let cfg = config(&env);
@@ -906,7 +953,7 @@ impl Vault {
 
     /// Version of the vault code (keepers pick the `execute` signature from it).
     pub fn version(_env: Env) -> u32 {
-        12
+        13
     }
 
     /// The owner takes a token off the vault's list, freeing one of its MAX_TOKENS places. Only a token the

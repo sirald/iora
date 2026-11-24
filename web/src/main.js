@@ -2936,6 +2936,54 @@ function quoteSwap() {
   clearTimeout(SW.t);
   SW.t = setTimeout(doQuote, 250);
 }
+// ----- Market swaps go to the venue that quotes the most: Soroswap's pool or an Aquarius pool -----
+const AQUA_ROUTER = (import.meta.env.VITE_AQUA_ROUTER || "").trim();
+const u128 = (n) => nativeToScVal(BigInt(n), { type: "u128" });
+const aquaPoolsOf = new Map(); // "a|b" -> { at, list: [Uint8Array hash] }
+/** Aquarius wants a pool's tokens in address order (the raw contract ids compared as bytes). */
+function aquaTokens(a, b) {
+  const raw = (id) => StrKey.decodeContract(id);
+  const less = (x, y) => {
+    const p = raw(x), q = raw(y);
+    for (let i = 0; i < p.length; i++) if (p[i] !== q[i]) return p[i] < q[i];
+    return false;
+  };
+  return addrVec(less(a, b) ? [a, b] : [b, a]);
+}
+async function aquaPools(a, b) {
+  if (!AQUA_ROUTER) return [];
+  const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+  const c = aquaPoolsOf.get(key);
+  if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+  const list = [];
+  try {
+    const sim = await server.simulateTransaction(readCall(AQUA_ROUTER, "get_pools", [aquaTokens(a, b)]));
+    if (!rpc.Api.isSimulationError(sim) && sim.result) {
+      const map = sim.result.retval;
+      const entries = (typeof map.map === "function" ? map.map() : map.value ?? map._value) || [];
+      for (const e of entries) {
+        const kn = scValToNative(typeof e.key === "function" ? e.key() : e.key);
+        const hash = kn instanceof Uint8Array ? kn : Uint8Array.from(Object.values(kn));
+        if (hash.length === 32) list.push(hash);
+      }
+    }
+  } catch {}
+  aquaPoolsOf.set(key, { at: Date.now(), list });
+  return list;
+}
+/** The best Aquarius pool for this swap: { out, hash } or null. */
+async function aquaBest(tin, tout, amt) {
+  let best = null;
+  for (const hash of await aquaPools(tin, tout)) {
+    const r = await rawRead(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(amt)]);
+    if (r.ok && r.value !== undefined) {
+      const out = BigInt(r.value);
+      if (!best || out > best.out) best = { out, hash };
+    }
+  }
+  return best;
+}
+
 async function doQuote() {
   swSyms();
   const raw = String($("swap-in").value).trim().replace(",", ".");
@@ -2950,14 +2998,23 @@ async function doQuote() {
     return;
   }
   const amt = toUnits(raw);
-  const q = await read(C.router, "router_get_amounts_out", [i128(amt), addrVec(swPath())]);
-  if (!q.ok) {
+  const [tin, tout] = swPath();
+  const [q, aq] = await Promise.all([read(C.router, "router_get_amounts_out", [i128(amt), addrVec(swPath())]), aquaBest(tin, tout, amt).catch(() => null)]);
+  const soro = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+  if (soro === null && !aq) {
     $("swap-out").textContent = "0";
     note.textContent = "No quote right now. The pool may be too small for this amount.";
     note.className = "lp-note bad";
+    SW.venue = null;
     return;
   }
-  const out = BigInt(q.value[q.value.length - 1]);
+  // The venue that pays more gets the swap.
+  SW.venue = aq && (soro === null || aq.out > soro) ? { name: "Aquarius", hash: aq.hash } : { name: "Soroswap" };
+  const out = SW.venue.name === "Aquarius" ? aq.out : soro;
+  $("swap-route").textContent =
+    SW.venue.name === "Aquarius"
+      ? `Aquarius, testnet${soro !== null ? ` (${(((Number(aq.out) - Number(soro)) / Number(soro)) * 100).toFixed(2)}% more than Soroswap)` : ""}`
+      : `Soroswap, testnet${aq ? " (best of 2 venues)" : ""}`;
   SW.out = out;
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   $("swap-out").textContent = (Number(out) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 });
@@ -3041,13 +3098,23 @@ $("swap-go").onclick = async () => {
   const min = (SW.out * BigInt(Math.round((100 - SW.slip) * 100))) / 10000n;
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   const deadline = Math.floor(Date.now() / 1000) + 600;
-  const res = await call(
-    C.router,
-    "swap_exact_tokens_for_tokens",
-    [i128(amt), i128(min), addrVec(swPath()), addr(me), u64(deadline)],
-    `Swap ${fmt(amt, 2)} ${a} to ${b}`,
-    {},
-  );
+  const [tin, tout] = swPath();
+  const res =
+    SW.venue && SW.venue.name === "Aquarius"
+      ? await call(
+          AQUA_ROUTER,
+          "swap",
+          [addr(me), aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(SW.venue.hash), u128(amt), u128(min)],
+          `Swap ${fmt(amt, 2)} ${a} to ${b} on Aquarius`,
+          {},
+        )
+      : await call(
+          C.router,
+          "swap_exact_tokens_for_tokens",
+          [i128(amt), i128(min), addrVec(swPath()), addr(me), u64(deadline)],
+          `Swap ${fmt(amt, 2)} ${a} to ${b}`,
+          {},
+        );
   if (res) {
     $("swap-in").value = "";
     doQuote();

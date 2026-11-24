@@ -861,6 +861,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iora-filler"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "iora-vault"
 version = "0.1.0"
 dependencies = [

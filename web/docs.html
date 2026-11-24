@@ -59,6 +59,7 @@
             <li><a href="#sell">Buying and selling</a></li>
             <li><a href="#stop-loss">Take profit and stop loss</a></li>
             <li><a href="#orders">Limit orders</a></li>
+            <li><a href="#dca">DCA</a></li>
             <li><a href="#lifecycle">Order lifecycle</a></li>
             <li><a href="#yield">Where the yield comes from</a></li>
             <li><a href="#keepers">Keepers</a></li>
@@ -239,8 +240,8 @@
             <dt>Amount</dt><dd>The USDC (buy) or the coin (sell) set aside for the order. It is reserved from your available balance when you place the order.</dd>
             <dt>Limit</dt><dd>For a buy order, the most USDC you are willing to pay for 1 unit of the coin. For a sell order, the least USDC you accept for 1 unit. The order fills at this price or better, never worse.</dd>
             <dt>Minimum fill</dt><dd>The smallest piece the order may be filled in. Only the final remainder can be smaller. Left empty, the app uses a quarter of the amount.</dd>
-            <dt>Max price impact</dt><dd>How far a single fill may move the Soroswap pool price. If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
-            <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them. An order that is still open after one year ends by itself.</dd>
+            <dt>Max price impact</dt><dd>How far a single fill through the Soroswap pool may move that pool's price. If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
+            <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them; they have no end date. (An order in a vault opened before November 2026 still ends by itself after one year.)</dd>
           </dl>
           <h3>Price improvement</h3>
           <p>
@@ -257,6 +258,19 @@
             limit. Each piece is a separate transaction and each one meets your limit on its own. The orders list on the <i>Trade</i> page shows
             how much has filled and your average price.
           </p>
+        </section>
+
+        <section id="dca">
+          <h2>DCA (scheduled orders)</h2>
+          <p>A DCA plan buys or sells a fixed amount at a fixed interval, for example 10 USDC of a coin every 6 hours. You find it on the <i>DCA</i> tab of the order form. It is an ordinary order with a schedule, and the schedule is enforced by your vault contract, not by the keeper: nobody can fill a part before it is due, and a fill is always exactly one part.</p>
+          <dl class="terms">
+            <dt>Amount each time</dt><dd>What one buy spends (in USDC) or one sale sells (in the coin).</dd>
+            <dt>Interval</dt><dd>The time between two parts, from 1 minute to 28 days. The first part is due right away.</dd>
+            <dt>Stop after</dt><dd>Optional. Left empty, the plan runs for as long as your vault can cover the next part.</dd>
+            <dt>Price limit</dt><dd>Optional. A ceiling when buying, a floor when selling. While the market is beyond it the plan waits; a part that was due fills as soon as the price allows, and later parts keep their interval, so missed parts do not fill in a burst.</dd>
+          </dl>
+          <p>Only the next part is set aside. The rest of your balance stays free: it keeps earning, and you can withdraw it or place other orders with it. When your vault cannot cover the next part, the plan ends by itself; depositing later does not restart it. You stop a plan at any time with <i>Cancel</i> in the order list.</p>
+          <p>A plan without a price limit is still protected: each part must be within 3% of the oracle price at that moment, otherwise it is skipped until the pool price is back in line. This keeps someone from moving a pool to fill your part at a bad price.</p>
         </section>
 
         <section id="lifecycle">
@@ -320,6 +334,10 @@
             <li>Because the fee has to come out of that difference, the keeper waits until the price has passed your limit by enough to cover it. For most orders this is a tiny fraction of a percent. Very small orders are allowed, but they need a larger move past the limit before they fill.</li>
             <li>If the keeper is offline, orders simply wait. Your funds are unaffected, and cancelling and withdrawing do not need the keeper.</li>
           </ul>
+          <h3>Where an order fills</h3>
+          <p>
+            For every fill the keeper compares the Soroswap pool with the pools of other trading venues (on testnet: Aquarius) and takes the route that returns the most: one venue, or the amount split between two. Open orders of two Iora users that meet each other's price can also be filled against each other without any pool. Whichever route is used, your vault hands over only the amount being filled, counts what comes back, and undoes the whole transaction if that is less than your limit promises. The route is the keeper's choice; the limit is the contract's guarantee.
+          </p>
         </section>
 
         <section id="lend">
@@ -371,7 +389,7 @@
             <dt>Smart contract risk</dt>
             <dd>All vaults run the same code, so a bug could affect every vault. The contracts have not yet been independently audited.</dd>
             <dt>Swap and price risk</dt>
-            <dd>Fills use the Soroswap pool for the two tokens of the order, so a bug in Soroswap is also a risk. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
+            <dd>Fills go through a trading venue's pool for the two tokens of the order (Soroswap, or another venue when it pays more), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
             <dt>Oracle risk (stop loss)</dt>
             <dd>Stop loss orders rely on the price oracle of the Blend pool. If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
             <dt>Keeper risk</dt>

@@ -24,6 +24,8 @@ import {
   Asset,
   SorobanDataBuilder,
   TransactionBuilder,
+  StrKey,
+  contract,
   nativeToScVal,
   rpc,
   scValToNative,
@@ -54,6 +56,7 @@ const cfg = {
   ...readEnv(path.join(root, "testnet/old-factories.env")),
   ...readEnv(path.join(root, "testnet/markets.env")),
   ...readEnv(path.join(root, "testnet/batch.env")),
+  ...readEnv(path.join(root, "testnet/filler.env")),
   ...readEnv(path.join(here, ".env")),
   ...process.env,
 };
@@ -129,6 +132,16 @@ const BATCH_WAIT_MS = Number(cfg.BATCH_WAIT_MS || 400);
 // ----- crossing: two opposite orders in version 10 vaults fill each other, with no pool in between -----
 // CROSS=off in the settings file switches it off; every order is then filled through the pool as before.
 const CROSS = String(cfg.CROSS || "on").toLowerCase() !== "off";
+// ----- other venues: version 13 vaults can fill through the filler contract (testnet/filler.env) -----
+// FILLER: the filler contract. AQUA_ROUTER: the Aquarius router on this network. VENUES=off switches the whole
+// thing off; orders then fill through Soroswap only, as before.
+const FILLER = (cfg.FILLER || "").trim();
+const AQUA_ROUTER = (cfg.AQUA_ROUTER || "").trim();
+// PHOENIX_MULTIHOP: Phoenix's multihop contract on this network (optional).
+const PHOENIX_MULTIHOP = (cfg.PHOENIX_MULTIHOP || "").trim();
+const VENUES = !!FILLER && (!!AQUA_ROUTER || !!PHOENIX_MULTIHOP) && String(cfg.VENUES || "on").toLowerCase() !== "off";
+// A route through the filler is used only if it beats Soroswap alone by at least this much (it costs more network fee).
+const VENUE_EDGE_BPS = BigInt(cfg.VENUE_EDGE_BPS || 5);
 const WORKER_START_XLM = String(cfg.WORKER_START_XLM || "10");
 const WORKER_MIN_XLM = Number(cfg.WORKER_MIN_XLM || 3);
 const workerKey = (i) =>
@@ -138,6 +151,7 @@ const signers = [{ kp, chain: Promise.resolve(), queued: 0 }];
 
 const args = process.argv.slice(2);
 const ONCE = args.includes("--once");
+const VENUE_CHECK = args.includes("--venue-check"); // read-only check of the other venues; see venueCheck()
 const DO_TTL = args.includes("--ttl");
 
 const TG_TOKEN = cfg.TELEGRAM_BOT_TOKEN || "";
@@ -707,18 +721,21 @@ async function pair(vault) {
   // version; version 7 vaults do not have this function.
   // Version 10: the vault also has `take` and `cross` (fills without a pool).
   // Version 11: scheduled orders (DCA); `get_schedule` tells which orders fill in timed parts.
+  // Version 13: `fill_via` (a fill through the filler contract, any venue).
   let v8 = false;
   let v10 = false;
   let v11 = false;
+  let v13 = false;
   if (fees !== undefined) {
     const ver = await read(vault, "version");
     v8 = ver.ok && Number(ver.value) >= 8;
     v10 = ver.ok && Number(ver.value) >= 10;
     v11 = ver.ok && Number(ver.value) >= 11;
+    v13 = ver.ok && Number(ver.value) >= 13;
   }
   const p =
     fees !== undefined
-      ? { v7: true, v5: true, v8, v10, v11, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
+      ? { v7: true, v5: true, v8, v10, v11, v13, fees: Object.fromEntries(Object.entries(fees).map(([k, v]) => [String(k), BigInt(v)])) }
       : { tin: String(r.value.usdc), tout: String(r.value.xlm), v5: fee !== undefined, fee: fee !== undefined ? BigInt(fee) : 0n };
   pairOf.set(vault, p);
   return p;
@@ -956,6 +973,305 @@ async function bestRoute(amount, tin, tout, vias) {
 
 const minOut = (fill, limit) => (fill * SCALE + limit - 1n) / limit;
 
+// ---------------------------------------------------------------------------
+// Other venues (version 13 vaults): Aquarius pools beside Soroswap, alone or splitting one fill between the two
+// ---------------------------------------------------------------------------
+// The vault hands the fill amount to the filler contract, which runs a list of plain contract calls (the route)
+// and sends the proceeds back; the vault checks the limit on what arrived. So a wrong route can only fail in
+// simulation (no fee is paid), and everything here is best effort: on any doubt the order fills through
+// Soroswap as before.
+const addrVal = (a) => new Address(a).toScVal();
+const u128 = (n) => nativeToScVal(BigInt(n), { type: "u128" });
+const u64v = (n) => nativeToScVal(BigInt(n), { type: "u64" });
+const symVal = (x) => xdr.ScVal.scvSymbol(x);
+/** A contract struct as an ScVal map (keys must be in alphabetical order). */
+// (nativeToScVal would make the keys strings, which a contract struct does not accept: they must be symbols.)
+const structVal = (o) =>
+  xdr.ScVal.scvMap(Object.keys(o).sort().map((k) => new xdr.ScMapEntry({ key: symVal(k), val: o[k] })));
+const xget = (o, n) => (typeof o[n] === "function" ? o[n]() : o[n]); // XDR fields: functions or properties, by SDK version
+
+const voidVal = () => xdr.ScVal.scvVoid();
+/** An XDR value in its JSON form ({"address": "C..."}, {"i128": "5"}, {"u32": 1}); this SDK prints XDR that way. */
+const jv = (v) => {
+  try {
+    return JSON.parse(JSON.stringify(v, (k, x) => (typeof x === "bigint" ? String(x) : x)));
+  } catch {
+    return {};
+  }
+};
+const venueState = { said: new Set(), auth: new Map(), offUntil: 0, lastEntry: "", inputs: new Map() };
+function venueSay(key, text) {
+  if (venueState.said.has(key)) return;
+  venueState.said.add(key);
+  log(`venues: ${text}`);
+}
+/** The argument names of a function of a deployed contract, in order (read once), or null. */
+async function inputsOf(contractId, func) {
+  const key = `${contractId}.${func}`;
+  if (venueState.inputs.has(key)) return venueState.inputs.get(key);
+  let names = null;
+  try {
+    const client = await contract.Client.from({ contractId, rpcUrl: RPC_URL, networkPassphrase: PASSPHRASE });
+    const f = client.spec.funcs().find((x) => String(xget(x, "name")) === func);
+    names = f ? (xget(f, "inputs") || []).map((i) => String(xget(i, "name"))) : null;
+  } catch {}
+  venueState.inputs.set(key, names);
+  return names;
+}
+/** Arguments by name, in the order the contract lists them; null if it wants one we do not know. */
+async function argsFor(venue, contractId, func, known) {
+  const names = await inputsOf(contractId, func);
+  if (!names) {
+    venueSay(`spec:${contractId}.${func}`, `${venue}: the function ${func} could not be read from ${short(contractId)}; ${venue} is not used`);
+    return null;
+  }
+  const args = [];
+  for (const n of names) {
+    if (!(n in known)) {
+      venueSay(`arg:${contractId}.${func}.${n}`, `${venue}: ${func} takes an argument this keeper does not know ("${n}"); ${venue} is not used`);
+      return null;
+    }
+    args.push(known[n]);
+  }
+  return args;
+}
+
+// ----- Aquarius: a router with several pools per pair -----
+const aquaPoolCache = new Map();
+/** Aquarius wants a pool's tokens in address order (the raw contract ids compared as bytes). */
+function aquaTokens(a, b) {
+  const sorted = [a, b].sort((x, y) => Buffer.compare(StrKey.decodeContract(x), StrKey.decodeContract(y)));
+  return xdr.ScVal.scvVec(sorted.map(addrVal));
+}
+const aquaVenue = {
+  name: "Aquarius",
+  on: () => !!AQUA_ROUTER,
+  /** The pools of a pair: [{ id, hash }] (read again every 10 minutes). */
+  async options(a, b) {
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    const c = aquaPoolCache.get(key);
+    if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+    const list = [];
+    try {
+      const sim = await server.simulateTransaction(readTx(AQUA_ROUTER, "get_pools", [aquaTokens(a, b)]));
+      if (!rpc.Api.isSimulationError(sim) && sim.result) {
+        const map = sim.result.retval;
+        const entries = (typeof map.map === "function" ? map.map() : map.value ?? map._value) || [];
+        for (const e of entries) {
+          const kn = scValToNative(xget(e, "key"));
+          const hash = Buffer.from(kn instanceof Uint8Array ? kn : Object.values(kn));
+          if (hash.length === 32) list.push({ id: hash.toString("hex"), hash });
+        }
+      }
+    } catch {}
+    aquaPoolCache.set(key, { at: Date.now(), list });
+    return list;
+  },
+  async quote(opt, tin, tout, amount) {
+    const r = await read(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), addrVal(tin), addrVal(tout), xdr.ScVal.scvBytes(opt.hash), u128(amount)]);
+    return r.ok && r.value !== undefined ? BigInt(r.value) : null;
+  },
+  async call(user, opt, tin, tout, amount) {
+    const args = await argsFor("Aquarius", AQUA_ROUTER, "swap", {
+      user: addrVal(user),
+      tokens: aquaTokens(tin, tout),
+      token_in: addrVal(tin),
+      token_out: addrVal(tout),
+      pool_index: xdr.ScVal.scvBytes(opt.hash),
+      in_amount: u128(amount),
+      out_min: u128(1),
+    });
+    return args && { contract: AQUA_ROUTER, func: "swap", args };
+  },
+};
+
+// ----- Phoenix: one pool per pair, reached through its multihop contract -----
+const phoenixOps = (tin, tout) => xdr.ScVal.scvVec([structVal({ offer_asset: addrVal(tin), ask_asset: addrVal(tout), ask_asset_min_amount: voidVal() })]);
+const PHOENIX_XYK = () => u32(0); // PoolType::Xyk
+const phoenixHas = new Map();
+const phoenixVenue = {
+  name: "Phoenix",
+  on: () => !!PHOENIX_MULTIHOP,
+  /** One entry if Phoenix has a pool for the pair (asked again every 10 minutes), none otherwise. */
+  async options(a, b) {
+    const key = `${a}|${b}`;
+    const c = phoenixHas.get(key);
+    if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+    const q = await this.quote(null, a, b, VENUE_PROBE);
+    const list = q !== null && q > 0n ? [{ id: "pool" }] : [];
+    phoenixHas.set(key, { at: Date.now(), list });
+    return list;
+  },
+  async quote(opt, tin, tout, amount) {
+    const args = await argsFor("Phoenix", PHOENIX_MULTIHOP, "simulate_swap", { operations: phoenixOps(tin, tout), amount: i128(amount), pool_type: PHOENIX_XYK() });
+    if (!args) return null;
+    const r = await read(PHOENIX_MULTIHOP, "simulate_swap", args);
+    return r.ok && r.value && r.value.ask_amount !== undefined ? BigInt(r.value.ask_amount) : null;
+  },
+  async call(user, opt, tin, tout, amount) {
+    const args = await argsFor("Phoenix", PHOENIX_MULTIHOP, "swap", {
+      recipient: addrVal(user),
+      operations: phoenixOps(tin, tout),
+      max_spread_bps: voidVal(),
+      amount: i128(amount),
+      pool_type: PHOENIX_XYK(),
+      deadline: voidVal(),
+      max_allowed_fee_bps: voidVal(),
+    });
+    return args && { contract: PHOENIX_MULTIHOP, func: "swap", args };
+  },
+};
+const venueList = () => [aquaVenue, phoenixVenue].filter((v) => v.on());
+
+// ----- what a venue does in its caller's name -----
+const VENUE_PROBE = 100_000n; // 0.01 token
+/** One authorized call as { contract, func, args (ScVal[]), subs }, two levels deep at most (null if deeper). */
+function authNode(inv, depth) {
+  const cf = inv.function && inv.function.contractFn;
+  if (!cf) return null;
+  const subs = [];
+  for (const sub of inv.subInvocations || []) {
+    if (depth >= 1) return null;
+    const n = authNode(sub, depth + 1);
+    if (!n) return null;
+    subs.push(n);
+  }
+  return { contract: String(jv(cf.contractAddress)), func: String(jv(cf.functionName)), args: [...cf.args], subs };
+}
+/** Read from a simulation with the keeper as the caller and a small amount. */
+async function venueLearn(venue, opt, tin, tout) {
+  const c = await venue.call(kp.publicKey(), opt, tin, tout, VENUE_PROBE);
+  if (!c) return null;
+  const sim = await server.simulateTransaction(readTx(c.contract, c.func, c.args));
+  if (rpc.Api.isSimulationError(sim) || !sim.result) return null; // typically: the keeper holds none of the token
+  const list = [];
+  for (const entry of sim.result.auth || []) {
+    venueState.lastEntry = JSON.stringify(jv(entry.rootInvocation && entry.rootInvocation.subInvocations)).slice(0, 1600);
+    for (const sub of (entry.rootInvocation && entry.rootInvocation.subInvocations) || []) {
+      const n = authNode(sub, 0);
+      if (!n) return null;
+      list.push(n);
+    }
+  }
+  return list;
+}
+/** The same template for the opposite direction in the same pool: the two tokens and the two pool indexes change places. */
+function venueMirror(list, tin, tout) {
+  const flip = (id) => (id === tin ? tout : id === tout ? tin : id);
+  const flipArgs = (args) => {
+    const u32s = args.map((a, i) => (jv(a).u32 !== undefined ? i : -1)).filter((i) => i >= 0);
+    const out = args.map((a) => {
+      const j = jv(a);
+      return typeof j.address === "string" && (j.address === tin || j.address === tout) ? addrVal(flip(j.address)) : a;
+    });
+    if (u32s.length === 2) [out[u32s[0]], out[u32s[1]]] = [out[u32s[1]], out[u32s[0]]];
+    return out;
+  };
+  const node = (n) => ({ contract: flip(n.contract), func: n.func, args: flipArgs(n.args), subs: n.subs.map(node) });
+  return list.map(node);
+}
+/**
+ * The calls a venue's swap makes in its caller's name, as a template (the keeper's address stands for "the
+ * caller", the probe amount for "the amount"). Read from a simulation; if the keeper holds none of the sold
+ * token, the opposite direction is read instead and mirrored. null when neither works (tried again in 30 minutes).
+ */
+async function venueTemplate(venue, opt, tin, tout) {
+  const key = `${venue.name}:${tin}:${opt.id}`;
+  const c = venueState.auth.get(key);
+  if (c && (c.list ? Date.now() - c.at < 6 * 3600_000 : Date.now() - c.at < 30 * 60_000)) return c.list;
+  let list = null;
+  try {
+    list = await venueLearn(venue, opt, tin, tout);
+    if (!list) {
+      const other = await venueLearn(venue, opt, tout, tin);
+      if (other) {
+        list = venueMirror(other, tin, tout);
+        list.mirrored = true;
+      }
+    }
+  } catch (e) {
+    venueSay(`learn:${key}`, `could not read how ${venue.name} takes ${sym(tin)}: ${e.message}`);
+  }
+  if (!list) venueSay(`none:${key}`, `how ${venue.name} takes ${sym(tin)} could not be read in either direction; it is not used for that for now`);
+  venueState.auth.set(key, { at: Date.now(), list });
+  return list;
+}
+/** The template with the filler as caller and the real amount, as `Auth` values for the filler contract. */
+function venueAuths(template, amount) {
+  const me = kp.publicKey();
+  const subst = (args) =>
+    args.map((a) => {
+      const j = jv(a);
+      if (j.address === me) return addrVal(FILLER);
+      if (j.i128 !== undefined && typeof j.i128 !== "object" && BigInt(j.i128) === VENUE_PROBE) return i128(amount);
+      if (j.u128 !== undefined && typeof j.u128 !== "object" && BigInt(j.u128) === VENUE_PROBE) return u128(amount);
+      return a;
+    });
+  const leaf = (n) => structVal({ contract: addrVal(n.contract), func: symVal(n.func), args: xdr.ScVal.scvVec(subst(n.args)) });
+  return template.map((n) =>
+    structVal({ contract: addrVal(n.contract), func: symVal(n.func), args: xdr.ScVal.scvVec(subst(n.args)), subs: xdr.ScVal.scvVec(n.subs.map(leaf)) }),
+  );
+}
+/** One step of a filler route as an ScVal (`Call` in contracts/filler). */
+const callVal = (contractId, func, args, auths) =>
+  structVal({ contract: addrVal(contractId), func: symVal(func), args: xdr.ScVal.scvVec(args), auths: xdr.ScVal.scvVec(auths) });
+
+/**
+ * The best way to sell `fill` of `tin` for `tout` that involves another venue: the whole fill in the venue pool
+ * that quotes the most, or a split between that pool and the direct Soroswap pool (25, 50 or 75% on the venue).
+ * `only` (a venue name) and `forceShare` are for the check command. Returns { q, route (ScVal), text } or null.
+ */
+async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
+  if (!VENUES || Date.now() < venueState.offUntil) return null;
+  try {
+    // the venue pool that gives the most for the whole fill
+    let best = null;
+    for (const venue of venueList()) {
+      if (only && venue.name !== only) continue;
+      for (const opt of await venue.options(tin, tout)) {
+        const q = await venue.quote(opt, tin, tout, fill);
+        if (q !== null && q > 0n && (!best || q > best.q)) best = { venue, opt, q };
+      }
+    }
+    if (!best) return null;
+    const { venue, opt } = best;
+    const template = await venueTemplate(venue, opt, tin, tout);
+    if (!template) return null;
+    let pick = { q: best.q, venueAmt: fill, soroAmt: 0n };
+    const soroPool = await poolOf(tin, tout);
+    if (forceShare !== null && forceShare < 100n) pick = { q: 0n, venueAmt: fill, soroAmt: 0n }; // a check asks for exactly this split
+    if (soroPool && forceShare !== 100n) {
+      for (const share of forceShare !== null ? [forceShare] : [75n, 50n, 25n]) {
+        const a = (fill * share) / 100n;
+        const b = fill - a;
+        const [qa, qb] = await Promise.all([venue.quote(opt, tin, tout, a), quotePath(b, [tin, tout])]);
+        if (qa !== null && qb !== null && qa + qb > pick.q) pick = { q: qa + qb, venueAmt: a, soroAmt: b };
+      }
+    }
+    const steps = [];
+    const c = await venue.call(FILLER, opt, tin, tout, pick.venueAmt);
+    if (!c) return null;
+    steps.push(callVal(c.contract, c.func, c.args, venueAuths(template, pick.venueAmt)));
+    if (pick.soroAmt > 0n) {
+      const deadline = Math.floor(Date.now() / 1000) + 300;
+      steps.push(
+        callVal(
+          ROUTER,
+          "swap_exact_tokens_for_tokens",
+          [i128(pick.soroAmt), i128(0), xdr.ScVal.scvVec([addrVal(tin), addrVal(tout)]), addrVal(FILLER), u64v(deadline)],
+          [structVal({ contract: addrVal(tin), func: symVal("transfer"), args: xdr.ScVal.scvVec([addrVal(FILLER), addrVal(soroPool.pair), i128(pick.soroAmt)]), subs: xdr.ScVal.scvVec([]) })],
+        ),
+      );
+    }
+    const text = pick.soroAmt > 0n ? `${venue.name} ${fmt(pick.venueAmt)} + Soroswap ${fmt(pick.soroAmt)}` : venue.name;
+    return { q: pick.q, route: xdr.ScVal.scvVec(steps), text };
+  } catch (e) {
+    venueState.offUntil = Date.now() + 10 * 60_000;
+    log(`venues: ${e.message}; other venues are skipped for 10 minutes`);
+    return null;
+  }
+}
+
 /** Same as the contract's price impact calculation. */
 async function impactBps(fill, tin, tout, via = null) {
   const probe = fill / 100n;
@@ -1055,7 +1371,9 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   const lc = localCheck.get(lk);
   const est = lc && lc.offUntil > Date.now() ? null : await localBest(smallest, tin, tout, vias);
   const trusted = !!(lc && lc.okAt && Date.now() - lc.okAt < LOCAL_RECHECK_MS);
-  if (est !== null && trusted && (est * 1005n) / 1000n + 2n < minOut(smallest, limit)) {
+  // With other venues in play a Soroswap price a little short of the limit does not rule the order out.
+  const slack = VENUES && pc.v13 ? 1030n : 1005n;
+  if (est !== null && trusted && (est * slack) / 1000n + 2n < minOut(smallest, limit)) {
     localSkips++;
     return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, est, limit));
   }
@@ -1087,18 +1405,27 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       log(`the local price estimate was off for ${sym(tin)}->${sym(tout)} (local ${est}, network ${qSmall}); this pair is quoted over the network for 30 min`);
     }
   }
-  if (qSmall < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, qSmall, limit));
+  const useVenues = VENUES && pc.v13;
+  if (qSmall < minOut(smallest, limit)) {
+    // Soroswap alone does not reach the limit; another venue might.
+    const alt = useVenues ? await venueRoute(smallest, tin, tout) : null;
+    if (!alt || alt.q < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, alt && alt.q > qSmall ? alt.q : qSmall, limit));
+  }
 
   let note = "";
   let rejected = null; // the first fill the contract rejected (smaller ones are tried in the same round)
   for (const fill of sizes) {
     const route = fill === smallest ? rSmall : await bestRoute(fill, tin, tout, vias);
-    const q = route ? route.q : null;
+    const qSoro = route ? route.q : null;
     const via = route ? route.via : null;
-    if (q === null) {
+    if (qSoro === null) {
       log(`${tag} no price available`);
       return "error";
     }
+    // Another venue (or a split) is taken only if it clearly beats Soroswap alone.
+    let alt = useVenues ? await venueRoute(fill, tin, tout) : null;
+    if (alt && alt.q * BPS < qSoro * (BPS + VENUE_EDGE_BPS)) alt = null;
+    let q = alt ? alt.q : qSoro;
     if (q < minOut(fill, limit)) {
       note = note || priceNoteFor(tin, tout, fill, q, limit);
       continue;
@@ -1109,6 +1436,45 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     if (fee > 0n && q - minOut(fill, limit) < fee) {
       note = note || `the limit is met but the fill fee (${fmt(fee)} ${sym(tout)}) is not covered yet (fill ${fmt(fill)})`;
       continue;
+    }
+    if (alt) {
+      const ra = await write(vault, "fill_via", [new Address(kp.publicKey()).toScVal(), u32(o.id), i128(fill), addrVal(FILLER), alt.route], true);
+      if (ra.ok) {
+        dirty.add(vault);
+        if (sch) schedules.delete(key);
+        stats.fills++;
+        stuck.delete(key);
+        if (ra.fee !== null) stats.feesStroop += ra.fee;
+        log(`FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} via ${alt.text} (Soroswap alone: ${fmt(qSoro)}) fee=${ra.fee !== null ? fmt(ra.fee) : "?"} XLM tx=${ra.hash}`);
+        const left = remaining - fill;
+        await notify(
+          `${side === "buy" ? "Buy" : "Sell"} order filled: vault ${short(vault)} #${o.id}\n` +
+            `${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} (${alt.text})` +
+            (left > 0n ? `\nLeft: ${fmt(left)} ${sym(tin)}` : "\nThe order is completely filled.") +
+            `\nhttps://stellar.expert/explorer/testnet/tx/${ra.hash}`,
+        );
+        return "filled";
+      }
+      if (ra.retry) {
+        log(`${tag}: ${ra.error}; it will be tried again on the next ledger`);
+        return "busy";
+      }
+      // The other venue did not work out (the price moved, or the route was refused): Soroswap alone, as before.
+      const why = `${alt.text} route refused (${errText(ra)})`;
+      if (!lastNote.has(`venue:${key}`) || Date.now() - lastNote.get(`venue:${key}`).at > 10 * 60_000) {
+        lastNote.set(`venue:${key}`, { at: Date.now() });
+        log(`${tag} ${why}; trying Soroswap alone`);
+      }
+      alt = null;
+      q = qSoro;
+      if (q < minOut(fill, limit)) {
+        note = note || priceNoteFor(tin, tout, fill, q, limit);
+        continue;
+      }
+      if (fee > 0n && q - minOut(fill, limit) < fee) {
+        note = note || `the limit is met but the fill fee (${fmt(fee)} ${sym(tout)}) is not covered yet (fill ${fmt(fill)})`;
+        continue;
+      }
     }
     if (maxImpact < BPS) {
       const imp = await impactBps(fill, tin, tout, via);
@@ -1611,7 +1977,73 @@ async function scan() {
   return { vaults, filled, open };
 }
 
+/**
+ * `node keeper.js --venue-check [VAULT ORDER_ID]`: simulation only, nothing is signed or sent.
+ * Shows whether the other venues are usable here: the Aquarius pools of USDC/XLM, how its router's swap is called,
+ * whether the keeper could learn what a swap does in its caller's name, and quotes beside Soroswap. With a vault
+ * and an open order it also simulates filling that order through the filler, all on Aquarius and split 50/50.
+ * There "LimitNotMet" is a GOOD answer for an order whose limit is far from the market: the route ran and
+ * delivered, only the price was not enough.
+ */
+async function venueCheck() {
+  const say = (t) => console.log(t);
+  say(`filler        ${FILLER || "(not set: testnet/filler.env)"}`);
+  say(`Aquarius      ${AQUA_ROUTER || "(not set)"}`);
+  say(`Phoenix       ${PHOENIX_MULTIHOP || "(not set)"}`);
+  say(`venues        ${VENUES ? "on" : "OFF"}`);
+  if (!VENUES) return;
+  const show = (x) => `${short(x.contract)}.${x.func}${x.subs && x.subs.length ? ` > ${x.subs.map(show).join(", ")}` : ""}`;
+  for (const [tin, tout, amount] of [[USDC, XLM, 100_000_000n], [XLM, USDC, 500_000_000n]]) {
+    say(`\n${sym(tin)} -> ${sym(tout)}, ${fmt(amount)} ${sym(tin)}`);
+    say(`  Soroswap quote: ${(await quotePath(amount, [tin, tout])) ?? "failed"}`);
+    for (const venue of venueList()) {
+      const opts = await venue.options(tin, tout);
+      say(`  ${venue.name}: ${opts.length} pool(s)`);
+      for (const opt of opts) {
+        const q = await venue.quote(opt, tin, tout, amount);
+        say(`    ${String(opt.id).slice(0, 12)}  quote ${q ?? "none (no pool for this pair, or it cannot be read)"}`);
+        if (q === null) continue;
+        const t = await venueTemplate(venue, opt, tin, tout);
+        say(`      in its caller's name: ${t ? `${t.mirrored ? "(read from the opposite direction and mirrored) " : "(read from a simulation) "}${t.map(show).join("; ") || "nothing"}` : "UNKNOWN"}`);
+      }
+    }
+    const r = await venueRoute(amount, tin, tout);
+    say(`  best route with another venue: ${r ? `${r.text} -> ${fmt(r.q)} ${sym(tout)}` : "none"}`);
+  }
+  const i = args.indexOf("--venue-check");
+  const vault = args[i + 1];
+  const id = Number(args[i + 2]);
+  if (!vault || !Number.isInteger(id)) return say("\n(no vault and order given: the fill itself was not simulated)");
+  const o = await read(vault, "get_order", [u32(id)]);
+  if (!o.ok) return say(`\norder #${id} of ${short(vault)} cannot be read: ${errText(o)}`);
+  const left = BigInt(o.value.amount_in) - BigInt(o.value.filled_in);
+  const tin = String(o.value.sell);
+  const tout = String(o.value.buy);
+  say(`\norder #${id} of ${short(vault)}: ${fmt(left)} ${sym(tin)} left, sells for ${sym(tout)}`);
+  for (const venue of venueList()) {
+    for (const [label, share] of [[`all on ${venue.name}`, 100n], [`half ${venue.name}, half Soroswap`, 50n]]) {
+      const r = await venueRoute(left, tin, tout, share, venue.name);
+      if (!r) {
+        say(`  ${label}: no route (no pool for this pair there, or it could not be read)`);
+        continue;
+      }
+      const sim = await server.simulateTransaction(readTx(vault, "fill_via", [new Address(kp.publicKey()).toScVal(), u32(id), i128(left), addrVal(FILLER), r.route]));
+      if (!rpc.Api.isSimulationError(sim)) {
+        say(`  ${label} (${r.text}): ROUTE WORKS, the fill would give ${fmt(BigInt(scValToNative(sim.result.retval)))} ${sym(tout)}`);
+        continue;
+      }
+      const code = errCode(sim.error);
+      if (code === 8) say(`  ${label} (${r.text}, quote ${fmt(r.q)}): ROUTE WORKS (the swap ran; only the order's limit is not met, as expected for a far limit)`);
+      else say(`  ${label} (${r.text}): FAILED: ${ERR[code] || ""} ${String(sim.error).replace(/\s+/g, " ").slice(0, 900)}`);
+    }
+  }
+}
+
 async function main() {
+  if (VENUE_CHECK) {
+    await venueCheck();
+    process.exit(0);
+  }
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   if (ONCE) {
     let last;

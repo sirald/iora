@@ -18,6 +18,8 @@ source ../testnet/factory.env || { echo "testnet/factory.env not found"; exit 1;
 [ -f ../testnet/markets.env ] && source ../testnet/markets.env
 # Other coins that trade against USDC (BTC, EURC ...): set up by scripts/create-test-markets.sh
 [ -f ../testnet/pairs.env ] && source ../testnet/pairs.env
+# Other trading venues (the Aquarius router): the Market tab swaps where the quote is best
+[ -f ../testnet/filler.env ] && source ../testnet/filler.env
 for v in FACTORY USDC XLM ROUTER POOL; do
   [ -n "${!v}" ] || { echo "Missing setting: $v (testnet/*.env). The site was not built."; exit 1; }
 done
@@ -37,6 +39,7 @@ VITE_UTIL_ENFORCE=${UTIL_ENFORCE:-0}
 VITE_USDC=$USDC
 VITE_XLM=$XLM
 VITE_ROUTER=$ROUTER
+VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56
 EOF

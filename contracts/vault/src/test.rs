@@ -875,7 +875,7 @@ fn fill_through_an_intermediate_token() {
 #[test]
 fn version_is_reported() {
     let s = setup();
-    assert_eq!(s.v.version(), 12);
+    assert_eq!(s.v.version(), 13);
 }
 
 #[test]
@@ -1258,4 +1258,78 @@ fn an_order_can_stay_open_for_as_long_as_the_owner_wants() {
     let third = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &u64::MAX, &true);
     s.env.set_auths(&[]);
     assert!(s.v.try_cancel_order(&third).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Fills through a filler contract (any venue)
+// ---------------------------------------------------------------------------
+
+/// A stand-in filler: pays `rate` of the bought token per token sold (7 decimals) out of its own stock and keeps
+/// what it was sent. The real filler trades on venues; the vault cannot tell the difference and does not need to.
+#[contract]
+pub struct MockFiller;
+
+#[contractimpl]
+impl MockFiller {
+    pub fn set_rate(env: Env, rate: i128) {
+        env.storage().instance().set(&symbol_short!("rate"), &rate);
+    }
+
+    pub fn swap(env: Env, sell: Address, buy: Address, amount: i128, to: Address, route: Vec<Val>) -> i128 {
+        let _ = (sell, route);
+        let rate: i128 = env.storage().instance().get(&symbol_short!("rate")).unwrap_or(0);
+        let out = amount * rate / U;
+        token::Client::new(&env, &buy).transfer(&env.current_contract_address(), &to, &out);
+        out
+    }
+}
+
+#[test]
+fn fill_through_a_filler_contract() {
+    let s = setup();
+    let fid = s.env.register(MockFiller, ());
+    let f = MockFillerClient::new(&s.env, &fid);
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&fid, &(100_000 * U));
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // Two orders: 400 and 100 USDC at no more than 0.20 USDC per XLM.
+    let a = s.v.place_order(&s.usdc.address, &s.xlm.address, &(400 * U), &2_000_000, &(400 * U), &IMPACT, &(NOW + DAY), &true);
+    let b = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    let route: Vec<Val> = Vec::new(&s.env);
+
+    // Nobody signs anything from here on.
+    s.env.set_auths(&[]);
+    // The filler found 5.2 XLM per USDC somewhere (the pool gives 5): the owner gets all of it.
+    f.set_rate(&52_000_000);
+    assert_eq!(s.v.fill_via(&s.filler, &a, &(400 * U), &fid, &route), 2_080 * U);
+    assert_eq!(s.v.balance(&s.xlm.address), 2_080 * U);
+    assert_eq!(s.v.balance(&s.usdc.address), 600 * U);
+    assert_eq!(s.usdc.balance(&fid), 400 * U);
+    assert_eq!(s.v.get_order(&a).status, OrderStatus::Filled);
+    assert_eq!(s.v.reserved(&s.usdc.address), 100 * U);
+
+    // A filler that returns less than the limit promises (4.9 per USDC): refused, and nothing moves.
+    f.set_rate(&49_000_000);
+    assert_eq!(s.v.try_fill_via(&s.filler, &b, &(100 * U), &fid, &route), Err(Ok(ce(Error::LimitNotMet))));
+    assert_eq!(s.usdc.balance(&fid), 400 * U);
+    assert_eq!(s.v.balance(&s.usdc.address), 600 * U);
+    assert_eq!(s.v.get_order(&b).status, OrderStatus::Open);
+    // The usual fill rules hold: not more than is left, and the vault cannot be its own filler.
+    assert_eq!(s.v.try_fill_via(&s.filler, &b, &(200 * U), &fid, &route), Err(Ok(ce(Error::FillTooLarge))));
+    assert_eq!(s.v.try_fill_via(&s.filler, &b, &(100 * U), &s.v.address, &route), Err(Ok(ce(Error::SelfFill))));
+}
+
+#[test]
+fn filler_fill_pays_the_fee_only_from_what_beats_the_limit() {
+    // Fee cap 0.1 XLM when XLM is bought.
+    let s = setup_with(FEE, 0);
+    let fid = s.env.register(MockFiller, ());
+    let f = MockFillerClient::new(&s.env, &fid);
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&fid, &(100_000 * U));
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &true);
+    let route: Vec<Val> = Vec::new(&s.env);
+    f.set_rate(&52_000_000);
+    // 520 XLM arrive, the limit promises 500: the executor gets the capped fee, the owner the rest.
+    assert_eq!(s.v.fill_via(&s.filler, &id, &(100 * U), &fid, &route), 520 * U - FEE);
+    assert_eq!(s.xlm.balance(&s.filler), FEE);
 }

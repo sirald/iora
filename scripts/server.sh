@@ -22,7 +22,7 @@ CMD="${1:-}"
 copy_code() {
   # status.json (keeper state) is sent only on setup so a later push never overwrites the server's state.
   local skip_state="$1" files=(keeper)
-  for f in addr factory factory-sell old-factories markets batch; do
+  for f in addr factory factory-sell old-factories markets batch filler; do
     [ -f "testnet/$f.env" ] && files+=("testnet/$f.env")
   done
   local ex=(--exclude=node_modules --exclude=keeper.log)
@@ -136,5 +136,7 @@ push)
 status) status ;;
 logs)   $SSH 'journalctl -u iora-keeper -f -n 20 -o short-iso' ;;
 stop)   $SSH 'systemctl stop iora-keeper; systemctl is-active iora-keeper || true' ;;
+venues) # read-only check of the other venues (Aquarius), run on the server with the keeper's settings; nothing is sent
+        $SSH "cd /opt/iora/keeper && set -a && . /etc/iora/keeper.env && set +a && runuser -p -u iora -- node keeper.js --venue-check ${2:-} ${3:-} 2>&1 | grep -v 'keeper started' | cut -c1-400" ;;
 *)      sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
