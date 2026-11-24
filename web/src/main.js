@@ -230,7 +230,7 @@ function fmt(v, digits = 4) {
 }
 
 const u32 = (n) => nativeToScVal(n, { type: "u32" });
-const u64 = (n) => nativeToScVal(BigInt(n), { type: "u64" });
+const u64 = (n) => nativeToScVal(BigInt(n) > 18446744073709551615n ? 18446744073709551615n : BigInt(n), { type: "u64" }); // a read-back "no expiry" may have lost precision as a Number
 const i128 = (n) => nativeToScVal(BigInt(n), { type: "i128" });
 const addr = (a) => new Address(realId(a)).toScVal();
 const addrVec = (list) => xdr.ScVal.scvVec(list.map((a) => new Address(a).toScVal()));
@@ -930,7 +930,7 @@ function updateTicket() {
       ? `<span class="bad">${WORSE_BUY(-drop)}</span>`
       : `When ${BS} is at <b>${n(limit, 4)} USDC or less</b>${drop !== null ? ` (${n(drop, 1)}% below today)` : ""}, the keeper fills it and at least <b>${n(out)} ${BS}</b> ${outTo(vault)}.`,
   );
-  items.push(`The order stays open until it fills or you cancel it (it ends by itself after a year). Until then the USDC keeps earning.`);
+  items.push(`The order stays open until it fills or you cancel it${noEnd(vault) ? "" : " (it ends by itself after a year)"}. Until then the USDC keeps earning.`);
   if (feeNote(vault, BS)) items.push(feeNote(vault, BS));
   items.push(`Placing it costs a network fee of about <b>0.02 XLM</b>. Iora takes no fee.`);
   if (AUTO.px && !$("autosell-row").hidden) {
@@ -1344,7 +1344,7 @@ async function ensureFeeder() {
 function autoRows(limit) {
   if (!AUTO.px) return [];
   const up = (Number(AUTO.px) / Number(limit) - 1) * 100;
-  return [["Take profit", `sell at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (+${up.toFixed(1)}%, ${AUTO_DAYS} days)`]];
+  return [["Take profit", `sell at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (+${up.toFixed(1)}%, ${autoSpan(vault)})`]];
 }
 
 // ---- Old-version vaults: let the user take their funds to the wallet in one click ----
@@ -1906,7 +1906,16 @@ const DCA_NO_LIMIT = U * 1_000_000_000n; // the contract's highest price: "no pr
 const DCA_BAND_BPS = 300; // without a price limit every part must be within 3% of the oracle price
 const DCA_MIN_EVERY = 60;
 const DCA_MAX_EVERY = 28 * 86400;
-const DCA_DAYS = 365; // a plan stops by itself after a year at the latest
+const DCA_DAYS = 365; // older vaults: a plan stops by itself after a year at the latest
+// Version 12 vaults: an order has no latest expiry. The app then places every order "until I cancel it".
+const NO_EXPIRY = 18446744073709551615n;
+const noEnd = (v) => (vaultVer.get(sideOf(v)?.id) || 0) >= 12;
+/** Expiry for a new order in vault `v`: no end where the vault allows it, otherwise `days` from now. */
+const expiryOf = (v, days) => (noEnd(v) ? NO_EXPIRY : Math.floor(Date.now() / 1000) + Math.round(days * 86400));
+const expiryText = (e) => (e === NO_EXPIRY ? "Never: it stays open until you cancel it" : new Date(Number(e) * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }));
+/** How long the sell order of a take profit lives, in seconds (counted from the fill). */
+const autoSecs = (v) => (noEnd(v) ? 100 * 365 * 86400 : AUTO_DAYS * 86400);
+const autoSpan = (v) => (noEnd(v) ? "open until you cancel" : `${AUTO_DAYS} days`);
 const vaultVer = new Map(); // vault address -> version (0: older than 8)
 const doneSchedules = new Map(); // "vault:id" -> schedule | null, for orders that can no longer change
 async function vaultVersion(v) {
@@ -2015,7 +2024,7 @@ function paintOrders() {
       }
       const left = Number(o.expiry) - now;
       const exp =
-        status !== "Open" ? "—" : expired ? "Ended" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
+        status !== "Open" ? "—" : expired ? "Ended" : left > 3650 * 86400 ? "No end" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
       // Waiting interest (estimate): at today's Blend rate, from when the order was placed until it filled or was cancelled
       const times = orderTimes[o.id] || {};
       let waitCell = `<span class="muted">—</span>`;
@@ -2183,7 +2192,7 @@ async function placeOrder({ single = false } = {}) {
   const bps = Math.max(1, Math.round(impactPct * 100));
   const days = Number($("odays").value);
   if (!(days > 0 && days <= 365)) return log("Duration must be 1 to 365 days.", "err");
-  const expiry = Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+  const expiry = expiryOf(vault, days);
   if (!single && LADDER.on) {
     const limit2 = toUnitsSafe($("olimit2").value);
     if (limit2 === null) return;
@@ -2200,7 +2209,7 @@ async function placeOrder({ single = false } = {}) {
     ["You receive at least", `${fmt(minOut(amount, limit), 2)} ${BS}`],
   ];
   if (marketPrice) rows.push(["Market price now", `${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC${lim < marketPrice ? ` (limit is ${((1 - lim / marketPrice) * 100).toFixed(1)}% below)` : ""}`]);
-  rows.push(["Expires", new Date(expiry * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })]);
+  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Minimum fill", `${fmt(minFill, 2)} USDC per piece`]);
   rows.push(["Max price impact", `${impactPct}% per fill`]);
   if (!autoOk(limit)) return;
@@ -2226,7 +2235,7 @@ async function placeOrder({ single = false } = {}) {
     placed = await call(
       vault,
       "place_order_then",
-      [i128(amount), i128(limit), i128(minFill), u32(bps), u64(expiry), addr(sv), i128(thenLim), u32(300), u64(AUTO_DAYS * 86400)],
+      [i128(amount), i128(limit), i128(minFill), u32(bps), u64(expiry), addr(sv), i128(thenLim), u32(300), u64(autoSecs(vault))],
       "Place order with automatic sell",
       VAULT_ERRORS,
     );
@@ -2980,13 +2989,48 @@ $("swap-max").onclick = () => {
   $("swap-in").value = v > 0n ? toPlain(v) : "";
   doQuote();
 };
-for (const c of document.querySelectorAll("#slip-chips [data-slip]")) {
-  c.onclick = () => {
-    SW.slip = Number(c.dataset.slip);
-    for (const o of document.querySelectorAll("#slip-chips [data-slip]")) o.setAttribute("aria-pressed", String(o === c));
-    doQuote();
-  };
+// Maximum slippage: 0.5%, 1%, or an own value from 0.01% to 50%. "Set as default" keeps the current value in this
+// browser, so the Market tab opens with it next time. An empty or invalid own value falls back to the default.
+const SLIP_KEY = "iora-slip";
+const slipDefault = () => {
+  try {
+    const v = Number(localStorage.getItem(SLIP_KEY));
+    return v >= 0.01 && v <= 50 ? v : 1;
+  } catch {
+    return 1;
+  }
+};
+function setSlip(v, { own = false } = {}) {
+  SW.slip = v;
+  const chip = [...document.querySelectorAll("#slip-chips [data-slip]")].find((o) => Number(o.dataset.slip) === v);
+  for (const o of document.querySelectorAll("#slip-chips [data-slip]")) o.setAttribute("aria-pressed", String(o === chip && !own));
+  if (!own) $("slip-own").value = chip ? "" : String(v);
+  $("slip-own").parentElement.classList.toggle("on", own || !chip);
+  $("slip-own").parentElement.classList.remove("bad");
+  const def = slipDefault();
+  $("slip-save").hidden = v === def;
+  $("slip-save").textContent = "Set as default";
+  doQuote();
 }
+for (const c of document.querySelectorAll("#slip-chips [data-slip]")) c.onclick = () => setSlip(Number(c.dataset.slip));
+$("slip-own").addEventListener("input", () => {
+  const raw = $("slip-own").value.trim().replace(",", ".");
+  const v = /^\d*\.?\d+$/.test(raw) ? Number(raw) : NaN;
+  if (v >= 0.01 && v <= 50) return setSlip(Math.round(v * 100) / 100, { own: true });
+  if (!raw) return setSlip(slipDefault());
+  SW.slip = slipDefault();
+  $("slip-own").parentElement.classList.add("bad");
+  $("slip-save").hidden = true;
+  doQuote();
+});
+$("slip-save").onclick = () => {
+  try {
+    localStorage.setItem(SLIP_KEY, String(SW.slip));
+  } catch {}
+  $("slip-save").textContent = `Default: ${SW.slip}%`;
+  setTimeout(() => ($("slip-save").hidden = true), 1400);
+};
+if (slipDefault() !== 1) queueMicrotask(() => setSlip(slipDefault()));
 $("swap-go").onclick = async () => {
   if (!me) return log("Connect your wallet first.", "err");
   const raw = String($("swap-in").value).trim().replace(",", ".");
@@ -3078,7 +3122,7 @@ async function flipToSell(bought, buyPx) {
   const size = canOrder !== null && canOrder < amount ? canOrder : amount;
   if (size < MIN_ORDER) return log("The deposit arrived, but it is too small to place a sell order.", "err");
   const minFill = size / 4n >= (XB ? 1000n : U) ? size / 4n : size;
-  const expiry = Math.floor(Date.now() / 1000) + 30 * 86400;
+  const expiry = expiryOf(SV.vault, 30);
   const placed = await call(SV.vault, "place_order", [i128(size), i128(limit), i128(minFill), u32(300), u64(expiry)], "Place sell order", SELL_ERRORS);
   await refreshSell();
   await refresh();
@@ -3278,9 +3322,9 @@ async function placeLadder(amount, limit, limit2, bps, impactPct, expiry) {
   const lv = buyLevels(amount, limit, limit2);
   if (lv.some((l) => l.amt < MIN_ORDER || l.lim <= 0n)) return log("Amount is too small to split into that many orders (each order needs at least 0.1).", "err");
   const rows = lv.map((l, i) => [`Order ${i + 1}`, `${fmt(l.amt, 2)} USDC at ≤ ${fmt(l.lim)} (≥ ${fmt(minOut(l.amt, l.lim), 2)} ${BS})`]);
-  rows.push(["Expires", new Date(expiry * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })]);
+  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactPct}% per fill`]);
-  if (AUTO.px) rows.push(["Take profit", `each order's ${BS} is sold at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (${AUTO_DAYS} days)`]);
+  if (AUTO.px) rows.push(["Take profit", `each order's ${BS} is sold at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (${autoSpan(vault)})`]);
   const notes = [`You'll sign ${lv.length} transactions, one per order. You can stop at any point; orders already placed stay open.`];
   if (supplyApr !== null) notes.push(`All ${fmt(amount, 2)} USDC keeps earning about ${((Number(amount) / 1e7) * supplyApr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC a day until each order fills.`);
   if (!(await ask({ title: `Review ${lv.length} scaled orders`, rows, notes, confirm: `Place ${lv.length} orders` }))) return;
@@ -3292,7 +3336,7 @@ async function placeLadder(amount, limit, limit2, bps, impactPct, expiry) {
     const label = `Place order ${i + 1}/${lv.length}`;
     return () =>
       sv
-        ? call(vault, "place_order_then", [i128(l.amt), i128(l.lim), i128(minFill), u32(bps), u64(expiry), addr(sv), i128(autoSellLimit().lim), u32(300), u64(AUTO_DAYS * 86400)], label, VAULT_ERRORS)
+        ? call(vault, "place_order_then", [i128(l.amt), i128(l.lim), i128(minFill), u32(bps), u64(expiry), addr(sv), i128(autoSellLimit().lim), u32(300), u64(autoSecs(vault))], label, VAULT_ERRORS)
         : call(vault, "place_order", [i128(l.amt), i128(l.lim), i128(minFill), u32(bps), u64(expiry)], label, VAULT_ERRORS);
   });
   const done = await runSteps(steps, "orders");
@@ -3682,7 +3726,7 @@ function updateSellTicket() {
         : `<span class="bad">This price is at or above the market, so it would sell right away. A stop loss is usually set below the market.</span>`,
     );
     items.push(`It never sells below <b>${px4(worst)} ${SV.out.sym}</b> (${SL_SLIP}% under your stop) and you receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b>. If the price gaps lower than that, it waits.`);
-    items.push(`The stop stays in place until it triggers or you cancel it (it ends by itself after a year).`);
+    items.push(`The stop stays in place until it triggers or you cancel it${noEnd(SV.vault) ? "" : " (it ends by itself after a year)"}.`);
     $("sv-preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
     return;
   }
@@ -3708,7 +3752,7 @@ function updateSellTicket() {
   }
   items.push(`You receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b> ${outIn(SV.vault)}.`);
   if (feeNote(SV.vault, SV.out.sym)) items.push(feeNote(SV.vault, SV.out.sym));
-  items.push(`The order stays open until it sells or you cancel it (it ends by itself after a year). You can cancel and withdraw at any time.`);
+  items.push(`The order stays open until it sells or you cancel it${noEnd(SV.vault) ? "" : " (it ends by itself after a year)"}. You can cancel and withdraw at any time.`);
   $("sv-preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
 }
 
@@ -3739,7 +3783,7 @@ async function renderSellOrders() {
         avg = `${px4(got)}${BigInt(o.limit_price) >= DCA_NO_LIMIT ? "" : ` <span class="muted">${better.toFixed(1)}% better</span>`}`;
       }
       const left = Number(o.expiry) - now;
-      const exp = status !== "Open" ? "—" : expired ? "Ended" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
+      const exp = status !== "Open" ? "—" : expired ? "Ended" : left > 3650 * 86400 ? "No end" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
       let waitCell = `<span class="muted">—</span>`;
       if (SV.apr !== null && status === "Open" && !expired) {
         const base = Number(BigInt(o.amount_in) - sold) / 1e7;
@@ -3867,7 +3911,7 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
   const limit = sellLimit(price);
   if (limit <= 0n) return log("Sell price is too high.", "err");
   const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount; // pieces of at least 1 XLM, a single piece for a small order
-  const expiry = Math.floor(Date.now() / 1000) + SV.days * 86400;
+  const expiry = expiryOf(SV.vault, SV.days);
   const p = Number(price) / 1e7;
   const rows = [
     ["You sell", `${fmt(amount, 4)} ${BS}`],
@@ -3875,7 +3919,7 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
     ["You receive at least", `${fmt(minOut(amount, limit), outDp(4))} ${SV.out.sym}`],
   ];
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}${p > SV.mkt ? ` (your price is ${((p / SV.mkt - 1) * 100).toFixed(1)}% above)` : ""}`]);
-  rows.push(["Expires", new Date(expiry * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })]);
+  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactBps / 100}% per fill`]);
   const notes = [];
   if (SV.apr !== null) notes.push(`While it waits, your ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day on Blend.`);
@@ -3895,7 +3939,7 @@ async function placeStopLoss(amount, price, impactBps) {
   if (trigger <= 0n || limit <= 0n) return log("Stop price is not valid.", "err");
   const p = Number(price) / 1e7;
   const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount;
-  const expiry = Math.floor(Date.now() / 1000) + SV.days * 86400;
+  const expiry = expiryOf(SV.vault, SV.days);
   const rows = [
     ["You sell", `${fmt(amount, 4)} ${BS}`],
     [`Sell if 1 ${BS} drops to`, `${px4(p)} ${SV.out.sym}`],
@@ -3903,7 +3947,7 @@ async function placeStopLoss(amount, price, impactBps) {
     ["You receive at least", `${fmt(minOut(amount, limit), outDp(4))} ${SV.out.sym}`],
   ];
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}${p < SV.mkt ? ` (your stop is ${((1 - p / SV.mkt) * 100).toFixed(1)}% below)` : ""}`]);
-  rows.push(["Expires", new Date(expiry * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })]);
+  rows.push(["Expires", expiryText(expiry)]);
   const notes = [];
   if (SV.apr !== null) notes.push(`Until then your ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day on Blend.`);
   if (SV.mkt && p >= SV.mkt) notes.push("Your stop is at or above the market price, so it can sell on the keeper's next scan.");
@@ -3922,10 +3966,10 @@ async function placeSellLadder(amount, price, price2, impactBps) {
   if (!poolGuard(BS, amount, "order")) return;
   const lv = sellLevels(amount, price, price2);
   if (lv.some((l) => l.amt < MIN_ORDER || l.lim <= 0n)) return log("Amount is too small to split into that many orders (each order needs at least 0.1).", "err");
-  const expiry = Math.floor(Date.now() / 1000) + SV.days * 86400;
+  const expiry = expiryOf(SV.vault, SV.days);
   const rows = lv.map((l, i) => [`Order ${i + 1}`, `${fmt(l.amt, 2)} ${BS} at ≥ ${px4(Number(l.px) / 1e7)} (≥ ${fmt(minOut(l.amt, l.lim), outDp(2))} ${SV.out.sym})`]);
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}`]);
-  rows.push(["Expires", new Date(expiry * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })]);
+  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactBps / 100}% per fill`]);
   const notes = [`You'll sign ${lv.length} transactions, one per order. You can stop at any point; orders already placed stay open.`];
   if (SV.apr !== null) notes.push(`All ${fmt(amount, 2)} ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day until each order sells.`);
@@ -4832,7 +4876,7 @@ for (const s of [
     const fits = Number(room / part);
     const k = n > 0 ? Math.min(n, fits) : fits;
     el("cover").textContent = `${k.toLocaleString("en-US")} ${w}${k === 1 ? "" : "s"}${n > 0 && fits >= n ? "" : " at this size"}`;
-    el("len").textContent = k > 1 && every > 0 ? `about ${dcaSpan(Math.min(every * (k - 1), DCA_DAYS * 86400))}${every * (k - 1) > DCA_DAYS * 86400 ? " (a plan stops after a year)" : ""}` : k === 1 ? `one ${w}` : "—";
+    el("len").textContent = k > 1 && every > 0 ? (noEnd(s.v()) ? `about ${dcaSpan(every * (k - 1))}` : `about ${dcaSpan(Math.min(every * (k - 1), DCA_DAYS * 86400))}${every * (k - 1) > DCA_DAYS * 86400 ? " (a plan stops after a year)" : ""}`) : k === 1 ? `one ${w}` : "—";
   };
   for (const id of ["part", "every", "n", "px"]) el(id).addEventListener("input", paint);
   el("unit").addEventListener("change", paint);
@@ -4872,14 +4916,14 @@ for (const s of [
         ],
         notes: [
           `Only the next ${w} is set aside; the rest of your balance stays free and keeps earning.`,
-          "You can stop the plan at any time with Cancel in the order list. It stops by itself after a year at the latest.",
+          `You can stop the plan at any time with Cancel in the order list.${noEnd(v) ? "" : " It stops by itself after a year at the latest."}`,
           ...(px > 0n ? [] : [`With no price limit, a ${w} is skipped while the pool price is more than ${DCA_BAND_BPS / 100}% away from the oracle price, and filled once it is back.`]),
         ],
         confirm: "Start",
       }))
     )
       return;
-    const expiry = Math.floor(Date.now() / 1000) + DCA_DAYS * 86400;
+    const expiry = expiryOf(v, DCA_DAYS);
     const ok = await call(v, "place_dca", [i128(part), u32(n), u64(every), i128(limit), u32(300), u32(px > 0n ? 0 : DCA_BAND_BPS), u64(expiry)], `Start DCA ${s.sell ? "sell" : "buy"}`, s.errs);
     if (ok) el("part").value = "";
     await s.after();

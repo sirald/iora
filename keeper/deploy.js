@@ -93,7 +93,8 @@ async function upload(file) {
 }
 
 // Version 7: one multi-asset vault and one factory (no buy/sell split). Deployed with "--v7".
-const V11 = process.argv.includes("--v11"); // version 11: scheduled orders (`place_dca`); same constructor and factory as 9
+const V12 = process.argv.includes("--v12"); // version 12: an order has no latest expiry; same constructor and factory as 9
+const V11 = process.argv.includes("--v11") || V12; // version 11: scheduled orders (`place_dca`); same constructor and factory as 9
 const V10 = process.argv.includes("--v10") || V11; // version 10: fills without a pool (`take`, `cross`); same constructor and factory as 9
 const V9 = process.argv.includes("--v9") || V10; // version 9: uncapped vault list (chain per bucket), vault `forget`; same constructor as 8
 const V8 = process.argv.includes("--v8") || V9; // version 8: allowed token list, fills through an intermediate token
@@ -196,10 +197,10 @@ async function mainV7() {
   );
   if (!factory || !String(factory).startsWith("C")) throw new Error(`could not get the factory address: ${factory}`);
   const envFile = path.join(root, "testnet/factory.env");
-  fs.writeFileSync(envFile, `FACTORY=${factory}\nVAULT_WASM_HASH=${vaultHash.toString("hex")}\nVAULT_V=${V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7}\n`);
+  fs.writeFileSync(envFile, `FACTORY=${factory}\nVAULT_WASM_HASH=${vaultHash.toString("hex")}\nVAULT_V=${V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7}\n`);
   fs.writeFileSync(path.join(root, "testnet/factory-sell.env"), `FACTORY_SELL=${factory}\n`);
   console.log(`FACTORY=${factory}`);
-  console.log(`testnet/factory.env and factory-sell.env updated (one factory, VAULT_V=${V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7})`);
+  console.log(`testnet/factory.env and factory-sell.env updated (one factory, VAULT_V=${V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7})`);
 }
 
 async function main() {

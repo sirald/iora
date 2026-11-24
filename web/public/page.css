@@ -6,6 +6,8 @@
    The owner's call: the content fills the window (the kit stops at 1280px). It runs from gutter to gutter up to
    1600px; only a very wide screen keeps margins beside it. */
 :root { --container: 1600px; }
+/* the lit ground behind UI (the hero landscape, the rules panel, the "after you join" card): Iora's blue instead of the kit's sand */
+:root { --ground-bg: #a9c0f0; --ground-surface: #cfdcf8; --ground-ink: #0b1530; --ground-muted: #33415f; --ground-accent: #1f4fd1; }
 
 /* ---------------------------------------------------------------- card groups: one panel height each */
 #how .panel { --p-h: 336px; }

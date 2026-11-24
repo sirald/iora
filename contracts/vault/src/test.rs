@@ -875,7 +875,7 @@ fn fill_through_an_intermediate_token() {
 #[test]
 fn version_is_reported() {
     let s = setup();
-    assert_eq!(s.v.version(), 11);
+    assert_eq!(s.v.version(), 12);
 }
 
 #[test]
@@ -1215,7 +1215,8 @@ fn dca_rules() {
     let bad = |part: i128, every: u64, expiry: u64| s.v.try_place_dca(a, b, &part, &0, &every, &2_000_000, &IMPACT, &0, &expiry, &true);
     assert_eq!(bad(100 * U, 59, end), Err(Ok(ce(Error::InvalidSchedule))));
     assert_eq!(bad(100 * U, 29 * DAY, end), Err(Ok(ce(Error::InvalidSchedule))));
-    assert_eq!(bad(100 * U, DAY, NOW + 367 * DAY), Err(Ok(ce(Error::InvalidExpiry))));
+    // An expiry must lie in the future; how far is up to the owner.
+    assert_eq!(bad(100 * U, DAY, NOW), Err(Ok(ce(Error::InvalidExpiry))));
     assert_eq!(bad(0, DAY, end), Err(Ok(ce(Error::InvalidAmount))));
     // The vault must cover the first part.
     assert_eq!(bad(1_001 * U, DAY, end), Err(Ok(ce(Error::InsufficientFree))));
@@ -1235,4 +1236,26 @@ fn dca_rules() {
     assert_eq!(s.v.try_take(&payer, &id, &(50 * U), &(250 * U), &s.filler), Err(Ok(ce(Error::FillTooSmall))));
     assert_eq!(s.v.take(&payer, &id, &(100 * U), &(500 * U), &s.filler), 500 * U);
     assert_eq!(s.v.try_take(&payer, &id, &(100 * U), &(500 * U), &s.filler), Err(Ok(ce(Error::TooEarly))));
+}
+
+#[test]
+fn an_order_can_stay_open_for_as_long_as_the_owner_wants() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // Ten years, and "until I cancel it" (the far end of time).
+    let ten = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + 3_660 * DAY), &true);
+    let never = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &u64::MAX, &true);
+    // An expiry in the past or right now is still refused.
+    assert_eq!(
+        s.v.try_place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &NOW, &true),
+        Err(Ok(ce(Error::InvalidExpiry)))
+    );
+    // Nine years later both are still open and fill like any order.
+    s.env.ledger().set_timestamp(NOW + 3_300 * DAY);
+    assert_eq!(s.v.execute(&s.filler, &ten, &(100 * U), &None), 500 * U);
+    assert_eq!(s.v.execute(&s.filler, &never, &(100 * U), &None), 500 * U);
+    // Nobody but the owner can close an order that has not expired, however old it is.
+    let third = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &u64::MAX, &true);
+    s.env.set_auths(&[]);
+    assert!(s.v.try_cancel_order(&third).is_err());
 }

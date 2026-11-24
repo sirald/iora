@@ -314,7 +314,8 @@
                   <span class="muted small">Max slippage</span>
                   <button type="button" data-slip="0.5">0.5%</button>
                   <button type="button" data-slip="1" aria-pressed="true">1%</button>
-                  <button type="button" data-slip="3">3%</button>
+                  <label class="slip-own"><input id="slip-own" inputmode="decimal" placeholder="other" autocomplete="off" aria-label="Your own maximum slippage, in percent" /><span>%</span></label>
+                  <button type="button" class="slip-save" id="slip-save" hidden>Set as default</button>
                 </div>
               </div>
               <div class="box">

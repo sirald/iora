@@ -1,4 +1,7 @@
-//! Iora vault, version 11: ONE multi-asset vault per user.
+//! Iora vault, version 12: ONE multi-asset vault per user.
+//!
+//! New in version 12 (on top of version 11): an order has no latest expiry. It used to end within a year; now the
+//! owner picks any time in the future, or the far end of time for "until I cancel it". Nothing else changed.
 //!
 //! New in version 11 (on top of version 10): orders on a schedule ("DCA", buying or selling in equal parts).
 //! - `place_dca` opens an order that sells one part of a token every `every` seconds, for as long as the vault
@@ -66,8 +69,9 @@ const SWAP_DEADLINE_SECS: u64 = 300;
 
 /// An order can fill in at most this many pieces (`min_fill * MAX_FILLS >= amount_in`).
 pub const MAX_FILLS: i128 = 20;
-/// An order can expire at most this far in the future.
-pub const MAX_ORDER_SECS: u64 = 366 * 86_400;
+/// A follow-up order lasts at most this long, counted from the fill that opens it (about 100 years; the bound
+/// keeps `now + duration` from overflowing). An ordinary order's `expiry` has no upper limit.
+pub const MAX_ORDER_SECS: u64 = 100 * 366 * 86_400;
 /// Highest accepted price (one billion sell tokens per bought token). A bound against overflow.
 pub const MAX_PRICE: i128 = SCALE * 1_000_000_000;
 /// Special value for `withdraw`: the whole free balance.
@@ -606,7 +610,7 @@ impl Vault {
             || then_impact_bps == 0
             || then_impact_bps > BPS
             || then_duration == 0
-            || then_duration > 365 * 86_400
+            || then_duration > MAX_ORDER_SECS
         {
             panic_with_error!(&env, Error::InvalidFollowUp);
         }
@@ -635,7 +639,7 @@ impl Vault {
     /// `band_bps`: if not 0, every part must also be within this distance of the oracle price at that moment
     /// (50 - 1000). Use it when the limit is far from the market; with `limit_price = MAX_PRICE` the band is
     /// the only price protection, so the two cannot both be left open.
-    /// `expiry`: the plan stops then at the latest (at most MAX_ORDER_SECS from now).
+    /// `expiry`: the plan stops then at the latest (any time in the future).
     /// Returns the order id; the order is read, cancelled and filled like any other.
     #[allow(clippy::too_many_arguments)]
     pub fn place_dca(
@@ -902,7 +906,7 @@ impl Vault {
 
     /// Version of the vault code (keepers pick the `execute` signature from it).
     pub fn version(_env: Env) -> u32 {
-        11
+        12
     }
 
     /// The owner takes a token off the vault's list, freeing one of its MAX_TOKENS places. Only a token the
@@ -1158,7 +1162,7 @@ fn check_order(
         panic_with_error!(env, Error::InvalidImpact);
     }
     let now = env.ledger().timestamp();
-    if expiry <= now || expiry - now > MAX_ORDER_SECS {
+    if expiry <= now {
         panic_with_error!(env, Error::InvalidExpiry);
     }
     // The bought token joins the vault's list (decimals check and token count limit happen here).
