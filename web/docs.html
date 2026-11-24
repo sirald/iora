@@ -104,7 +104,7 @@
           <div class="cards">
             <div><h3>Your own vault</h3><p>Each user gets a separate smart contract. Only your wallet can deposit, withdraw, place or cancel orders.</p></div>
             <div><h3>Earning while waiting</h3><p>The assets you deposit go to Blend right away, including the part reserved for open orders. What your orders buy can stay in the vault and keep earning too.</p></div>
-            <div><h3>One-step fills</h3><p>Withdraw from Blend, swap on Soroswap and put the coin you bought back to work in your vault (or send it to your wallet), all in one atomic transaction.</p></div>
+            <div><h3>One-step fills</h3><p>Withdraw from Blend, swap at the trading venue that pays the most and put the coin you bought back to work in your vault (or send it to your wallet), all in one atomic transaction.</p></div>
           </div>
           <h3>Who it is for</h3>
           <ul>
@@ -193,7 +193,7 @@
           <p>
             The <i>Trade</i> page has two sides, <i>Buy</i> and <i>Sell</i>, and both work on the same vault. A buy order spends
             the USDC in your vault to buy a coin when 1 unit of it costs at most your price. A sell order sells the coin in your vault
-            when 1 unit of it is worth at least your price. Either way the keeper makes the trade on Soroswap in one transaction when
+            when 1 unit of it is worth at least your price. Either way the keeper makes the trade in one transaction when
             the price reaches yours, and until then the amount behind the order keeps earning on Blend.
           </p>
           <p>
@@ -207,7 +207,7 @@
             <dt>You receive at least</dt><dd>Computed on-chain from your price and checked again after the swap.</dd>
             <dt>Keep it in my vault</dt><dd>Ticked by default: what the order buys stays in your vault and earns. Unticked: it goes to your wallet.</dd>
           </dl>
-          <p class="muted">Every market is a coin against USDC. On testnet today those coins are XLM, BTC, EURC, XRP and XTAR. Your assets earn interest while they wait, as long as the lending pool has a market for them. The testnet pool does not list the Soroswap test tokens (BTC, EURC, XRP, XTAR) yet, so on testnet those four wait in your vault without earning; stop loss is not available for them and their test pools are small.</p>
+          <p class="muted">Every market is a coin against USDC. On testnet today those coins are XLM, BTC, EURC, XRP and XTAR. Your assets earn interest while they wait, as long as the lending pool has a market for them. The testnet pool does not list the other test tokens (BTC, EURC, XRP, XTAR) yet, so on testnet those four wait in your vault without earning; stop loss is not available for them and their test pools are small.</p>
         </section>
 
         <section id="stop-loss">
@@ -240,7 +240,7 @@
             <dt>Amount</dt><dd>The USDC (buy) or the coin (sell) set aside for the order. It is reserved from your available balance when you place the order.</dd>
             <dt>Limit</dt><dd>For a buy order, the most USDC you are willing to pay for 1 unit of the coin. For a sell order, the least USDC you accept for 1 unit. The order fills at this price or better, never worse.</dd>
             <dt>Minimum fill</dt><dd>The smallest piece the order may be filled in. Only the final remainder can be smaller. Left empty, the app uses a quarter of the amount.</dd>
-            <dt>Max price impact</dt><dd>How far a single fill through the Soroswap pool may move that pool's price. If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
+            <dt>Max price impact</dt><dd>How far a single fill may move the price of the pool it trades in (applies to the vault's built-in single-pool route). If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
             <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them; they have no end date. (An order in a vault opened before November 2026 still ends by itself after one year.)</dd>
           </dl>
           <h3>Price improvement</h3>
@@ -328,7 +328,7 @@
             much, and the address that receives the fill fee. The tokens, the recipient, the limit and the minimum output are fixed by the contract.
           </p>
           <ul>
-            <li>The Iora keeper scans all vaults on every new Stellar ledger (about every 5 seconds) and quotes each open order on Soroswap in its own direction.</li>
+            <li>The Iora keeper scans all vaults on every new Stellar ledger (about every 5 seconds) and quotes each open order, in its own direction, across the trading venues it knows.</li>
             <li>When your limit is met, it tries the full remaining amount. If the price impact is too high, it halves the piece, down to your minimum fill.</li>
             <li>The keeper pays the network fee for fills. In return, whoever fills an order receives a small fill fee: a small capped amount per fill, paid in the coin the order buys (on testnet: about 0.003 USDC, or the same value in the coin bought). The fee is taken only from the part of a fill that came out better than your limit, so you always receive at least what your limit promises. If a fill lands exactly on your limit, the fee is zero. These amounts apply during the testnet beta; the fill fee will be reviewed before mainnet.</li>
             <li>Because the fee has to come out of that difference, the keeper waits until the price has passed your limit by enough to cover it. For most orders this is a tiny fraction of a percent. Very small orders are allowed, but they need a larger move past the limit before they fill.</li>
@@ -336,7 +336,7 @@
           </ul>
           <h3>Where an order fills</h3>
           <p>
-            For every fill the keeper compares the Soroswap pool with the pools of other trading venues (on testnet: Aquarius) and takes the route that returns the most: one venue, or the amount split between two. Open orders of two Iora users that meet each other's price can also be filled against each other without any pool. Whichever route is used, your vault hands over only the amount being filled, counts what comes back, and undoes the whole transaction if that is less than your limit promises. The route is the keeper's choice; the limit is the contract's guarantee.
+            Iora is its own router: for every fill the keeper compares the pools of all the trading venues it knows (on testnet: Aquarius and Soroswap) and takes the route that returns the most. That can be one pool, the amount split over several pools, or two steps through an intermediate coin. No venue is preferred. Open orders of two Iora users that meet each other's price can also be filled against each other without any pool. Whichever route is used, your vault hands over only the amount being filled, counts what comes back, and undoes the whole transaction if that is less than your limit promises. The route is the keeper's choice; the limit is the contract's guarantee.
           </p>
         </section>
 
@@ -389,7 +389,7 @@
             <dt>Smart contract risk</dt>
             <dd>All vaults run the same code, so a bug could affect every vault. The contracts have not yet been independently audited.</dd>
             <dt>Swap and price risk</dt>
-            <dd>Fills go through a trading venue's pool for the two tokens of the order (Soroswap, or another venue when it pays more), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
+            <dd>Fills go through a trading venue's pool for the two tokens of the order (whichever venue pays the most at that moment), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
             <dt>Oracle risk (stop loss)</dt>
             <dd>Stop loss orders rely on the price oracle of the Blend pool. If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
             <dt>Keeper risk</dt>
@@ -456,7 +456,7 @@
             <dt>Limit price</dt><dd>For a buy order, the most USDC you will pay for 1 unit of a coin; for a sell order, the least USDC you accept for 1 unit.</dd>
             <dt>Buy vault, sell vault</dt><dd>The two separate vaults used by earlier versions. They still work for the people who opened them.</dd>
             <dt>Price impact</dt><dd>How much a trade moves a pool's price; larger trades in smaller pools move it more.</dd>
-            <dt>Soroswap</dt><dd>A decentralized exchange on Stellar used for the swaps between USDC and the other coins.</dd>
+            <dt>Trading venues</dt><dd>The decentralized exchanges on Stellar where the swaps happen (for example Aquarius and Soroswap). Iora picks the route that pays the most for each fill.</dd>
             <dt>Trustline</dt><dd>A one-time Stellar setting that lets your account hold an asset such as USDC.</dd>
             <dt>Utilization</dt><dd>The share of a Blend pool that is currently borrowed.</dd>
           </dl>

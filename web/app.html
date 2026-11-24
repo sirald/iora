@@ -188,12 +188,12 @@
                 <div class="ohlc" id="ch-ohlc"></div>
                 <div class="ch-tools"><button type="button" id="ch-live" class="ch-btn" hidden>Back to now</button><span class="tf" id="ch-zoom" role="group" aria-label="Zoom"><button type="button" data-z="out" aria-label="Zoom out" title="Zoom out">−</button><button type="button" data-z="in" aria-label="Zoom in" title="Zoom in">+</button></span></div>
               </div>
-              <div class="chart-box"><canvas id="ch" aria-label="Price chart of the Soroswap pool, with your open orders drawn as dashed lines"></canvas></div>
+              <div class="chart-box"><canvas id="ch" aria-label="Price chart, with your open orders drawn as dashed lines"></canvas></div>
               <p id="ch-note" class="ch-note" hidden></p>
-              <div class="ch-legend"><span><i></i>Your buy orders</span><span><i class="s"></i>Your sell orders</span><span id="ch-src">Price of the Soroswap pool your orders fill from. Drag to go back in time, scroll to zoom, double-click to reset.</span></div>
+              <div class="ch-legend"><span><i></i>Your buy orders</span><span><i class="s"></i>Your sell orders</span><span id="ch-src">Price history of one trading pool; your orders fill wherever the price is best. Drag to go back in time, scroll to zoom, double-click to reset.</span></div>
             </section>
             <section class="tpanel depth" aria-label="Pool depth">
-              <h2>Pool depth <i class="tip" tabindex="0" data-tip="How much can be traded in the Soroswap pool before the price reaches each level. Your orders fill from this pool. Click a row to use its price.">i</i></h2>
+              <h2>Pool depth <i class="tip" tabindex="0" data-tip="How much can be traded in one pool before the price reaches each level. Click a row to use its price.">i</i></h2>
               <table id="dp"><tbody><tr><td class="muted">Loading…</td></tr></tbody></table>
             </section>
           </div>
@@ -331,11 +331,11 @@
               <dl class="mini swap-info">
                 <dt>Rate</dt><dd id="swap-rate">—</dd>
                 <dt>Minimum received <i class="tip" tabindex="0" data-tip="If the price moves more than your slippage setting before the swap lands, it is cancelled and nothing is spent.">i</i></dt><dd id="swap-min">—</dd>
-                <dt>Route <i class="tip" tabindex="0" data-tip="The swap goes to the trading venue that quotes the most for your amount right now.">i</i></dt><dd id="swap-route">Soroswap, testnet</dd>
+                <dt>Route <i class="tip" tabindex="0" data-tip="The swap goes to the trading venue that quotes the most for your amount right now.">i</i></dt><dd id="swap-route">—</dd>
               </dl>
               <p id="swap-note" class="lp-note"></p>
               <button id="swap-go" class="btn primary block">Swap</button>
-              <p class="fine">A market order trades right now, straight from your wallet, through the Soroswap test pool that also fills limit orders. It does not use your vault. Prices in the test pool don't follow the real market.</p>
+              <p class="fine">A market order trades right now, straight from your wallet, at the trading venue that pays the most for your amount (or split over several). It does not use your vault. Prices in the test pools don't follow the real market.</p>
               </div>
             </div>
             <div data-pane="dca" class="dca" hidden>
@@ -553,7 +553,7 @@
         <div class="tb-stat"><span>Lending pool in use <i class="tip" tabindex="0" data-tip="Share of the XLM in the Blend pool that is currently borrowed. Higher use means higher rates, but less cash for instant withdrawals.">i</i></span><b id="sv-util">—</b><small id="sv-size" hidden></small><span class="util-bar" hidden><span id="sv-util-bar"></span></span></div>
         <div class="tb-earn">Waiting sell orders earn <b id="sv-apr">—</b> a year <i class="tip" tabindex="0" data-tip="Estimated yearly interest Blend lenders earn on XLM right now. It changes all the time.">i</i></div>
       </section>
-        <p id="sv-warn" class="xwarn user-only" hidden><b>Showcase market.</b> This Soroswap test pool is thin and its price is not a real market price: it only moves when someone trades. Orders here may wait a long time or never fill, and larger fills move the price a lot. Your XLM still earns on Blend while it waits, and you can cancel and withdraw at any time.</p>
+        <p id="sv-warn" class="xwarn user-only" hidden><b>Showcase market.</b> This test pool is thin and its price is not a real market price: it only moves when someone trades. Orders here may wait a long time or never fill, and larger fills move the price a lot. Your XLM still earns on Blend while it waits, and you can cancel and withdraw at any time.</p>
         <p id="sv-trust" class="xwarn user-only" hidden></p>
 
       <div class="cols user-only">

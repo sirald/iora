@@ -15,7 +15,8 @@
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, contracttype, token, vec, Address, Env, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, vec, Address, Env, Symbol, TryFromVal, Val,
+    Vec,
 };
 
 /// A call made in this contract's name one level below an `Auth` (a pool pulling the token it was asked to swap).
@@ -50,11 +51,45 @@ pub struct Call {
     pub auths: Vec<Auth>,
 }
 
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Error {
+    /// `swap_from`: the route returned less than the caller's minimum.
+    TooLittle = 1,
+    /// `swap_from`: the amount must be positive.
+    InvalidAmount = 2,
+}
+
 #[contract]
 pub struct Filler;
 
 #[contractimpl]
 impl Filler {
+    /// 2: routes may contain the `sweep` instruction. 3: `swap_from` (a swap straight from a wallet).
+    pub fn version(_env: Env) -> u32 {
+        3
+    }
+
+    /// A swap for a wallet (the Market tab): takes `amount` of `sell` from `user`, runs `route`, and sends
+    /// everything it then holds of `buy` (and whatever is left of `sell`) back to `user`. Fails, undoing all of
+    /// it, if less than `min_out` of `buy` came out. Only `user` can start it: it is `user`'s signature that
+    /// lets `amount` be taken, and nothing more than `amount`.
+    /// Returns the amount of `buy` sent to `user`.
+    pub fn swap_from(env: Env, user: Address, sell: Address, buy: Address, amount: i128, min_out: i128, route: Vec<Call>) -> i128 {
+        user.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+        let me = env.current_contract_address();
+        token::Client::new(&env, &sell).transfer(&user, &me, &amount);
+        let out = Self::swap(env.clone(), sell, buy, amount, user, route);
+        if out < min_out {
+            panic_with_error!(&env, Error::TooLittle);
+        }
+        out
+    }
+
     /// Runs `route`, then sends this contract's whole balance of `buy` to `to`, and whatever is left of `sell`
     /// as well. Anyone can call it; it only ever moves what it holds at that moment.
     /// `amount` is what the caller sent in; it is informational (the balances decide what is paid out).
@@ -63,6 +98,24 @@ impl Filler {
         let _ = amount;
         let me = env.current_contract_address();
         for call in route.iter() {
+            // A step addressed to this contract itself is not a call but an instruction: `sweep(token)` sends
+            // this contract's whole balance of `token` to `to`. A route through an intermediate token ends
+            // with it, so that a little more of that token than planned (the first swap paid better than
+            // quoted) goes to the vault instead of staying here.
+            if call.contract == me {
+                if call.func == Symbol::new(&env, "sweep") {
+                    if let Some(v) = call.args.get(0) {
+                        if let Ok(t) = Address::try_from_val(&env, &v) {
+                            let c = token::Client::new(&env, &t);
+                            let b = c.balance(&me);
+                            if b > 0 {
+                                c.transfer(&me, &to, &b);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let mut allowed: Vec<InvokerContractAuthEntry> = Vec::new(&env);
             for a in call.auths.iter() {
                 let mut below: Vec<InvokerContractAuthEntry> = Vec::new(&env);

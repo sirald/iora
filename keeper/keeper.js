@@ -139,9 +139,10 @@ const FILLER = (cfg.FILLER || "").trim();
 const AQUA_ROUTER = (cfg.AQUA_ROUTER || "").trim();
 // PHOENIX_MULTIHOP: Phoenix's multihop contract on this network (optional).
 const PHOENIX_MULTIHOP = (cfg.PHOENIX_MULTIHOP || "").trim();
-const VENUES = !!FILLER && (!!AQUA_ROUTER || !!PHOENIX_MULTIHOP) && String(cfg.VENUES || "on").toLowerCase() !== "off";
-// A route through the filler is used only if it beats Soroswap alone by at least this much (it costs more network fee).
-const VENUE_EDGE_BPS = BigInt(cfg.VENUE_EDGE_BPS || 5);
+// COMET_POOLS: Comet pool contracts (weighted pools), comma separated (optional; a Comet pool is one contract).
+const COMET_POOLS = String(cfg.COMET_POOLS || "").split(",").map((x) => x.trim()).filter(Boolean);
+const VENUES = !!FILLER && (!!AQUA_ROUTER || !!PHOENIX_MULTIHOP || COMET_POOLS.length > 0) && String(cfg.VENUES || "on").toLowerCase() !== "off";
+// (VENUE_EDGE_BPS is no longer used: the router is the default path for version 13 vaults, whatever venue wins.)
 const WORKER_START_XLM = String(cfg.WORKER_START_XLM || "10");
 const WORKER_MIN_XLM = Number(cfg.WORKER_MIN_XLM || 3);
 const workerKey = (i) =>
@@ -580,6 +581,39 @@ async function ensureWorkers() {
     } catch (e) {
       log(`worker account ${i + 1} could not be checked: ${e.message || e}`);
     }
+  }
+}
+
+/**
+ * The fill fee is paid in the coin an order buys, to the keeper's main account. For USDC that account needs a
+ * trustline; without one every fill that pays its fee in USDC fails (the token contract refuses the transfer,
+ * error 13), so sell orders would wait forever. Checked at start: a transfer of the smallest unit to the keeper
+ * is simulated from a pool that holds USDC. If the trustline is missing the keeper adds it itself (its own
+ * account, 0.5 XLM reserve); USDC_ISSUER in testnet/addr.env overrides the testnet issuer.
+ */
+const USDC_ISSUER = (cfg.USDC_ISSUER || (PASSPHRASE === Networks.TESTNET ? "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56" : "")).trim();
+async function ensureFeeTrustline() {
+  try {
+    const holder = await poolOf(USDC, XLM);
+    if (!holder) return;
+    const probe = () => read(USDC, "transfer", [new Address(holder.pair).toScVal(), new Address(kp.publicKey()).toScVal(), i128(1)]);
+    const r = await probe();
+    if (r.ok || r.code !== 13) return; // fine, or something this check cannot judge
+    if (!USDC_ISSUER) return log("WARNING: the keeper's account has no USDC trustline, so fills that pay their fee in USDC will fail. Add one (USDC_ISSUER is not set, so the keeper cannot do it itself).");
+    log("the keeper's account has no USDC trustline (fills that pay their fee in USDC would fail); adding it");
+    const sent = await serialized(async (signer) => {
+      const account = await server.getAccount(signer.publicKey());
+      const tx = new TransactionBuilder(account, { fee: String(Number(BASE_FEE) * 10), networkPassphrase: PASSPHRASE })
+        .addOperation(Operation.changeTrust({ asset: new Asset("USDC", USDC_ISSUER) }))
+        .setTimeout(TX_TIMEOUT_SEC)
+        .build();
+      return submit(tx, signer);
+    });
+    if (!sent.ok) return log(`WARNING: the USDC trustline could not be added: ${sent.error}. Fills that pay their fee in USDC will fail until it exists.`);
+    const again = await probe();
+    log(again.ok ? "USDC trustline added: the keeper can now receive fill fees in USDC" : `WARNING: the trustline was added but USDC still cannot be received (${errText(again)}); check that USDC_ISSUER is the issuer of ${short(USDC)}`);
+  } catch (e) {
+    log(`the USDC trustline could not be checked: ${e.message || e}`);
   }
 }
 
@@ -1121,7 +1155,53 @@ const phoenixVenue = {
     return args && { contract: PHOENIX_MULTIHOP, func: "swap", args };
   },
 };
-const venueList = () => [aquaVenue, phoenixVenue].filter((v) => v.on());
+// ----- Comet: weighted pools, each its own contract; a pool has no quote function -----
+// A quote is a simulation of the swap itself, with the Soroswap pool of the pair standing in as the seller (it
+// holds both tokens; a simulation needs no signature). If that cannot be simulated the pool is simply not used.
+const I128_MAX = 170141183460469231731687303715884105727n;
+const cometHas = new Map();
+const cometVenue = {
+  name: "Comet",
+  on: () => COMET_POOLS.length > 0,
+  /** The configured pools that can swap this pair right now (asked again every 10 minutes). */
+  async options(a, b) {
+    const key = `${a}|${b}`;
+    const c = cometHas.get(key);
+    if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+    const list = [];
+    for (const pool of COMET_POOLS) {
+      const q = await this.quote({ id: pool, pool }, a, b, VENUE_PROBE);
+      if (q !== null && q > 0n) list.push({ id: pool, pool });
+    }
+    cometHas.set(key, { at: Date.now(), list });
+    return list;
+  },
+  async quote(opt, tin, tout, amount) {
+    const holder = await poolOf(tin, tout);
+    if (!holder) return null;
+    const c = await this.call(holder.pair, opt, tin, tout, amount);
+    if (!c) return null;
+    const r = await read(c.contract, c.func, c.args);
+    const out = r.ok && r.value ? (Array.isArray(r.value) ? r.value[0] : r.value) : null;
+    try {
+      return out === null || out === undefined ? null : BigInt(out);
+    } catch {
+      return null;
+    }
+  },
+  async call(user, opt, tin, tout, amount) {
+    const args = await argsFor("Comet", opt.pool, "swap_exact_amount_in", {
+      token_in: addrVal(tin),
+      token_amount_in: i128(amount),
+      token_out: addrVal(tout),
+      min_amount_out: i128(0),
+      max_price: i128(I128_MAX),
+      user: addrVal(user),
+    });
+    return args && { contract: opt.pool, func: "swap_exact_amount_in", args };
+  },
+};
+const venueList = () => [aquaVenue, phoenixVenue, cometVenue].filter((v) => v.on());
 
 // ----- what a venue does in its caller's name -----
 const VENUE_PROBE = 100_000n; // 0.01 token
@@ -1216,55 +1296,182 @@ function venueAuths(template, amount) {
 const callVal = (contractId, func, args, auths) =>
   structVal({ contract: addrVal(contractId), func: symVal(func), args: xdr.ScVal.scvVec(args), auths: xdr.ScVal.scvVec(auths) });
 
+// How finely a fill is divided when it is spread over several pools (4 = steps of 25%).
+const VENUE_SLICES = Math.max(2, Math.min(10, Number(cfg.VENUE_SLICES || 4)));
+let fillerVersion; // 1: plain routes; 2: routes may end with the `sweep` instruction (needed for an intermediate token)
+async function fillerV() {
+  if (fillerVersion !== undefined) return fillerVersion;
+  const r = await read(FILLER, "version");
+  fillerVersion = r.ok ? Number(r.value) : 1;
+  return fillerVersion;
+}
+/** The Soroswap pool of a pair as a route step for the filler. */
+function soroStep(tin, tout, pair, amount) {
+  const deadline = Math.floor(Date.now() / 1000) + 300;
+  return callVal(
+    ROUTER,
+    "swap_exact_tokens_for_tokens",
+    [i128(amount), i128(0), xdr.ScVal.scvVec([addrVal(tin), addrVal(tout)]), addrVal(FILLER), u64v(deadline)],
+    [structVal({ contract: addrVal(tin), func: symVal("transfer"), args: xdr.ScVal.scvVec([addrVal(FILLER), addrVal(pair), i128(amount)]), subs: xdr.ScVal.scvVec([]) })],
+  );
+}
 /**
- * The best way to sell `fill` of `tin` for `tout` that involves another venue: the whole fill in the venue pool
- * that quotes the most, or a split between that pool and the direct Soroswap pool (25, 50 or 75% on the venue).
- * `only` (a venue name) and `forceShare` are for the check command. Returns { q, route (ScVal), text } or null.
+ * What the best pool of the other venues would pay for `amount` at its near-spot rate (the rate for a small
+ * reference trade, kept for 20 seconds per pair). It ignores price impact, so it is an upper bound: good for
+ * deciding that an order is NOT worth a route search. null when no venue quotes the pair.
+ */
+const VENUE_REF = 100_000_000n; // 10 tokens
+const venueSpot = new Map();
+async function venueEst(amount, tin, tout) {
+  if (!VENUES || Date.now() < venueState.offUntil) return null;
+  const key = `${tin}|${tout}`;
+  let c = venueSpot.get(key);
+  if (!c || Date.now() - c.at > 20_000) {
+    let best = null;
+    try {
+      for (const venue of venueList()) {
+        for (const opt of await venue.options(tin, tout)) {
+          const q = await venue.quote(opt, tin, tout, VENUE_REF);
+          if (q !== null && (best === null || q > best)) best = q;
+        }
+      }
+    } catch {}
+    c = { at: Date.now(), q: best };
+    venueSpot.set(key, c);
+  }
+  return c.q === null ? null : (amount * c.q) / VENUE_REF;
+}
+/**
+ * Every pool that can swap `tin` for `tout` through the filler: the Soroswap pool and each pool of the other
+ * venues whose way of taking the token is known. Each is { label, soroswap, quote(amount), step(amount) }.
+ * `only`: a venue name; then only that venue's pools and the Soroswap pool.
+ */
+async function sourcesFor(tin, tout, only = null) {
+  const list = [];
+  const soro = await poolOf(tin, tout);
+  if (soro) list.push({ label: "Soroswap", soroswap: true, quote: (a) => quotePath(a, [tin, tout]), step: async (a) => soroStep(tin, tout, soro.pair, a) });
+  for (const venue of venueList()) {
+    if (only && venue.name !== only) continue;
+    const opts = await venue.options(tin, tout);
+    for (const opt of opts) {
+      list.push({
+        label: opts.length > 1 ? `${venue.name} ${String(opt.id).slice(0, 4)}` : venue.name,
+        soroswap: false,
+        quote: (a) => venue.quote(opt, tin, tout, a),
+        // How the pool takes its token is read only for a pool that is actually used (many pools are empty or tiny).
+        step: async (a) => {
+          const template = await venueTemplate(venue, opt, tin, tout);
+          const c = template ? await venue.call(FILLER, opt, tin, tout, a) : null;
+          return c ? callVal(c.contract, c.func, c.args, venueAuths(template, a)) : null;
+        },
+      });
+    }
+  }
+  return list;
+}
+/**
+ * Spreads `amount` over the pools greedily, slice by slice: each slice goes to the pool that pays the most for it
+ * on top of what that pool already took. Returns { q, parts: [{ src, amount }] } or null.
+ */
+async function spread(sources, amount, slices) {
+  if (!sources.length) return null;
+  const step = amount / BigInt(slices);
+  if (step <= 0n) return null;
+  // Pools that pay less than half of the best one for the first slice are left out: empty and tiny pools would
+  // otherwise be asked again for every slice and never win one.
+  const first = await Promise.all(sources.map((src) => src.quote(step)));
+  const top = first.reduce((m, q) => (q !== null && q > m ? q : m), 0n);
+  sources = sources.filter((src, i) => first[i] !== null && first[i] * 2n >= top && first[i] > 0n);
+  if (!sources.length) return null;
+  const taken = sources.map(() => 0n);
+  const got = sources.map(() => 0n);
+  for (let s = 0; s < slices; s++) {
+    const size = s === slices - 1 ? amount - step * BigInt(slices - 1) : step;
+    const next = await Promise.all(sources.map((src, i) => src.quote(taken[i] + size)));
+    let pick = -1;
+    let gain = -1n;
+    next.forEach((q, i) => {
+      if (q !== null && q - got[i] > gain) {
+        gain = q - got[i];
+        pick = i;
+      }
+    });
+    if (pick < 0) return null;
+    taken[pick] += size;
+    got[pick] = next[pick];
+  }
+  const parts = sources.map((src, i) => ({ src, amount: taken[i] })).filter((p) => p.amount > 0n);
+  return { q: got.reduce((a, b) => a + b, 0n), parts };
+}
+/** The single pool that pays the most for the whole amount: { src, q } or null. */
+async function bestSingle(sources, amount) {
+  let best = null;
+  const qs = await Promise.all(sources.map((src) => src.quote(amount)));
+  qs.forEach((q, i) => {
+    if (q !== null && q > 0n && (!best || q > best.q)) best = { src: sources[i], q };
+  });
+  return best;
+}
+const partsText = (parts, total) =>
+  parts.length === 1 ? parts[0].src.label : parts.map((p) => `${p.src.label} ${Number((p.amount * 100n) / total)}%`).join(" + ");
+
+/**
+ * The best way to sell `fill` of `tin` for `tout` through the filler that involves another venue:
+ * - direct: the amount spread over the Soroswap pool and the other venues' pools of the pair;
+ * - through an intermediate token (XLM or USDC): the best pool for each of the two legs, which may be on
+ *   different venues (needs a filler that knows `sweep`).
+ * Every pool is an equal candidate: the Soroswap pool is one source among the others, not the default.
+ * `only` (a venue name) and `forceShare` (percent on that venue, the rest on Soroswap) are for the check command.
+ * Returns { q, route (ScVal), text } or null.
  */
 async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
   if (!VENUES || Date.now() < venueState.offUntil) return null;
   try {
-    // the venue pool that gives the most for the whole fill
-    let best = null;
-    for (const venue of venueList()) {
-      if (only && venue.name !== only) continue;
-      for (const opt of await venue.options(tin, tout)) {
-        const q = await venue.quote(opt, tin, tout, fill);
-        if (q !== null && q > 0n && (!best || q > best.q)) best = { venue, opt, q };
+    const sources = await sourcesFor(tin, tout, only);
+    const others = sources.filter((s) => !s.soroswap);
+    let best = null; // { q, steps: [async () => ScVal | null], text }
+    if (forceShare !== null) {
+      // the check command: the venue's best pool takes exactly this share, Soroswap the rest
+      const top = await bestSingle(others, fill);
+      const soro = sources.find((s) => s.soroswap);
+      if (!top || (forceShare < 100n && !soro)) return null;
+      const a = (fill * forceShare) / 100n;
+      const parts = forceShare >= 100n ? [{ src: top.src, amount: fill }] : [{ src: top.src, amount: a }, { src: soro, amount: fill - a }];
+      const qs = await Promise.all(parts.map((p) => p.src.quote(p.amount)));
+      if (qs.includes(null)) return null;
+      best = { q: qs.reduce((x, y) => x + y, 0n), steps: parts.map((p) => () => p.src.step(p.amount)), text: partsText(parts, fill) };
+    } else {
+      if (sources.length) {
+        const sp = await spread(sources, fill, VENUE_SLICES);
+        if (sp) best = { q: sp.q, steps: sp.parts.map((p) => () => p.src.step(p.amount)), text: partsText(sp.parts, fill) };
+      }
+      // through an intermediate token, each leg in its best pool
+      if ((await fillerV()) >= 2) {
+        for (const mid of [XLM, USDC]) {
+          if (mid === tin || mid === tout) continue;
+          const [s1, s2] = await Promise.all([sourcesFor(tin, mid), sourcesFor(mid, tout)]);
+          const leg1 = await bestSingle(s1, fill);
+          if (!leg1) continue;
+          const leg2 = await bestSingle(s2, leg1.q);
+          if (!leg2) continue;
+          if (!best || leg2.q > best.q) {
+            best = {
+              q: leg2.q,
+              steps: [() => leg1.src.step(fill), () => leg2.src.step(leg1.q), async () => callVal(FILLER, "sweep", [addrVal(mid)], [])],
+              text: `${leg1.src.label} to ${sym(mid)}, then ${leg2.src.label}`,
+            };
+          }
+        }
       }
     }
     if (!best) return null;
-    const { venue, opt } = best;
-    const template = await venueTemplate(venue, opt, tin, tout);
-    if (!template) return null;
-    let pick = { q: best.q, venueAmt: fill, soroAmt: 0n };
-    const soroPool = await poolOf(tin, tout);
-    if (forceShare !== null && forceShare < 100n) pick = { q: 0n, venueAmt: fill, soroAmt: 0n }; // a check asks for exactly this split
-    if (soroPool && forceShare !== 100n) {
-      for (const share of forceShare !== null ? [forceShare] : [75n, 50n, 25n]) {
-        const a = (fill * share) / 100n;
-        const b = fill - a;
-        const [qa, qb] = await Promise.all([venue.quote(opt, tin, tout, a), quotePath(b, [tin, tout])]);
-        if (qa !== null && qb !== null && qa + qb > pick.q) pick = { q: qa + qb, venueAmt: a, soroAmt: b };
-      }
-    }
     const steps = [];
-    const c = await venue.call(FILLER, opt, tin, tout, pick.venueAmt);
-    if (!c) return null;
-    steps.push(callVal(c.contract, c.func, c.args, venueAuths(template, pick.venueAmt)));
-    if (pick.soroAmt > 0n) {
-      const deadline = Math.floor(Date.now() / 1000) + 300;
-      steps.push(
-        callVal(
-          ROUTER,
-          "swap_exact_tokens_for_tokens",
-          [i128(pick.soroAmt), i128(0), xdr.ScVal.scvVec([addrVal(tin), addrVal(tout)]), addrVal(FILLER), u64v(deadline)],
-          [structVal({ contract: addrVal(tin), func: symVal("transfer"), args: xdr.ScVal.scvVec([addrVal(FILLER), addrVal(soroPool.pair), i128(pick.soroAmt)]), subs: xdr.ScVal.scvVec([]) })],
-        ),
-      );
+    for (const make of best.steps) {
+      const v = await make();
+      if (!v) return null;
+      steps.push(v);
     }
-    const text = pick.soroAmt > 0n ? `${venue.name} ${fmt(pick.venueAmt)} + Soroswap ${fmt(pick.soroAmt)}` : venue.name;
-    return { q: pick.q, route: xdr.ScVal.scvVec(steps), text };
+    return { q: best.q, route: xdr.ScVal.scvVec(steps), text: best.text };
   } catch (e) {
     venueState.offUntil = Date.now() + 10 * 60_000;
     log(`venues: ${e.message}; other venues are skipped for 10 minutes`);
@@ -1320,6 +1527,7 @@ function waiting(vault, o, tag, remaining, tin, reason) {
 }
 
 function priceNoteFor(tin, tout, fill, q, limit) {
+  if (q === null || q <= 0n) return `no pool can quote ${fmt(fill)} ${sym(tin)} right now`;
   if (tin === USDC) return `market ${(Number(fill) / Number(q)).toFixed(4)} > limit ${fmt(limit)} USDC/XLM`;
   // Sell: the limit is "at most how many XLM for 1 USDC"; the user is shown "at least how many USDC for 1 XLM".
   const target = 1e7 / Number(limit);
@@ -1371,11 +1579,16 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   const lc = localCheck.get(lk);
   const est = lc && lc.offUntil > Date.now() ? null : await localBest(smallest, tin, tout, vias);
   const trusted = !!(lc && lc.okAt && Date.now() - lc.okAt < LOCAL_RECHECK_MS);
-  // With other venues in play a Soroswap price a little short of the limit does not rule the order out.
-  const slack = VENUES && pc.v13 ? 1030n : 1005n;
-  if (est !== null && trusted && (est * slack) / 1000n + 2n < minOut(smallest, limit)) {
-    localSkips++;
-    return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, est, limit));
+  // With other venues in play the Soroswap price alone does not rule an order out: on a real market another
+  // venue can pay far more (Soroswap's pool may be the shallow one). The best venue's near-spot rate, kept for
+  // 20 seconds per pair, is asked before the order is put aside.
+  const useVenues = VENUES && pc.v13;
+  if (est !== null && trusted && (est * 1005n) / 1000n + 2n < minOut(smallest, limit)) {
+    const top = useVenues ? await venueEst(smallest, tin, tout) : null;
+    if (top === null || (top * 1005n) / 1000n + 2n < minOut(smallest, limit)) {
+      localSkips++;
+      return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, top !== null && top > est ? top : est, limit));
+    }
   }
   ctx.net++; // from here on the order costs network calls
 
@@ -1390,12 +1603,13 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   // If even the smallest fill does not meet the limit, larger ones will not either (a larger trade gets a worse price
   // in the pool): a waiting order costs one price query per ledger.
   const rSmall = await bestRoute(smallest, tin, tout, vias);
-  const qSmall = rSmall ? rSmall.q : null;
+  // Without a Soroswap quote the order can still fill elsewhere when other venues are in play.
+  const qSmall = rSmall ? rSmall.q : useVenues ? 0n : null;
   if (qSmall === null) {
     log(`${tag} no price available`);
     return "error";
   }
-  if (est !== null && !trusted) {
+  if (rSmall && est !== null && !trusted) {
     // Compare the local formula with the real quote for this pair before relying on it.
     const diff = est > qSmall ? est - qSmall : qSmall - est;
     const tol = qSmall / 300n > 2n ? qSmall / 300n : 2n;
@@ -1405,10 +1619,11 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       log(`the local price estimate was off for ${sym(tin)}->${sym(tout)} (local ${est}, network ${qSmall}); this pair is quoted over the network for 30 min`);
     }
   }
-  const useVenues = VENUES && pc.v13;
   if (qSmall < minOut(smallest, limit)) {
-    // Soroswap alone does not reach the limit; another venue might.
-    const alt = useVenues ? await venueRoute(smallest, tin, tout) : null;
+    // Soroswap alone does not reach the limit; another venue might. The cheap near-spot estimate is asked first,
+    // so that an order waiting far from its limit does not cost a full route search on every ledger.
+    const top = useVenues ? await venueEst(smallest, tin, tout) : null;
+    const alt = top !== null && (top * 1005n) / 1000n + 2n >= minOut(smallest, limit) ? await venueRoute(smallest, tin, tout) : null;
     if (!alt || alt.q < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, alt && alt.q > qSmall ? alt.q : qSmall, limit));
   }
 
@@ -1416,15 +1631,17 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   let rejected = null; // the first fill the contract rejected (smaller ones are tried in the same round)
   for (const fill of sizes) {
     const route = fill === smallest ? rSmall : await bestRoute(fill, tin, tout, vias);
-    const qSoro = route ? route.q : null;
+    const qSoro = route ? route.q : useVenues ? 0n : null;
     const via = route ? route.via : null;
     if (qSoro === null) {
       log(`${tag} no price available`);
       return "error";
     }
-    // Another venue (or a split) is taken only if it clearly beats Soroswap alone.
+    // Version 13 vaults fill through our own router (the filler contract): the best route over every pool of
+    // every venue, with no venue preferred. The vault's built-in single-venue route (`execute`) is only the
+    // fallback: when the router has no route, when its route is refused, or when that built-in route pays more.
     let alt = useVenues ? await venueRoute(fill, tin, tout) : null;
-    if (alt && alt.q * BPS < qSoro * (BPS + VENUE_EDGE_BPS)) alt = null;
+    if (alt && alt.q < qSoro) alt = null;
     let q = alt ? alt.q : qSoro;
     if (q < minOut(fill, limit)) {
       note = note || priceNoteFor(tin, tout, fill, q, limit);
@@ -1445,7 +1662,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         stats.fills++;
         stuck.delete(key);
         if (ra.fee !== null) stats.feesStroop += ra.fee;
-        log(`FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} via ${alt.text} (Soroswap alone: ${fmt(qSoro)}) fee=${ra.fee !== null ? fmt(ra.fee) : "?"} XLM tx=${ra.hash}`);
+        log(`FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} via ${alt.text} (built-in route: ${qSoro > 0n ? fmt(qSoro) : "none"}) fee=${ra.fee !== null ? fmt(ra.fee) : "?"} XLM tx=${ra.hash}`);
         const left = remaining - fill;
         await notify(
           `${side === "buy" ? "Buy" : "Sell"} order filled: vault ${short(vault)} #${o.id}\n` +
@@ -1459,11 +1676,11 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         log(`${tag}: ${ra.error}; it will be tried again on the next ledger`);
         return "busy";
       }
-      // The other venue did not work out (the price moved, or the route was refused): Soroswap alone, as before.
+      // The router's route did not work out (the price moved, or it was refused): the vault's built-in route.
       const why = `${alt.text} route refused (${errText(ra)})`;
       if (!lastNote.has(`venue:${key}`) || Date.now() - lastNote.get(`venue:${key}`).at > 10 * 60_000) {
         lastNote.set(`venue:${key}`, { at: Date.now() });
-        log(`${tag} ${why}; trying Soroswap alone`);
+        log(`${tag} ${why}; trying the vault's built-in route`);
       }
       alt = null;
       q = qSoro;
@@ -1990,6 +2207,7 @@ async function venueCheck() {
   say(`filler        ${FILLER || "(not set: testnet/filler.env)"}`);
   say(`Aquarius      ${AQUA_ROUTER || "(not set)"}`);
   say(`Phoenix       ${PHOENIX_MULTIHOP || "(not set)"}`);
+  say(`Comet pools   ${COMET_POOLS.length ? COMET_POOLS.map(short).join(", ") : "(not set)"}`);
   say(`venues        ${VENUES ? "on" : "OFF"}`);
   if (!VENUES) return;
   const show = (x) => `${short(x.contract)}.${x.func}${x.subs && x.subs.length ? ` > ${x.subs.map(show).join(", ")}` : ""}`;
@@ -2020,9 +2238,11 @@ async function venueCheck() {
   const tin = String(o.value.sell);
   const tout = String(o.value.buy);
   say(`\norder #${id} of ${short(vault)}: ${fmt(left)} ${sym(tin)} left, sells for ${sym(tout)}`);
-  for (const venue of venueList()) {
-    for (const [label, share] of [[`all on ${venue.name}`, 100n], [`half ${venue.name}, half Soroswap`, 50n]]) {
-      const r = await venueRoute(left, tin, tout, share, venue.name);
+  const tries = [["the route the keeper would pick", null, null]];
+  for (const venue of venueList()) tries.push([`all on ${venue.name}`, 100n, venue.name], [`half ${venue.name}, half Soroswap`, 50n, venue.name]);
+  {
+    for (const [label, share, only] of tries) {
+      const r = await venueRoute(left, tin, tout, share, only);
       if (!r) {
         say(`  ${label}: no route (no pool for this pair there, or it could not be read)`);
         continue;
@@ -2055,6 +2275,7 @@ async function main() {
     if (DO_TTL && last) await extendTtlAll(last.vaults);
     return;
   }
+  await ensureFeeTrustline();
   if (WORKERS > 0) {
     await ensureWorkers();
     log(`sending accounts: ${signers.length} (main account + ${signers.length - 1} workers)`);

@@ -1187,7 +1187,7 @@ if (XB) {
   }
   const warn = $("sv-warn");
   if (warn) {
-    warn.innerHTML = `<b>${esc(BS)} earns no interest.</b> It is not in the Blend pool, so ${esc(BS)} waits in your vault as it is; your USDC still earns while buy orders wait. This Soroswap test pool is small and its price is not a real market price, so keep orders to a few USDC.`;
+    warn.innerHTML = `<b>${esc(BS)} earns no interest.</b> It is not in the Blend pool, so ${esc(BS)} waits in your vault as it is; your USDC still earns while buy orders wait. This test pool is small and its price is not a real market price, so keep orders to a few USDC.`;
     warn.hidden = false;
     const bar = document.querySelector('[data-view-pane="vault"] .pairsel');
     const sec = bar && bar.closest("section");
@@ -1644,7 +1644,7 @@ async function renderPortfolio() {
               .join("")}</tbody></table></div></section>`
           : ""
       }
-      <p class="fine">Values in USDC use the current Soroswap price${px ? ` (1 ${BS} = ${px4(px)} USDC)` : ""}.${V7 ? (PAIRS.length ? ` Open orders are listed for ${BS} / USDC; pick another pair to see its orders.` : "") : " Showcase markets are not included."}</p>`;
+      <p class="fine">Values in USDC use the current market price${px ? ` (1 ${BS} = ${px4(px)} USDC)` : ""}.${V7 ? (PAIRS.length ? ` Open orders are listed for ${BS} / USDC; pick another pair to see its orders.` : "") : " Showcase markets are not included."}</p>`;
     for (const a of $("pf-orders").querySelectorAll("a[data-base]")) {
       a.onclick = (e) => {
         e.preventDefault();
@@ -1702,8 +1702,16 @@ async function refreshBuy() {
   renderFaucet(true, hasTrust);
   quoteSwap();
 
-  if (q.ok) {
-    const out = BigInt(q.value[q.value.length - 1]);
+  // The market price shown is the best one across the venues the keeper fills on (the Soroswap pool or an
+  // Aquarius pool), for a small reference trade: an order fills where the price is best, so that is the price
+  // a limit should be compared with.
+  let refOut = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+  try {
+    const aq = await aquaBest(C.usdc, BASE.addr, U);
+    if (aq && (refOut === null || aq.out > refOut)) refOut = aq.out;
+  } catch {}
+  if (refOut !== null && refOut > 0n) {
+    const out = refOut;
     marketPrice = Number(U) / Number(out);
     $("market").textContent = `Market ${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
     $("m-price").textContent = marketPrice.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
@@ -2984,6 +2992,156 @@ async function aquaBest(tin, tout, amt) {
   return best;
 }
 
+// ----- A market swap split over several pools (through the filler contract's `swap_from`) -----
+// One pool moves its own price the more it is asked to swap; spreading the amount over the Soroswap pool and the
+// Aquarius pools can return more than the best single pool. The filler takes exactly the amount you sign for,
+// runs the swaps and sends everything back in the same transaction; with less than your minimum it all fails.
+const FILLER = (import.meta.env.VITE_FILLER || "").trim();
+const SPLIT_SLICES = 4;
+const SPLIT_PROBE = 100_000n; // 0.01 token: the amount used to read how a pool takes its token
+const symVal = (x) => xdr.ScVal.scvSymbol(x);
+const structVal = (o) => xdr.ScVal.scvMap(Object.keys(o).sort().map((k) => new xdr.ScMapEntry({ key: symVal(k), val: o[k] })));
+const callVal = (id, func, args, auths) => structVal({ contract: new Address(id).toScVal(), func: symVal(func), args: xdr.ScVal.scvVec(args), auths: xdr.ScVal.scvVec(auths) });
+const jv = (v) => {
+  try {
+    return JSON.parse(JSON.stringify(v, (k, x) => (typeof x === "bigint" ? String(x) : x)));
+  } catch {
+    return {};
+  }
+};
+let fillerVer;
+async function fillerVersion() {
+  if (!FILLER) return 0;
+  if (fillerVer !== undefined) return fillerVer;
+  const r = await rawRead(FILLER, "version");
+  if (r.ok) fillerVer = Number(r.value);
+  return r.ok ? fillerVer : 0;
+}
+const soroPairs = new Map();
+async function soroPair(a, b) {
+  const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+  if (soroPairs.has(key)) return soroPairs.get(key);
+  const r = await rawRead(C.router, "router_pair_for", [new Address(a).toScVal(), new Address(b).toScVal()]);
+  const p = r.ok && r.value ? String(r.value) : null;
+  if (p) soroPairs.set(key, p);
+  return p;
+}
+const aquaArgs = (user, tin, tout, hash, amount, min) => [new Address(user).toScVal(), aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(amount), u128(min)];
+/** What an Aquarius swap does in its caller's name, read from a simulation with your own wallet as the caller. */
+const aquaTemplates = new Map();
+async function aquaTemplate(tin, tout, hash) {
+  const key = `${tin}:${Array.from(hash).join(",")}`;
+  if (aquaTemplates.has(key)) return aquaTemplates.get(key);
+  let list = null;
+  try {
+    const sim = await server.simulateTransaction(readCall(AQUA_ROUTER, "swap", aquaArgs(me, tin, tout, hash, SPLIT_PROBE, 1n)));
+    if (!rpc.Api.isSimulationError(sim) && sim.result) {
+      list = [];
+      const node = (inv, depth) => {
+        const cf = inv.function && inv.function.contractFn;
+        if (!cf || depth > 1) return null;
+        const subs = [];
+        for (const s of inv.subInvocations || []) {
+          const n = node(s, depth + 1);
+          if (!n) return null;
+          subs.push(n);
+        }
+        return { contract: String(jv(cf.contractAddress)), func: String(jv(cf.functionName)), args: [...cf.args], subs };
+      };
+      for (const entry of sim.result.auth || []) {
+        for (const sub of (entry.rootInvocation && entry.rootInvocation.subInvocations) || []) {
+          const n = node(sub, 0);
+          if (!n) {
+            list = null;
+            break;
+          }
+          list.push(n);
+        }
+        if (!list) break;
+      }
+    }
+  } catch {
+    list = null;
+  }
+  if (list) aquaTemplates.set(key, list);
+  return list;
+}
+function templateAuths(template, amount) {
+  const subst = (args) =>
+    args.map((a) => {
+      const j = jv(a);
+      if (j.address === me) return new Address(FILLER).toScVal();
+      if (j.i128 !== undefined && typeof j.i128 !== "object" && BigInt(j.i128) === SPLIT_PROBE) return i128(amount);
+      if (j.u128 !== undefined && typeof j.u128 !== "object" && BigInt(j.u128) === SPLIT_PROBE) return u128(amount);
+      return a;
+    });
+  const leaf = (n) => structVal({ contract: new Address(n.contract).toScVal(), func: symVal(n.func), args: xdr.ScVal.scvVec(subst(n.args)) });
+  return template.map((n) => structVal({ contract: new Address(n.contract).toScVal(), func: symVal(n.func), args: xdr.ScVal.scvVec(subst(n.args)), subs: xdr.ScVal.scvVec(n.subs.map(leaf)) }));
+}
+/** The pools a split can use: { label, quote(amount), step(amount) }. */
+async function splitSources(tin, tout) {
+  const list = [];
+  const pair = await soroPair(tin, tout);
+  if (pair) {
+    list.push({
+      label: "Soroswap",
+      quote: async (a) => {
+        const r = await rawRead(C.router, "router_get_amounts_out", [i128(a), addrVec([tin, tout])]);
+        return r.ok ? BigInt(r.value[r.value.length - 1]) : null;
+      },
+      step: (a) =>
+        callVal(
+          C.router,
+          "swap_exact_tokens_for_tokens",
+          [i128(a), i128(0), addrVec([tin, tout]), new Address(FILLER).toScVal(), u64(Math.floor(Date.now() / 1000) + 600)],
+          [structVal({ contract: new Address(tin).toScVal(), func: symVal("transfer"), args: xdr.ScVal.scvVec([new Address(FILLER).toScVal(), new Address(pair).toScVal(), i128(a)]), subs: xdr.ScVal.scvVec([]) })],
+        ),
+    });
+  }
+  const hashes = await aquaPools(tin, tout);
+  for (const hash of hashes) {
+    const template = await aquaTemplate(tin, tout, hash);
+    if (!template) continue;
+    list.push({
+      label: hashes.length > 1 ? `Aquarius ${Array.from(hash.slice(0, 2)).map((x) => x.toString(16).padStart(2, "0")).join("")}` : "Aquarius",
+      quote: async (a) => {
+        const r = await rawRead(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(a)]);
+        return r.ok && r.value !== undefined ? BigInt(r.value) : null;
+      },
+      step: (a) => callVal(AQUA_ROUTER, "swap", aquaArgs(FILLER, tin, tout, hash, a, 1n), templateAuths(template, a)),
+    });
+  }
+  return list;
+}
+/** Spreads the amount over the pools slice by slice, each slice to the pool that pays the most for it. */
+async function bestSplit(tin, tout, amount) {
+  if ((await fillerVersion()) < 3 || !AQUA_ROUTER) return null;
+  const sources = await splitSources(tin, tout);
+  if (sources.length < 2) return null;
+  const step = amount / BigInt(SPLIT_SLICES);
+  if (step <= 0n) return null;
+  const taken = sources.map(() => 0n);
+  const got = sources.map(() => 0n);
+  for (let s = 0; s < SPLIT_SLICES; s++) {
+    const size = s === SPLIT_SLICES - 1 ? amount - step * BigInt(SPLIT_SLICES - 1) : step;
+    const next = await Promise.all(sources.map((src, i) => src.quote(taken[i] + size)));
+    let pick = -1;
+    let gain = -1n;
+    next.forEach((q, i) => {
+      if (q !== null && q - got[i] > gain) {
+        gain = q - got[i];
+        pick = i;
+      }
+    });
+    if (pick < 0) return null;
+    taken[pick] += size;
+    got[pick] = next[pick];
+  }
+  const parts = sources.map((src, i) => ({ src, amount: taken[i] })).filter((p) => p.amount > 0n);
+  if (parts.length < 2) return null;
+  return { out: got.reduce((a, b) => a + b, 0n), parts, text: parts.map((p) => `${p.src.label} ${Number((p.amount * 100n) / amount)}%`).join(" + ") };
+}
+
 async function doQuote() {
   swSyms();
   const raw = String($("swap-in").value).trim().replace(",", ".");
@@ -3010,11 +3168,18 @@ async function doQuote() {
   }
   // The venue that pays more gets the swap.
   SW.venue = aq && (soro === null || aq.out > soro) ? { name: "Aquarius", hash: aq.hash } : { name: "Soroswap" };
-  const out = SW.venue.name === "Aquarius" ? aq.out : soro;
-  $("swap-route").textContent =
-    SW.venue.name === "Aquarius"
-      ? `Aquarius, testnet${soro !== null ? ` (${(((Number(aq.out) - Number(soro)) / Number(soro)) * 100).toFixed(2)}% more than Soroswap)` : ""}`
-      : `Soroswap, testnet${aq ? " (best of 2 venues)" : ""}`;
+  let out = SW.venue.name === "Aquarius" ? aq.out : soro;
+  // A split over several pools is used only when it clearly beats the best single pool (it costs a little more network fee).
+  const split = aq && soro !== null ? await bestSplit(tin, tout, amt).catch(() => null) : null;
+  if (split && split.out * 10000n > out * 10005n) {
+    SW.venue = { name: "split", parts: split.parts, text: split.text };
+    $("swap-route").textContent = `${split.text}, testnet (${(((Number(split.out) - Number(out)) / Number(out)) * 100).toFixed(2)}% more than the best single pool)`;
+    out = split.out;
+  } else
+    $("swap-route").textContent =
+      SW.venue.name === "Aquarius"
+        ? `Aquarius, testnet${soro !== null ? ` (${(((Number(aq.out) - Number(soro)) / Number(soro)) * 100).toFixed(2)}% more than Soroswap)` : ""}`
+        : `Soroswap, testnet${aq ? ` (${(((Number(soro) - Number(aq.out)) / Number(aq.out)) * 100).toFixed(2)}% more than Aquarius)` : ""}`;
   SW.out = out;
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   $("swap-out").textContent = (Number(out) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 });
@@ -3100,7 +3265,15 @@ $("swap-go").onclick = async () => {
   const deadline = Math.floor(Date.now() / 1000) + 600;
   const [tin, tout] = swPath();
   const res =
-    SW.venue && SW.venue.name === "Aquarius"
+    SW.venue && SW.venue.name === "split"
+      ? await call(
+          FILLER,
+          "swap_from",
+          [addr(me), new Address(tin).toScVal(), new Address(tout).toScVal(), i128(amt), i128(min), xdr.ScVal.scvVec(SW.venue.parts.map((p) => p.src.step(p.amount)))],
+          `Swap ${fmt(amt, 2)} ${a} to ${b} (${SW.venue.text})`,
+          { 1: "The price moved more than your slippage setting allows. Nothing was swapped; try again." },
+        )
+      : SW.venue && SW.venue.name === "Aquarius"
       ? await call(
           AQUA_ROUTER,
           "swap",
@@ -3627,7 +3800,12 @@ async function refreshSell() {
     read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]),
   ]);
   // Market: USDC received for selling 1 XLM
-  if (q.ok) SV.mkt = Number(BigInt(q.value[q.value.length - 1])) / 1e7;
+  let sellRef = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+  try {
+    const aq = await aquaBest(BASE.addr, SV.out.addr, U); // the best venue for a seller, as on the buy side
+    if (aq && (sellRef === null || aq.out > sellRef)) sellRef = aq.out;
+  } catch {}
+  if (sellRef !== null) SV.mkt = Number(sellRef) / 1e7;
   else if (marketPrice) SV.mkt = marketPrice;
   $("sv-mkt").textContent = SV.mkt ? `Market ${px4(SV.mkt)}` : "";
   $("sv-m-price").textContent = SV.mkt ? px4(SV.mkt) : "—";
@@ -4161,7 +4339,7 @@ async function tradeSync() {
   paintTradeBar();
   const r = await read(C.router, "router_pair_for", [addr(BASE.addr), addr(m.token)]);
   if (TR.key !== m.token) return;
-  if (!r.ok || !r.value) return tradeNote("This market has no Soroswap pool yet, so there is no price to chart.");
+  if (!r.ok || !r.value) return tradeNote("This market has no pool with a price history yet, so there is nothing to chart.");
   const pair = String(r.value);
   const t0 = await read(pair, "token_0");
   if (TR.key !== m.token) return;
