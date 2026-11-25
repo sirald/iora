@@ -1,6 +1,7 @@
 import "./polyfill.js";
 import "./style.css";
 import "./skin.css";
+import "./motion.css";
 import {
   Account,
   Address,
@@ -18,6 +19,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTransaction } from "@stellar/freighter-api";
 import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from "./rpc.js";
+import { COPY_LABEL, copied } from "./motion.js";
 import { StellarWalletsKit } from "swk-sdk";
 import { defaultModules } from "swk-modules";
 
@@ -684,7 +686,7 @@ function walletMenuHtml() {
         <span class="wm-net ${setup.testnet === false ? "bad" : ""}">${setup.testnet === false ? "Wrong network" : "Testnet"}</span>
       </div>
     </div>
-    <button type="button" class="wm-addr" data-wm="copy" title="Copy address"><code>${me.slice(0, 10)}…${me.slice(-10)}</code><span>Copy</span></button>
+    <button type="button" class="wm-addr" data-wm="copy" title="Copy address"><code>${me.slice(0, 10)}…${me.slice(-10)}</code><span>${COPY_LABEL}</span></button>
     <dl class="wm-bal">
       <div><dt>XLM</dt><dd>${bal(walletNative)}</dd></div>
       <div><dt>USDC</dt><dd>${walletUsdc === null ? "no trustline" : bal(walletUsdc)}</dd></div>
@@ -711,7 +713,7 @@ document.addEventListener("click", async (e) => {
   if (act && act.dataset.wm === "copy") {
     try {
       await navigator.clipboard.writeText(me);
-      act.querySelector("span").textContent = "Copied";
+      copied(act.querySelector(":scope > span"));
     } catch {}
     return;
   }
@@ -2161,7 +2163,7 @@ async function renderPortfolio() {
     box.innerHTML = `
       <div class="pf-top">
         <div class="pf-kpis">
-          <section class="pf-box pf-kpi"><span>Vault value</span><b>≈ ${n(total)} <small>USDC</small></b>${vid ? `<small><a href="${EXPLORER}/contract/${vid}" target="_blank" rel="noopener">Vault ${short(vid)}</a> · <button type="button" class="link" id="pf-copy">Copy</button></small>` : ""}</section>
+          <section class="pf-box pf-kpi"><span>Vault value</span><b>≈ ${n(total)} <small>USDC</small></b>${vid ? `<small><a href="${EXPLORER}/contract/${vid}" target="_blank" rel="noopener">Vault ${short(vid)}</a> · <button type="button" class="link" id="pf-copy">${COPY_LABEL}</button></small>` : ""}</section>
           <section class="pf-box pf-kpi"><span>Interest earned</span><b class="pos">≈ +${n(earned, 4)} <small>USDC</small></b><small>${supplyApr !== null ? `USDC earns ${pct(supplyApr)} a year now` : "since you opened the vault"}</small></section>
         </div>
         <section class="pf-box pf-sum">
@@ -2178,7 +2180,7 @@ async function renderPortfolio() {
       </div>`;
     pfChartDraw(pfhAdd(total, earned));
     const cp = $("pf-copy");
-    if (cp) cp.onclick = () => navigator.clipboard && navigator.clipboard.writeText(vid).then(() => (cp.textContent = "Copied"));
+    if (cp) cp.onclick = () => navigator.clipboard && navigator.clipboard.writeText(vid).then(() => copied(cp));
     // Balances: one row per coin the vault holds (USDC always); a coin that is not held is not listed
     const balRow = (sym, bal, usd, res, apr, earnedTxt, acts) =>
       `<tr><td><span class="pf-asset"><i class="coin ${sym === "USDC" ? "usdc" : sym === "XLM" ? "xlm" : "other"}" aria-hidden="true"></i>${esc(sym)}</span></td><td class="num">${nfmt(bal, 4)}</td><td class="num">${usd === null ? "—" : `≈ ${n(usd)}`}</td><td class="num">${nfmt(res, 4)}</td><td class="num">${nfmt(Math.max(0, bal - res), 4)}</td><td class="num pos">${apr}</td><td class="num pos">${earnedTxt}</td><td class="pf-row-acts">${acts}</td></tr>`;
@@ -2323,7 +2325,7 @@ async function refreshBuy() {
     const v = st.value;
     earned = BigInt(bal.value) + BigInt(v.total_withdrawn) + BigInt(v.total_spent) - BigInt(v.total_deposited);
   }
-  $("vault").innerHTML = `<span class="muted">Vault</span> <a href="${EXPLORER}/contract/${realId(vault)}" target="_blank" rel="noopener">${short(vault)}</a> <button class="small ghost" id="copyvault" title="Copy full address">Copy</button>`;
+  $("vault").innerHTML = `<span class="muted">Vault</span> <a href="${EXPLORER}/contract/${realId(vault)}" target="_blank" rel="noopener">${short(vault)}</a> <button class="small ghost" id="copyvault" title="Copy full address">${COPY_LABEL}</button>`;
   $("stats").innerHTML = `
     <div class="tile"><span>Balance on Blend ${tip("Everything in your vault: what you deposited plus the interest it has earned, read live from Blend.")}</span><b><i id="v-bal">—</i> <small>USDC</small></b></div>
     <div class="tile earn"><span>Interest earned ${tip("Total interest since you opened the vault, including interest on money already spent or withdrawn.")}</span><b><i id="v-int">—</i> <small>USDC</small></b></div>
@@ -2344,7 +2346,7 @@ async function refreshBuy() {
   $("copyvault").onclick = async () => {
     try {
       await navigator.clipboard.writeText(vault);
-      log("Vault address copied.", "ok");
+      copied($("copyvault"));
     } catch {
       log(`Vault address: ${vault}`);
     }

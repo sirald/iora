@@ -1,0 +1,77 @@
+/*
+  Motion layer of the app (26 Nov 2026). Loaded after style.css and skin.css; motion.js is the moving half.
+  Rules (from emilkowalski/skills): only transform and opacity move; UI motion stays under 300 ms (the toast:
+  400 ms in, faster out); things the user does many times a day barely move; nothing moves for a keyboard action;
+  with "reduce motion" set nothing moves, colours may still change.
+  The two curves are the landing page's own (kit/motion/motion.css).
+*/
+:root {
+  --mo-ease: cubic-bezier(0.2, 0.8, 0.2, 1); /* ease-out: fast start, soft landing */
+  --mo-ease-io: cubic-bezier(0.65, 0, 0.35, 1); /* ease-in-out: something moving across the screen */
+  --mo-out: cubic-bezier(0.23, 1, 0.32, 1); /* a strong ease-out for things leaving */
+}
+
+/* Numbers that change (motion.js) need a box of their own to move. */
+#avail-buy, #sv-free2, #wallet-usdc, #sv-wallet { display: inline-block; }
+
+/* 4. One line under the chosen tab that travels to the next one (motion.js places it). */
+.has-ind { position: relative; }
+:root:root:root:root .appbody .has-ind > :is(button, .solo) { border-bottom-color: transparent !important; }
+.tab-ind { position: absolute; left: 0; top: 0; width: 1px; height: 2px; transform-origin: 0 0; background: var(--accent); pointer-events: none; }
+.tradeview .ticket > .tabs > .tab-ind { background: var(--text); }
+.tab-ind.off { opacity: 0; }
+
+/* 4. Buy / Sell: one coloured ground that travels from one side to the other. */
+.sidesw.has-pill { position: relative; }
+.sidesw.has-pill > a { position: relative; z-index: 1; }
+:root:root:root .appbody .sidesw.has-pill > a[aria-current] { background: none !important; box-shadow: none !important; }
+.sw-pill { position: absolute; left: 0; top: 4px; bottom: 4px; border-radius: 14px; pointer-events: none; }
+.sw-pill.b { background: color-mix(in srgb, var(--ok) 15%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 45%, transparent); }
+.sw-pill.s { background: color-mix(in srgb, var(--down, var(--err)) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--down, var(--err)) 45%, transparent); }
+
+/* 9. "Copy" becomes "Copied ✓" where it was pressed (both words share one place, so nothing beside it moves). */
+.cp { display: inline-grid; }
+.cp > span { grid-area: 1 / 1; }
+.cp-b { opacity: 0; color: var(--ok); }
+.is-copied .cp-a { opacity: 0; }
+.is-copied .cp-b { opacity: 1; }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* 2. The order review (and the other boxes built the same way): box and backdrop appear as one surface,
+     from 96%; they leave faster than they came. Browsers without @starting-style show them at once, as before. */
+  .ask[open] { animation: none; }
+  .ask {
+    opacity: 0;
+    transform: scale(0.96);
+    transition: opacity 180ms var(--mo-out), transform 180ms var(--mo-out), overlay 180ms allow-discrete, display 180ms allow-discrete;
+  }
+  .ask[open] { opacity: 1; transform: none; transition-duration: 250ms; transition-timing-function: var(--mo-ease); }
+  @starting-style { .ask[open] { opacity: 0; transform: scale(0.96); } }
+  .ask::backdrop { opacity: 0; transition: opacity 180ms var(--mo-out), overlay 180ms allow-discrete, display 180ms allow-discrete; }
+  .ask[open]::backdrop { opacity: 1; transition-duration: 250ms; }
+  @starting-style { .ask[open]::backdrop { opacity: 0; } }
+
+  /* 3. The notification comes up from the bottom edge and goes back the same way, faster. */
+  .status { transition: transform 220ms var(--mo-out), opacity 220ms var(--mo-out); }
+  .status.show { transition: transform 400ms ease, opacity 400ms ease; }
+
+  /* 4. */
+  .tab-ind.glide { transition: transform 240ms var(--mo-ease-io); }
+
+  /* 7. The (i) note grows out of its (i), in 125 ms; it goes in 90 ms. */
+  .tip::after {
+    opacity: 0;
+    scale: 0.97;
+    transform-origin: 50% 100%;
+    transition: opacity 90ms var(--mo-ease), scale 90ms var(--mo-ease), display 90ms allow-discrete;
+  }
+  .tip:hover::after, .tip:focus-visible::after { opacity: 1; scale: 1; transition-duration: 125ms; }
+  @starting-style { .tip:hover::after, .tip:focus-visible::after { opacity: 0; scale: 0.97; } }
+
+  /* 9. */
+  .cp > span { transition: opacity 150ms ease, filter 150ms ease, scale 150ms var(--mo-ease); }
+  .cp-b { filter: blur(2px); scale: 0.9; }
+  .is-copied .cp-a { filter: blur(2px); scale: 0.9; }
+  .is-copied .cp-b { filter: none; scale: 1; }
+}
+@media (max-width: 700px) { .tip::after { transform-origin: calc(100% - 8px) 100%; } }

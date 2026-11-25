@@ -87,8 +87,11 @@
 <body>
 <!-- type: software
      deal: hero centred, nav nav-centre, close close-type, footer footer-columns, rhythm space, buttons solid,
-           mark the client's own logo, grounds none (lit ground sand), effect painterly-landscape (hero frame)
-     moments: word-highlight (the statement after Steps: one transaction per fill) -->
+           mark the client's own logo, grounds none (lit ground sand), effect painterly-landscape (the hero's sky,
+           the window floats on it)
+     moments: word-highlight (the statement after Steps: one transaction per fill)
+     moving grounds (backdrops.js): a price line under the statement, a sea chart behind the rules, ripples round the
+           beta form, the tide along the footer -->
 
 <header class="nav nav--centre">
   <div class="wrap nav__bar">
@@ -134,6 +137,7 @@
 
 <main id="top">
   <section class="hero hero--centred" id="content" data-enter aria-labelledby="hero-h">
+    <div class="hero-sky" data-fx="painterly-landscape" data-fx-seed="7" data-fx-params='{"blur":1,"brush":0.35,"slope":0,"hillY":0.3,"horizon":0.62}' aria-hidden="true"></div>
     <div class="wrap"><div class="hero-text">
       <div class="hero__c">
         <a class="pill" href="#beta"><span>Invite-only beta</span><span class="muted">on Stellar testnet</span></a>
@@ -141,7 +145,7 @@
         <p class="hero__lead">Your funds earn interest on Stellar until your price arrives, then swap in 1 transaction.</p>
         <div class="btn-row"><a class="btn btn--primary" href="#beta">Join the beta</a><a class="btn btn--secondary" href="/app.html">Try the testnet app</a></div>
       </div>
-      <div class="hero__window" data-fx="painterly-landscape" data-fx-seed="7" data-fx-params='{"blur":1,"brush":0.35,"slope":0,"hillY":0.3,"horizon":0.62}' role="img" aria-label="An Iora vault: a limit order to buy XLM earns interest while it waits, then fills in one transaction">
+      <div class="hero__window" role="img" aria-label="An Iora vault: a limit order to buy XLM earns interest while it waits, then fills in one transaction">
         <div class="ly-piece ui ui-panel hw" aria-hidden="true">
           <div class="ui-win__bar"><span class="ui-dots"><i></i><i></i><i></i></span><span class="ui-win__crumb"><img class="ui-brand" src="favicon.svg" alt="" width="14" height="14">Iora <i>/</i> <b>Portfolio</b></span><span class="ui-spacer"></span><span class="ui-chip ui-chip--plain hw__net">Stellar testnet</span></div>
           <div class="mk mk-pf">
@@ -273,7 +277,7 @@
         </article>
       </div>
       <ul class="how__types">
-        <li>Limit buy</li><li>Limit sell</li><li>Scaled orders</li><li>DCA</li><li>Take profit</li><li>Market swap</li><li>Best route</li><li>No expiry</li>
+        <li tabindex="0" data-note="A limit buy waits for your price or lower, and the USDC behind it earns while it waits.">Limit buy</li><li tabindex="0" data-note="A limit sell waits for your price or higher; a coin the lending pool lists earns while it waits.">Limit sell</li><li tabindex="0" data-note="A scaled order splits one amount into several limit orders across a price range.">Scaled orders</li><li tabindex="0" data-note="DCA spends a set amount at every interval you choose, within a set band of the oracle price.">DCA</li><li tabindex="0" data-note="Take profit places a sell order for what a buy order fills, at the price you set.">Take profit</li><li tabindex="0" data-note="A market swap trades at once, at the best price across the routes the app checks.">Market swap</li><li tabindex="0" data-note="Each fill uses the route that quotes the most at that moment, and still has to meet your limit.">Best route</li><li tabindex="0" data-note="An order stays open until it fills or you cancel it.">No expiry</li>
       </ul>
           <p class="how__note">A scaled order splits one amount into several limit orders across a price range.</p>
       </div>
@@ -281,6 +285,7 @@
   </section>
 
   <section class="section statement" id="fill" data-moment="word-highlight" aria-label="One transaction per fill">
+    <div class="bd bd--price" data-bd="price" aria-hidden="true"></div>
     <div class="wrap">
       <p class="t-label">One transaction per fill</p>
       <p class="mo-wh__text">Every fill is <strong>one transaction</strong>. The vault leaves the lending pool, swaps and checks your limit together, and if the swap returns less than your limit, nothing moves.</p>
@@ -325,6 +330,7 @@
   </section>
 
   <section class="section g2 g2m" id="rules" aria-labelledby="rules-h">
+    <div class="bd bd--chart" data-bd="chart" aria-hidden="true"></div>
     <div class="wrap">
       <div class="group">
         <div class="section-head">
@@ -463,6 +469,7 @@
   </section>
 
   <section class="section signup g2m" id="beta" aria-labelledby="beta-h">
+    <div class="bd bd--rings" data-bd="rings" aria-hidden="true"></div>
     <div class="wrap">
       <div class="grid grid--top fill">
         <div class="span-5 split-col">
@@ -504,6 +511,7 @@
 </main>
 
 <footer class="footer closing" id="contact" aria-labelledby="close-h">
+  <div class="bd bd--tide" data-bd="tide" aria-hidden="true"></div>
   <div class="wrap">
     <div class="closing__cta close--type">
       <div class="section-head">
@@ -536,5 +544,6 @@
 <script type="module" src="/kit/motion/motion.js"></script>
 <script type="module" src="/kit/layout/layout.js"></script>
 <script type="module" src="/page.js"></script>
+<script type="module" src="/backdrops.js"></script>
 </body>
 </html>

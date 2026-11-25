@@ -412,3 +412,61 @@
 .mk-dlg__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; text-align: center; margin-top: 2px; }
 .mk-dlg__acts .mk-btn { padding: 9px; font-size: 13px; }
 .mk-dlg__fine { font-style: normal; font-size: 12px; color: var(--u-muted); }
+
+/* ---------------------------------------------------------------- the page's own motion (26 Nov 2026)
+   page.js moves these; the kit's motion layer stays as it is. Off with <html data-motion="off">; under
+   prefers-reduced-motion numbers and words still change, nothing slides. */
+/* hero: interest that keeps adding up; only the digits that change move */
+.mk-live { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mk-live > span { display: inline-block; }
+.mk-live > span.roll { animation: mk-roll 220ms var(--m-ease, cubic-bezier(.2, .8, .2, 1)) both; }
+@keyframes mk-roll { from { transform: translateY(45%); opacity: 0; } }
+/* "Every order and what it earned": the fill notice, in the empty lower corner of the chart */
+.mk-chartbig { position: relative; }
+.mk-note { position: absolute; z-index: 3; right: 14px; bottom: 14px; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; background: var(--u-bg, #fff); box-shadow: 0 0 0 1px var(--u-line, rgba(0,0,0,.1)), 0 14px 32px -14px rgba(11, 21, 48, .45); font-size: 12.5px; line-height: 1.35; color: var(--u-ink); }
+.mk-note b { display: block; font-weight: 600; }
+.mk-note span { color: var(--u-muted); font-variant-numeric: tabular-nums; }
+.mk-note i { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: color-mix(in srgb, var(--mk-up) 16%, transparent); color: var(--mk-up); font-style: normal; font-size: 11px; }
+/* "An order in 3 steps": a picture that has not been seen yet waits behind its bottom edge */
+.is-veiled { clip-path: inset(0 0 100% 0); }
+/* the order types: each says what it is in the line under them */
+.how__types li[data-note] { transition: color 150ms ease; }
+.how__types.is-pointing li:not(.is-on) { color: var(--muted); }
+.how__note.is-swap { display: grid; }
+.how__note.is-swap > span { grid-area: 1 / 1; transition: opacity 160ms ease, filter 160ms ease; }
+.how__note.is-swap > span.is-off { opacity: 0; filter: blur(2px); }
+@media (prefers-reduced-motion: reduce) {
+  .mk-live > span.roll { animation: none; }
+  .how__note.is-swap > span { transition: none; filter: none; }
+}
+
+/* ---------------------------------------------------------------- backgrounds (26 Nov 2026)
+   The first screen stands on the painted sky (the kit draws it: data-fx on .hero-sky, the same picture the
+   window's frame had); the window floats on it. Four sections further down have a quiet moving ground of their
+   own (backdrops.js): the statement a price line, the rules a sea chart, the beta form ripples, the footer the
+   tide. Each moves only while it is on screen; on a phone, with data-motion="off" or under reduced motion
+   each is drawn once and holds still. */
+main > .hero { overflow-x: clip; }
+.hero-sky {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none; background-color: transparent !important;
+  --fx-bg: var(--ground-bg); --fx-surface: var(--ground-surface); --fx-ink: var(--ground-ink); --fx-accent: var(--ground-accent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+/* a quiet place behind the headline, the lead and the buttons */
+.hero-sky::after { content: ""; position: absolute; inset: 0; background: radial-gradient(ellipse 46% 40% at 50% 34%, var(--bg) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 55%, transparent 100%); }
+:root[data-tone="dark"] .hero-sky > .fx-canvas { filter: brightness(0.3) saturate(1.25) hue-rotate(-6deg); }
+.hero--centred .hero__window { background: transparent; }
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-motion="off"]) .hero-sky:has(> .fx-canvas) { animation: hero-sky-in 1.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+}
+@keyframes hero-sky-in { from { filter: blur(18px); transform: scale(1.06); opacity: 0; } }
+
+.bd { position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+  color: var(--accent); text-decoration-color: var(--bg); }   /* backdrops.js reads its colours from these two */
+.bd > canvas, .bd > svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+/* the statement keeps a low band under its words, where the price line runs */
+@media (min-width: 640px) { main > #fill.section { padding-bottom: calc(var(--padb) + var(--bar) + 160px); } }
+.bd--chart { -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 86%, transparent 100%); mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 86%, transparent 100%); }
+.bd--tide { top: auto; height: 260px; }
+/* the pause button of a moving ground sits in its section's bottom-right corner, above the words' layer */
+.bd-pause.bd-pause { position: absolute; right: 12px; bottom: 12px; z-index: 6; }
