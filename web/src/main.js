@@ -40,11 +40,17 @@ const server = makeServer([C.rpc, import.meta.env.VITE_RPC_FALLBACK, RPC_PRIMARY
 //  - a wallet's vault in a factory never changes once it exists, so it is remembered in this browser for good;
 //    "no vault here" can only change in the newest factory (where a vault is opened), so for the older factories
 //    it is remembered for a few hours as well (opening a vault clears these: see call());
-//  - names, decimals, pool lists and contract settings do not change while the page is open.
+//  - which pool trades a pair of coins, and which of the two comes first in it, is fixed when the pool is
+//    created: remembered in this browser for a month, so the chart of a later visit starts without asking again;
+//  - the list of pools a venue has for a pair changes rarely: remembered in this browser for half an hour;
+//  - names, decimals and contract settings do not change while the page is open.
 const FACTORY_LATEST = C.factory;
+const FIXED_READS = new Set(["token_0", "token_1", "router_pair_for"]);
 const STATIC_READS = new Set(["version", "decimals", "symbol", "name", "token_0", "token_1", "router_pair_for", "get_reserve_list", "get_pools"]);
 setReadPolicy(({ contract, fn, empty }) => {
   if (fn === "vault_of") return empty ? (contract === FACTORY_LATEST ? null : { ttl: 6 * 3600_000, keep: true }) : { ttl: Infinity, keep: true };
+  if (FIXED_READS.has(fn) && !empty) return { ttl: 30 * 86_400_000, keep: true };
+  if (fn === "get_pools") return { ttl: 30 * 60_000, keep: true };
   if (STATIC_READS.has(fn)) return { ttl: 10 * 60_000 };
   if (fn === "get_config") return { ttl: 5 * 60_000 };
   return null;
@@ -57,6 +63,7 @@ const UTIL_STOP = Number(import.meta.env.VITE_UTIL_STOP || 0.8); // new deposits
 const UTIL_ENFORCE = import.meta.env.VITE_UTIL_ENFORCE === "1"; // when off (testnet) it only warns
 const ORDER_SHARE = 0.25; // a single deposit or order is at most a quarter of what the pool can pay out at that moment
 const POOLSTAT = {}; // symbol -> { u, avail } (filled by loadPool)
+const mkSeen = new Map(); // Markets table: the price text read last, per cell
 
 // State of the sell page. Defined at the top because showView needs it when the page opens.
 const SV = { factory: import.meta.env.VITE_FACTORY_SELL || "", vault: null, bal: null, free: null, apr: null, mkt: null };
@@ -916,14 +923,66 @@ function prewarm() {
     if (XB) warm(read(BASE.addr, "balance", [addr(me)]));
     warm(read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, BASE.addr])]));
     warm(aquaBest(C.usdc, BASE.addr, U));
-    if (SV.factory && (location.hash === "#sell" || location.hash === "#portfolio")) {
-      warm(read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]));
-      warm(aquaBest(BASE.addr, SV.out.addr, U));
-    }
+    if (location.hash === "#sell" || location.hash === "#portfolio") warmSell();
   } catch (e) {
     console.warn("prewarm", e);
   }
 }
+const quietly = (p) => Promise.resolve(p).catch(() => {});
+/** What the sell side opens with. Asked here, read in refreshSell: the same questions, shared by rpc.js. */
+function warmSell() {
+  if (!me || !SV.factory) return;
+  try {
+    quietly(readXlmPool());
+    quietly(read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]));
+    quietly(aquaBest(BASE.addr, SV.out.addr, U));
+    quietly(
+      read(SV.factory, "vault_of", [addr(me)]).then((vo) => {
+        if (!vo.ok || !vo.value) return;
+        const sv = wrapSell(vo.value);
+        for (const m of ["balance", "reserved", "free_balance", "stats"]) quietly(read(sv, m));
+        quietly(readOrders(sv));
+      }),
+    );
+  } catch (e) {
+    console.warn("warm", e);
+  }
+}
+/** What the Portfolio opens with (see renderPortfolio). */
+function warmPortfolio() {
+  if (!me) return;
+  try {
+    warmSell();
+    quietly(
+      homeSellVault().then((sv) => {
+        for (const v of [vault, sv]) {
+          if (!v) continue;
+          for (const m of ["balance", "reserved", "free_balance", "stats"]) quietly(read(v, m));
+          quietly(readOrders(v));
+        }
+        const rv = sideOf(vault) || sideOf(sv);
+        if (rv && PAIRS.length) quietly(rawRead(rv.id, "positions"));
+      }),
+    );
+  } catch (e) {
+    console.warn("warm", e);
+  }
+}
+// The pointer (or a finger, or the keyboard focus) arrives on a link a moment before the click. The page behind
+// the link is asked for at that moment; at most once in a few seconds, and never while a transaction is open.
+let warmedAt = 0;
+function onIntent(e) {
+  const a = e.target && e.target.closest ? e.target.closest('a[href="#sell"], a[href="#portfolio"], a[href="#markets"]') : null;
+  if (!a || busy || Date.now() - warmedAt < 3000) return;
+  const to = a.getAttribute("href").slice(1);
+  if (to === document.body.dataset.view) return; // that page is open: it keeps itself up to date
+  if (to !== "markets" && !me) return;
+  warmedAt = Date.now();
+  if (to === "sell") warmSell();
+  else if (to === "portfolio") warmPortfolio();
+  else paintPrices(true);
+}
+for (const type of ["pointerover", "touchstart", "focusin"]) document.addEventListener(type, onIntent, { passive: true });
 
 // A button that needs a wallet opens the wallet list itself instead of only saying so
 async function needWallet() {
@@ -1282,6 +1341,7 @@ async function pickGeneration() {
               warmed = gi;
               for (const m of ["reserved", "free_balance", "stats"]) read(v, m).catch(() => {});
               vaultVersion(v).catch(() => {});
+              if (location.hash === "#portfolio" && sideOf(v) && PAIRS.length) rawRead(sideOf(v).id, "positions").catch(() => {});
             }
             // A balance settles it at once. The open orders decide only for an empty vault (they are read either
             // way: the order list needs them a moment later).
@@ -2009,6 +2069,11 @@ async function renderPortfolio() {
       }
       return { bal: n(bal), res: n(res), free: n(free), earned };
     };
+    // Single vault: coins other than the selected pair sit in the same vault; they are listed and added to the total
+    // too. Asked together with the reads below (it used to follow them, one round later).
+    const rv = sideOf(vault) || sideOf(sv);
+    const positions = rv && PAIRS.length ? rawRead(rv.id, "positions") : null;
+    if (positions) positions.catch(() => {}); // read below; a failure is reported there, once
     const [b, s, bo, so, xp] = await Promise.all([
       rd(vault),
       rd(sv),
@@ -2017,11 +2082,9 @@ async function renderPortfolio() {
       SV.apr === null ? readXlmPool() : null,
     ]);
     if (who !== me) return;
-    // Single vault: coins other than the selected pair sit in the same vault; they are listed and added to the total too.
     let others = [];
-    const rv = sideOf(vault) || sideOf(sv);
-    if (rv && PAIRS.length) {
-      const ps = await rawRead(rv.id, "positions");
+    if (positions) {
+      const ps = await positions;
       if (ps.ok && Array.isArray(ps.value)) {
         const known = [{ sym: "XLM", token: C.xlm }, ...PAIRS];
         others = (
@@ -2212,20 +2275,23 @@ async function refreshBuy() {
   // The market price shown is the best one across the venues the keeper fills on (the Soroswap pool or an
   // Aquarius pool), for a small reference trade: an order fills where the price is best, so that is the price
   // a limit should be compared with.
-  let refOut = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
-  try {
-    const aq = await aquaBest(C.usdc, BASE.addr, U);
-    if (aq && (refOut === null || aq.out > refOut)) refOut = aq.out;
-  } catch {}
-  if (refOut !== null && refOut > 0n) {
-    const out = refOut;
-    marketPrice = Number(U) / Number(out);
-    $("market").textContent = `Market ${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
-    $("m-price").textContent = marketPrice.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-    paintMkPrice();
-    renderLadder();
-    updateGauge();
-  }
+  // It is worked out beside the vault reads below, not before them: the vault's numbers do not wait for a price.
+  const pricing = (async () => {
+    let refOut = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+    try {
+      const aq = await aquaBest(C.usdc, BASE.addr, U);
+      if (aq && (refOut === null || aq.out > refOut)) refOut = aq.out;
+    } catch {}
+    if (refOut !== null && refOut > 0n) {
+      const out = refOut;
+      marketPrice = Number(U) / Number(out);
+      $("market").textContent = `Market ${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
+      $("m-price").textContent = marketPrice.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+      paintMkPrice();
+      renderLadder();
+      updateGauge();
+    }
+  })().catch((e) => console.warn("price", e));
 
   readPool();
   vault = vaultOf.ok && vaultOf.value ? wrapBuy(vaultOf.value) : null;
@@ -2238,6 +2304,7 @@ async function refreshBuy() {
     $("novault").hidden = false;
     document.body.classList.remove("has-vault");
     $("orders").innerHTML = "";
+    await pricing;
     return;
   }
   $("novault").hidden = true;
@@ -2285,6 +2352,7 @@ async function refreshBuy() {
   // Orders first; the transaction history (events) and the summary follow, the screen does not wait for them. When
   // the history arrives the "earned while waiting" column is updated without reading the orders again.
   await renderOrders();
+  await pricing; // whoever called this reads the market price next
   const v0 = vault;
   renderHistory()
     .then(() => vault === v0 && paintOrders())
@@ -2979,6 +3047,7 @@ function showView() {
   syncLegacy();
   if (v === "lend" && me) loadLend();
   if (v === "portfolio") renderPortfolio();
+  if (v === "markets") paintPrices();
   queueMicrotask(tradeSync); // after a market switch: the chart and depth move to that market
 }
 window.addEventListener("hashchange", showView);
@@ -3223,8 +3292,7 @@ async function loadPool() {
           setBase(tr.dataset.base, "#vault");
         };
       }
-      paintBasePrices();
-      paintExtraPrices();
+      paintPrices();
       for (const tr of mk.querySelectorAll("tr[data-go]")) tr.onclick = (e) => { if (!e.target.closest("a")) location.hash = tr.dataset.go; };
       paintMkPrice();
     }
@@ -3241,8 +3309,20 @@ async function paintExtraPrices() {
       const q = await read(C.router, "router_get_amounts_out", [i128(100n * U), addrVec([C.xlm, el.dataset.tok])]);
       if (q.ok) el.textContent = px4(Number(BigInt(q.value[q.value.length - 1])) / 1e9);
       else el.textContent = "no pool";
+      mkSeen.set(`x${el.dataset.tok}`, el.textContent);
     }),
   );
+}
+/**
+ * The price column of the Markets table. It costs a read per coin, so it is read only while that page is showing
+ * (or about to: `now`); the cells show the prices read last until then.
+ */
+function paintPrices(now = false) {
+  for (const el of document.querySelectorAll(".mk-bprice")) if (mkSeen.has(`b${el.dataset.tok}`)) el.textContent = mkSeen.get(`b${el.dataset.tok}`);
+  for (const el of document.querySelectorAll(".mk-xprice")) if (mkSeen.has(`x${el.dataset.tok}`)) el.textContent = mkSeen.get(`x${el.dataset.tok}`);
+  if (!now && document.body.dataset.view !== "markets") return;
+  paintBasePrices().catch((e) => console.warn("market prices", e));
+  paintExtraPrices().catch((e) => console.warn("market prices", e));
 }
 
 /** Price cells in the Markets table (updated as the Soroswap price arrives). */
@@ -3253,6 +3333,7 @@ async function paintBasePrices() {
       const q = await read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, el.dataset.tok])]);
       const out = q.ok ? Number(BigInt(q.value[q.value.length - 1])) : 0;
       el.textContent = out > 0 ? px4(1e7 / out) : "no pool";
+      mkSeen.set(`b${el.dataset.tok}`, el.textContent);
     }),
   );
 }
@@ -4323,13 +4404,90 @@ document.addEventListener("click", async (e) => {
   if (noun === "sell orders") await refreshSell();
 });
 
-// Fetches every event the network keeps (about 7 days). The RPC scans about 10,000 ledgers per request and may
-// return empty pages in between; so it continues until the ledger the cursor points to reaches the latest ledger.
-// Event cache per vault: after the first scan only new events are read on each refresh.
-const eventCache = new Map(); // vault -> { events, cursor }
+// Where a history cursor stands: the ledger it points at.
+const evLedger = (c) => {
+  try {
+    return Number(BigInt(String(c).split("-")[0]) >> 32n);
+  } catch {
+    return Infinity;
+  }
+};
+// Reads everything the network keeps (about 7 days) for these filters, oldest first. The RPC goes through about
+// 10,000 ledgers per request and may return empty pages in between; one chain of 13 requests took 2-4 s on a
+// first visit, so the range is read as a few chains side by side. Each chain reads on from its own cursor until
+// it reaches the start of the next one (the last: the newest ledger), so nothing depends on how far one request
+// gets. Returns { events, cursor: where a later read continues, h: the network's ledger range }.
+const SCAN_PARTS = 4;
+const SCAN_PART_MIN = 20_000; // ledgers; a shorter range is not worth splitting
+async function scanAll(filters, limit, alive = () => true) {
+  const h = await server.getHealth();
+  const from = h.oldestLedger + 2;
+  const count = Math.max(1, Math.min(SCAN_PARTS, Math.floor((h.latestLedger - from + 1) / SCAN_PART_MIN)));
+  const size = Math.ceil((h.latestLedger - from + 1) / count);
+  const parts = await Promise.all(
+    Array.from({ length: count }, async (_, k) => {
+      const end = k === count - 1 ? Infinity : from + (k + 1) * size; // this chain covers the ledgers before `end`
+      const stop = Math.min(end, h.latestLedger);
+      const events = [];
+      const keep = (res) => {
+        for (const ev of res.events || []) if (!(ev.ledger >= end)) events.push(ev);
+      };
+      let res = await server.getEvents({ startLedger: from + k * size, filters, limit });
+      keep(res);
+      let cursor = res.cursor;
+      for (let page = 0; page < 40 && cursor && alive(); page++) {
+        // An answer that stops at its own last event was cut short by the page size: more may sit behind it,
+        // also in the newest ledger.
+        const cut = (res.events || []).length > 0 && res.events[res.events.length - 1].id === cursor;
+        if (evLedger(cursor) >= stop && !(cut && end === Infinity)) break;
+        res = await server.getEvents({ cursor, filters, limit });
+        keep(res);
+        if (!res.cursor || res.cursor === cursor) break;
+        cursor = res.cursor;
+      }
+      return { events, cursor };
+    }),
+  );
+  return { events: parts.flatMap((p) => p.events), cursor: parts[parts.length - 1].cursor, h };
+}
+
+// Event cache per vault: after the first scan only new events are read on each refresh. A copy is kept in this
+// browser too (events never change once written), so a later visit also reads only what happened since, and
+// the list keeps events the network itself has dropped by then.
+const eventCache = new Map(); // vault -> { events, cursor, saved }
+const EV_STORE = "iora-ev1:"; // + vault address
+const EV_KEEP = 400; // events kept per vault
+function evLoad(id) {
+  try {
+    const c = JSON.parse(localStorage.getItem(EV_STORE + id) || "null");
+    if (!c || typeof c.c !== "string" || !Array.isArray(c.e)) return null;
+    const events = [];
+    for (const [eid, at, tx, topics, value] of c.e) {
+      try {
+        events.push({ id: eid, ledgerClosedAt: at, txHash: tx, topic: topics.map((t) => xdr.ScVal.fromXDR(t, "base64")), value: xdr.ScVal.fromXDR(value, "base64") });
+      } catch {}
+    }
+    return { events, cursor: c.c, saved: c.c };
+  } catch {
+    return null;
+  }
+}
+function evSave(id, cache) {
+  try {
+    const e = [];
+    for (const ev of cache.events.slice(-EV_KEEP)) {
+      try {
+        e.push([ev.id || "", ev.ledgerClosedAt || "", ev.txHash || "", (ev.topic || []).map((t) => t.toXDR("base64")), ev.value.toXDR("base64")]);
+      } catch {}
+    }
+    localStorage.setItem(EV_STORE + id, JSON.stringify({ c: cache.cursor, e }));
+    cache.saved = cache.cursor;
+  } catch {}
+}
 async function fetchVaultEvents() {
   const v = vault;
-  const filters = [{ type: "contract", contractIds: [realId(v)] }];
+  const id = realId(v);
+  const filters = [{ type: "contract", contractIds: [id] }];
   const dedupe = (list) => {
     const seen = new Set();
     return list.filter((e) => {
@@ -4339,48 +4497,42 @@ async function fetchVaultEvents() {
       return true;
     });
   };
-  const cached = eventCache.get(v);
+  let cached = eventCache.get(v);
+  if (!cached) {
+    cached = evLoad(id);
+    if (cached) eventCache.set(v, cached);
+  }
   if (cached && cached.cursor) {
     try {
       let cursor = cached.cursor;
-      for (let page = 0; page < 10; page++) {
+      const had = cached.events.length;
+      for (let page = 0; page < 30; page++) {
         const res = await server.getEvents({ cursor, filters, limit: 200 });
         cached.events.push(...(res.events || []));
         if (!res.cursor || res.cursor === cursor) break;
         cursor = res.cursor;
+        if (res.latestLedger && evLedger(cursor) >= res.latestLedger - 1) break; // the scan has reached the newest ledger
       }
       cached.cursor = cursor;
       cached.events = dedupe(cached.events);
+      // stored again when something new arrived, or when the scan has moved on by a few hours
+      if (cached.events.length !== had || evLedger(cursor) - evLedger(cached.saved) > 2000) evSave(id, cached);
       return cached.events;
     } catch (e) {
       console.warn("events (incremental)", e); // if the cursor fell outside the range the network keeps, scan from the start
     }
   }
-  const ledgerOf = (c) => {
-    try {
-      return Number(BigInt(String(c).split("-")[0]) >> 32n);
-    } catch {
-      return Infinity;
-    }
-  };
-  let all = [];
   try {
-    const h = await server.getHealth();
-    const latest = h.latestLedger;
-    let res = await server.getEvents({ startLedger: h.oldestLedger + 2, filters, limit: 200 });
-    all = [...(res.events || [])];
-    let cursor = res.cursor;
-    for (let page = 0; page < 30 && cursor && ledgerOf(cursor) < latest; page++) {
-      res = await server.getEvents({ cursor, filters, limit: 200 });
-      all.push(...(res.events || []));
-      if (!res.cursor || res.cursor === cursor) break;
-      cursor = res.cursor;
-    }
-    eventCache.set(v, { events: dedupe(all), cursor });
+    const all = await scanAll(filters, 200);
+    // what this browser already had (older than the network keeps) stays in front of what was just read
+    const fresh = { events: dedupe([...(cached ? cached.events : []), ...all.events]), cursor: all.cursor, saved: null };
+    eventCache.set(v, fresh);
+    if (all.cursor) evSave(id, fresh);
+    return fresh.events;
   } catch (e) {
     console.warn("events", e);
   }
-  return dedupe(all);
+  return cached ? cached.events : [];
 }
 
 // escaping for on-chain data that goes into innerHTML
@@ -4504,6 +4656,7 @@ async function readXlmPool() {
 async function refreshSell() {
   if (!SV.factory || !me) return;
   await pickGeneration();
+  warmSell(); // the vault's reads leave together with the price's below, not after them
   const [vo, pool, q] = await Promise.all([
     read(SV.factory, "vault_of", [addr(me)]),
     readXlmPool(),
@@ -5043,6 +5196,7 @@ async function tradeSync() {
   if (TR.key !== m.token) return;
   if (!r.ok || !r.value) return tradeNote("This market has no pool with a price history yet, so there is nothing to chart.");
   const pair = String(r.value);
+  read(pair, "get_reserves").catch(() => {}); // asked now, read in tradeTick below: the live price arrives one round sooner
   const t0 = await read(pair, "token_0");
   if (TR.key !== m.token) return;
   TR.base0 = t0.ok ? String(t0.value) === BASE.addr : true;
@@ -5123,7 +5277,12 @@ async function tradeHistory() {
   let out = null;
   // 1) continue from the stored cursor  2) from the oldest ledger the network keeps  3) without a filter if the topic filter is not accepted
   const tries = [];
-  const full = (filters, limit) => async () => ({ ...(await scan((h) => ({ startLedger: h.oldestLedger + 2 }), filters, limit)), full: true });
+  const full = (filters, limit) => async () => {
+    const all = await scanAll(filters, limit, () => TR.pair === pair);
+    const got = [];
+    parse(all.events, got);
+    return { got, cursor: all.cursor, h: all.h, full: true };
+  };
   if (cache.cursor) tries.push(() => scan(() => ({ cursor: cache.cursor }), strict, 1000));
   tries.push(full(strict, 1000));
   tries.push(full(loose, 200));
