@@ -50,7 +50,13 @@ done
 echo "Testnet access list updated ($(grep -E '^IORA_ACCESS_CODES=' "$ROOT/access.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') codes, $(grep -E '^IORA_ALLOWED_WALLETS=' "$ROOT/access.env" | cut -d= -f2- | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') wallets)."
 
 echo "Publishing..."
-OUT=$($V deploy --prod --yes 2>&1)
+# A failed publish must not look like a successful one: stop and show what Vercel said.
+if ! OUT=$($V deploy --prod --yes 2>&1); then
+  echo "$OUT" | tail -15
+  echo
+  echo "PUBLISH FAILED: the site was not updated. Run the same command again; if it fails again, the lines above say why."
+  exit 1
+fi
 echo "$OUT" | grep -E "Production|Aliased|Error" | tail -4
 URL="https://iorafi.com"
 

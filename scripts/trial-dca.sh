@@ -13,7 +13,7 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 N="--network testnet"
 source testnet/addr.env
 source testnet/factory.env
-if [ "${VAULT_V:-0}" -lt 11 ]; then echo "The live factory is version ${VAULT_V:-?}; DCA needs version 11 (bash scripts/deploy-v11.sh)."; exit 1; fi
+if [ "${VAULT_V:-0}" -lt 11 ]; then echo "The live factory is version ${VAULT_V:-?}; DCA needs version 11 or later (bash scripts/deploy-v13.sh)."; exit 1; fi
 
 inv() { stellar contract invoke --source "$1" $N --id "$2" -- "${@:3}" 2>&1; }
 inv2() { local o; o=$(inv "$@"); if echo "$o" | grep -q "error:" && ! echo "$o" | grep -q "Error(Contract"; then sleep 6; o=$(inv "$@"); fi; echo "$o"; }

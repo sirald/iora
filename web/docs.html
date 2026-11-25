@@ -14,7 +14,7 @@
     <meta property="og:title" content="Iora Docs" />
     <meta property="og:description" content="Iora documentation: vaults, limit orders, yield, keepers, security, risks and contract reference." />
     <meta property="og:url" content="https://iorafi.com/docs.html" />
-    <meta property="og:image" content="https://iorafi.com/og.png" />
+    <meta property="og:image" content="https://iorafi.com/og-2.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -132,23 +132,18 @@
 
         <section id="compare">
           <h2>How Iora compares</h2>
-          <p>
-            Yield on waiting orders is not a new idea. On EVM chains, Mangrove's “reactive liquidity” lets offers source funds from
-            lending markets such as Aave until they are taken, mainly for market makers. Iora brings the same principle to Stellar
-            in a simple form for everyday buyers.
-          </p>
+          <p>How an order in an Iora vault differs from an order on Stellar's built-in order book.</p>
           <div class="table-wrap">
             <table class="cmp">
               <thead>
-                <tr><th></th><th>Stellar order book</th><th>DEX limit orders<br /><span>e.g. CoW Swap</span></th><th>Reactive liquidity<br /><span>Mangrove, EVM</span></th><th class="us">Iora</th></tr>
+                <tr><th></th><th>Stellar order book</th><th class="us">Iora</th></tr>
               </thead>
               <tbody>
-                <tr><th>Funds earn while waiting</th><td>No</td><td>No, funds stay idle in your wallet</td><td>Yes, through strategies such as Kandel-AAVE</td><td class="us">Yes, on Blend</td></tr>
-                <tr><th>Who holds the funds</th><td>Your account</td><td>Your wallet</td><td>A strategy contract you control</td><td class="us">Your own vault contract</td></tr>
-                <tr><th>Every order fully funded</th><td>Yes</td><td>No, one balance can back several orders</td><td>Depends on strategy</td><td class="us">Yes, each order reserves its amount</td></tr>
-                <tr><th>Partial fills</th><td>Yes</td><td>Yes</td><td>Yes</td><td class="us">Yes, with a minimum fill size you choose</td></tr>
-                <tr><th>Built for</th><td>Traders</td><td>Traders</td><td>Market makers and builders</td><td class="us">Everyday buyers and savers</td></tr>
-                <tr><th>Network</th><td>Stellar</td><td>Ethereum and L2s</td><td>EVM chains</td><td class="us">Stellar (Soroban)</td></tr>
+                <tr><th>Funds earn while waiting</th><td>No</td><td class="us">Yes, on Blend, for assets the pool lists</td></tr>
+                <tr><th>Who holds the funds</th><td>Your account</td><td class="us">Your own vault contract</td></tr>
+                <tr><th>Every order fully funded</th><td>Yes</td><td class="us">Yes, each order reserves its amount</td></tr>
+                <tr><th>Partial fills</th><td>Yes</td><td class="us">Yes, with a minimum fill size you choose</td></tr>
+                <tr><th>Built for</th><td>Traders</td><td class="us">Everyday buyers and savers</td></tr>
               </tbody>
             </table>
           </div>
@@ -207,16 +202,16 @@
             <dt>You receive at least</dt><dd>Computed on-chain from your price and checked again after the swap.</dd>
             <dt>Keep it in my vault</dt><dd>Ticked by default: what the order buys stays in your vault and earns. Unticked: it goes to your wallet.</dd>
           </dl>
-          <p class="muted">Every market is a coin against USDC. On testnet today those coins are XLM, BTC, EURC, XRP and XTAR. Your assets earn interest while they wait, as long as the lending pool has a market for them. The testnet pool does not list the other test tokens (BTC, EURC, XRP, XTAR) yet, so on testnet those four wait in your vault without earning; stop loss is not available for them and their test pools are small.</p>
+          <p class="muted">Every market is a coin against USDC; the Markets page of the app lists them. Your assets earn interest while they wait, as long as the lending pool has a market for them. On testnet today that is USDC and XLM. The other test coins wait in your vault without earning; stop loss is not available for them and their test pools are small.</p>
         </section>
 
         <section id="stop-loss">
           <h2>Take profit and stop loss</h2>
           <p>
             <b>Take profit (buy, then sell automatically).</b> On the Buy side of the Trade page, tick <i>Take profit</i> and
-            type a price before you place a buy order. When the buy fills, the coin stays in your vault, keeps earning, and a
-            sell order for it opens in the same transaction at your take profit price, valid for 30 days. There is nothing
-            extra to sign. The take profit price cannot be below your buy price. If new orders are paused at that moment, the
+            type a price before you place a buy order. When the buy fills, the coin stays in your vault (and keeps earning, if the
+            lending pool lists it), and a sell order for it opens in the same transaction at your take profit price. That sell
+            order stays open until it fills or you cancel it. There is nothing extra to sign. The take profit price cannot be below your buy price. If new orders are paused at that moment, the
             buy still fills and the coin simply waits in your vault as available balance.
           </p>
           <p>
@@ -241,7 +236,7 @@
             <dt>Limit</dt><dd>For a buy order, the most USDC you are willing to pay for 1 unit of the coin. For a sell order, the least USDC you accept for 1 unit. The order fills at this price or better, never worse.</dd>
             <dt>Minimum fill</dt><dd>The smallest piece the order may be filled in. Only the final remainder can be smaller. Left empty, the app uses a quarter of the amount.</dd>
             <dt>Max price impact</dt><dd>How far a single fill may move the price of the pool it trades in (applies to the vault's built-in single-pool route). If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
-            <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them; they have no end date. (An order in a vault opened before November 2026 still ends by itself after one year.)</dd>
+            <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them; they have no end date.</dd>
           </dl>
           <h3>Price improvement</h3>
           <p>
@@ -262,7 +257,7 @@
 
         <section id="dca">
           <h2>DCA (scheduled orders)</h2>
-          <p>A DCA plan buys or sells a fixed amount at a fixed interval, for example 10 USDC of a coin every 6 hours. You find it on the <i>DCA</i> tab of the order form. It is an ordinary order with a schedule, and the schedule is enforced by your vault contract, not by the keeper: nobody can fill a part before it is due, and a fill is always exactly one part.</p>
+          <p>A DCA plan buys or sells a fixed amount at a fixed interval, for example 500 USDC of a coin every week. You find it on the <i>DCA</i> tab of the order form. It is an ordinary order with a schedule, and the schedule is enforced by your vault contract, not by the keeper: nobody can fill a part before it is due, and a fill is always exactly one part.</p>
           <dl class="terms">
             <dt>Amount each time</dt><dd>What one buy spends (in USDC) or one sale sells (in the coin).</dd>
             <dt>Interval</dt><dd>The time between two parts, from 1 minute to 28 days. The first part is due right away.</dd>
@@ -275,11 +270,11 @@
 
         <section id="lifecycle">
           <h2>Order lifecycle</h2>
-          <figure class="flow" aria-label="An open order can fill in pieces or all at once, or end as cancelled or expired">
+          <figure class="flow" aria-label="An open order can fill in pieces or all at once, or be cancelled">
             <svg viewBox="0 0 640 220" role="img">
               <title>Order lifecycle</title>
               <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" /></marker></defs>
-              <g class="node end"><rect x="200" y="8" width="160" height="40" rx="20" /><text x="280" y="33">Cancelled or expired</text></g>
+              <g class="node end"><rect x="200" y="8" width="160" height="40" rx="20" /><text x="280" y="33">Cancelled</text></g>
               <g class="node"><rect x="10" y="88" width="110" height="44" rx="22" /><text x="65" y="115">Open</text></g>
               <g class="node"><rect x="200" y="88" width="160" height="44" rx="22" /><text x="280" y="115">Partially filled</text></g>
               <g class="node done"><rect x="470" y="88" width="160" height="44" rx="22" /><text x="550" y="115">Filled</text></g>
@@ -296,11 +291,10 @@
             </svg>
           </figure>
           <dl class="terms">
-            <dt>Open</dt><dd>Waiting for the price. The reserved amount is earning on Blend.</dd>
+            <dt>Open</dt><dd>Waiting for the price. The reserved amount keeps earning on Blend, if the pool lists that asset.</dd>
             <dt>Partially filled</dt><dd>Still open; part of the amount has been swapped. What it bought is already in your vault (or in your wallet, if you chose that).</dd>
             <dt>Filled</dt><dd>The whole amount has been spent.</dd>
             <dt>Cancelled</dt><dd>You cancelled it. The unfilled part returns to your available balance immediately.</dd>
-            <dt>Expired</dt><dd>The duration passed before it filled completely. The unfilled part stays reserved, and keeps earning, until you press <i>Cancel</i> to release it.</dd>
           </dl>
         </section>
 
@@ -378,8 +372,8 @@
             <dd>
               For now, your deposit sits in a Blend lending pool that Iora does not run. The pool, its price oracle and its
               backstop are run by Blend and the pool's operators. Iora does not control them and cannot make up a loss that
-              happens there. Once there is enough liquidity, we plan to open Iora's own lending pools; until then every
-              vault uses this Blend pool.
+              happens there. Once there is enough liquidity, we plan to open Iora's own lending pools; that would give Iora the pool's risk
+              to manage, not remove it. Until then every vault uses this Blend pool.
               All vaults supply to the same Blend pool. If a borrower's debt exceeds their collateral, for example after an oracle
               failure, the loss is covered first by Blend's backstop. If the backstop cannot cover it, the remaining bad debt is
               spread across lenders, which lowers the value of every deposit in that pool, including your vault's.
@@ -395,7 +389,7 @@
             <dt>Keeper risk</dt>
             <dd>If no keeper is running, orders do not fill, and you can miss a price that came and went. Today Iora runs a single keeper, so it can be offline for hours. This never puts funds at risk: cancelling and withdrawing do not need the keeper.</dd>
             <dt>Coins that can be traded</dt>
-            <dd>A vault only accepts orders between coins on the factory's allowed list (on testnet: USDC, XLM, BTC, EURC, XRP, XTAR). An order that buys any other token is rejected by the contract, so nobody can trick you into signing an order for a fake token. The guardian can add a coin to the list or remove one; removing only blocks new orders, and you can always withdraw whatever your vault holds.</dd>
+            <dd>A vault only accepts orders between coins on the factory's allowed list. An order that buys any other token is rejected by the contract, so nobody can trick you into signing an order for a fake token. The guardian can add a coin to the list or remove one; removing only blocks new orders, and you can always withdraw whatever your vault holds.</dd>
             <dt>Sending to a wallet without a trustline</dt>
             <dd>If you choose to have a fill sent to your wallet and the wallet cannot hold that asset (for example no USDC trustline), the fill still happens and the coin stays in your vault instead.</dd>
             <dt>Website and network access</dt>
@@ -421,7 +415,7 @@
             is complete, and the report will be published here.
           </p>
           <p class="addr">
-            The contracts are public on Stellar testnet. Vault factory: <code id="addr-factory">CAJCXP5WEK5MNRT2BITI5YD57RILKWFNTFQGUFZSZRLCGHMQXPN6RCR5</code>
+            The contracts are public on Stellar testnet. Vault factory: <code id="addr-factory">CAFI6QIQUCMDB72YZ3BLSIA2PPFPGLWASMCRG72OE4JOQUR6JPBGBKIZ</code>
           </p>
           <p>
             Found a vulnerability? Please report it privately to <a href="mailto:hello@iorafi.com?subject=Security">hello@iorafi.com</a>
@@ -436,10 +430,9 @@
           <details><summary>I got test USDC from another faucet. Why can't I use it?</summary><p>On Stellar a token is identified by its name and its issuer. Iora uses the test USDC that the Blend testnet pool accepts. Test USDC from Circle's faucet or from Soroswap has the same name but a different issuer, so it is a different token and will not show up here. Get the right one on the <i>Test funds</i> page by selling a little test XLM. On mainnet there is only one USDC.</p></details>
           <details><summary>Does Iora hold my funds?</summary><p>No. Your funds are in your own vault contract and, through it, on Blend. Neither Iora nor the keeper can withdraw them.</p></details>
           <details><summary>Why not use Stellar's built-in order book?</summary><p>An order on the Stellar order book keeps your funds idle until it fills. With Iora, the amount waiting for your price earns interest on Blend.</p></details>
-          <details><summary>Why hasn't my order filled?</summary><p>The price may not have reached your limit, the order may have expired, or the pool may be too thin to fill within your price impact limit. The orders list on the <i>Trade</i> page shows the status.</p></details>
+          <details><summary>Why hasn't my order filled?</summary><p>The price may not have passed your limit by enough to cover the fill fee, the lending pool may be short of cash at that moment, or the pool the fill trades in may be too thin for your price impact limit. The orders list on the <i>Trade</i> page shows the status.</p></details>
           <details><summary>Can I lose money?</summary><p>Yes. Blend bad debt, a contract bug or a phishing site could cause losses. See <a href="#risks">Risks</a>. On testnet only test funds are used.</p></details>
           <details><summary>How much interest will I earn?</summary><p>It depends on how much of the Blend pool is borrowed, and changes constantly. The <i>Portfolio</i> page shows what you have earned.</p></details>
-          <details><summary>What happens to an expired order?</summary><p>It can no longer fill. Its unfilled amount stays reserved and keeps earning until you cancel it.</p></details>
           <details><summary>When will Iora launch on mainnet?</summary><p>Not before an independent security audit is complete.</p></details>
         </section>
 
@@ -466,11 +459,12 @@
           <h2>Roadmap</h2>
           <ol class="road">
             <li><b>Testnet prototype</b><span>Vaults, limit orders in both directions, keeper, app and docs. Done.</span></li>
-            <li class="now"><b>Testnet beta</b><span>Invite-only beta, feedback round. Under way. Each user now has a single vault for all of their coins; XLM, BTC, EURC, XRP and XTAR trade against USDC. Next: keeper running on a server.</span></li>
+            <li class="now"><b>Testnet beta</b><span>Invite-only beta, feedback round. Under way. Each user has a single vault for all of their coins, and every market is a coin against USDC. Orders can be limit, scaled or scheduled (DCA), and the keeper sends each fill along the best route it finds.</span></li>
             <li><b>Open testnet</b><span>Open to everyone on testnet, no invite needed.</span></li>
-            <li><b>Independent audit</b><span>Security review of the vault and factory contracts; report published.</span></li>
+            <li><b>Independent audit</b><span>Security review of the vault, factory and filler contracts; the report will be published.</span></li>
             <li><b>Mainnet</b><span>Only after the audit is complete.</span></li>
             <li class="goal"><b>Cross-chain</b><span>Keep your money on Stellar and place orders to buy coins on other networks.</span></li>
+            <li><b>Tokenized stocks</b><span>Limit orders for tokenized shares. The cash behind a buy order earns while it waits; a share itself earns only if a lending pool lists it.</span></li>
             <li><b>Planned</b><span>Iora's own lending pools once liquidity allows, more pairs, more wallets, wallet and DAO integrations.</span></li>
           </ol>
         </section>

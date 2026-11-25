@@ -1,9 +1,10 @@
 // Iora keeper bot.
 //
-// Scans every vault in the factories (buy: USDC -> XLM, sell: XLM -> USDC), finds the open orders and,
-// when the market meets the limit,
-// calls `execute`. The keeper can never choose the recipient, the amount or the limit; it only
-// says "try now" and picks the fill size. A bad keeper can cause a delay at most.
+// Scans every vault in the factories, finds the open orders and fills the ones whose limit can be met: against
+// an opposite order in another vault (`cross`), along the best route over the trading venues it knows
+// (`fill_via`, through the filler contract), or through the vault's built-in route (`execute`).
+// The keeper can never choose the recipient, the amount or the limit; it only says "try now" and picks the fill
+// size and the route. A bad keeper can cause a delay at most.
 //
 // Usage:
 //   node keeper.js            runs continuously: scans on every new ledger (~5 s) (every INTERVAL_SEC with SCAN_MODE=interval)
@@ -661,8 +662,13 @@ const chainLists = new Map(); // factory -> { count, lens: bucket -> length, own
 async function listChained(f) {
   const c = await read(f, "vault_count");
   if (!c.ok) throw new Error(errText(c));
-  const have = chainLists.get(f) ?? { count: -1, lens: new Map(), owners: new Set(), vaults: [] };
-  if (have.count === Number(c.value)) return have.vaults;
+  const prev = chainLists.get(f);
+  if (prev && prev.count === Number(c.value)) return prev.vaults;
+  // The walk below works on a copy: if a read fails half way, the next scan starts again from the last complete
+  // list (a half-read bucket would otherwise look finished and the vaults deeper in it would never be listed).
+  const have = prev
+    ? { count: prev.count, lens: new Map(prev.lens), owners: new Set(prev.owners), vaults: [...prev.vaults] }
+    : { count: -1, lens: new Map(), owners: new Set(), vaults: [] };
   for (let start = 0; start < 256; start += 64) {
     const hs = await read(f, "heads", [u32(start), u32(64)]);
     if (!hs.ok) throw new Error(errText(hs));
@@ -1256,7 +1262,7 @@ function venueMirror(list, tin, tout) {
  * token, the opposite direction is read instead and mirrored. null when neither works (tried again in 30 minutes).
  */
 async function venueTemplate(venue, opt, tin, tout) {
-  const key = `${venue.name}:${tin}:${opt.id}`;
+  const key = `${venue.name}:${tin}:${tout}:${opt.id}`;
   const c = venueState.auth.get(key);
   if (c && (c.list ? Date.now() - c.at < 6 * 3600_000 : Date.now() - c.at < 30 * 60_000)) return c.list;
   let list = null;
@@ -2100,6 +2106,9 @@ async function runTtlJob(job) {
       // If there is a follow-up order setting, its entry too (older vaults have no such function; the read fails).
       const fu = await read(v, "get_follow_up", [u32(id)]);
       if (fu.ok && fu.value) sources.push(["get_follow_up", [u32(id)]]);
+      // A scheduled order (DCA) keeps its schedule in an entry of its own. The contract extends it on every fill,
+      // but a plan that waits a long time for its price would otherwise let it run out.
+      if (schedules.get(`${v}:${id}`)) sources.push(["get_schedule", [u32(id)]]);
     }
     for (const [m, a] of sources) {
       for (const k of await footprintOf(v, m, a)) seen.set(keyId(k), k);
@@ -2405,7 +2414,7 @@ async function stop(sig) {
   if (stopping) return;
   stopping = true;
   log(`keeper stopped (${sig})`);
-  await notify("Stopped (Ctrl+C). Orders are no longer filled automatically.");
+  await notify(`Stopped (${sig}). Orders are not filled until it starts again.`);
   process.exit(0);
 }
 process.on("SIGINT", () => stop("Ctrl+C"));

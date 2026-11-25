@@ -6,14 +6,6 @@ import "./skin.css";
 const f = import.meta.env?.VITE_FACTORY;
 const el = document.getElementById("addr-factory");
 if (f && el) el.textContent = f;
-// Show the sell factory's row if a sell factory is deployed
-const fs = import.meta.env?.VITE_FACTORY_SELL;
-const row = document.getElementById("row-factory-sell");
-// In the single-vault version (version 7) buying and selling use the same factory: the second row is not shown.
-if (fs && fs !== f && row) {
-  document.getElementById("addr-factory-sell").textContent = fs;
-  row.hidden = false;
-} else if (row) row.hidden = true;
 
 // Copy button next to the addresses
 for (const code of document.querySelectorAll(".addr code")) {

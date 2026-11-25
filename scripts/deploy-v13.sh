@@ -4,7 +4,7 @@
 #     Aquarius, a split between them) and pays the vault back; the vault still checks the limit itself.
 #   - the filler contract itself (contracts/filler) is deployed here too: testnet/filler.env (FILLER, AQUA_ROUTER).
 #   1) builds the contracts and runs the tests (deploys nothing if they fail)
-#   2) uploads the new vault code and deploys the factory (testnet/factory.env VAULT_V=12; allowed: USDC, XLM + testnet/pairs.env)
+#   2) uploads the new vault code and deploys the factory (testnet/factory.env VAULT_V=13; allowed: USDC, XLM + testnet/pairs.env)
 #   3) adds the previous factory to the "old" and "generations" lists: the keeper keeps filling it, and a user
 #      with funds in an older vault carries on with that vault (no migration; it fills through Soroswap only)
 #   4) republishes the site

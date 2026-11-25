@@ -670,7 +670,8 @@ body.xmarket .keeprow { display: none; }
 :root:root:root .appbody .mkt .swap-info dd small { display: block; margin-top: 2px; font: 400 12px/1.3 var(--sans); color: var(--muted); }
 :root:root:root .appbody .tradeview .ticket .mkt-slot, :root:root:root .appbody .tradeview .ticket .mkt-slot > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
 :root:root .appbody #slip-chips { flex-wrap: wrap; row-gap: 6px; }
-:root:root .appbody #slip-chips .slip-own { width: 88px; }
+:root:root .appbody #slip-chips .slip-own { width: 66px; flex: none; }
+:root:root .appbody #slip-chips #slip-mine[hidden] { display: none; }
 
 /* 20) Market tab: a rate line that can be turned round, a route button that opens the shares by venue, the price
        impact under the amount received */
@@ -696,3 +697,188 @@ body.xmarket .keeprow { display: none; }
 :root:root:root .appbody .tradeview .ticket > .tabs button { border-radius: 10px; }
 :root:root .appbody .sidesw, :root:root .appbody .sidesw a { border-radius: 14px; }
 :root:root .appbody .chart-box, :root:root .appbody .chartcard { border-radius: 16px; }
+
+/* 22. Deposit box: opens on the page you are on */
+:root:root .depbox { width: min(420px, calc(100vw - 32px)); }
+:root:root .depbox .box { margin: 14px 0 4px; }
+:root:root .depbox .box-main { display: flex; align-items: center; gap: 10px; }
+:root:root .depbox .box-main input { flex: 1; min-width: 0; }
+
+/* 23) Trade page as a trading desk: the page uses the whole screen, panels sit close together, the chart takes all
+       the width that is left and the order form is a narrow column on the right. */
+:root:root:root body.appbody[data-view="vault"] .shell, :root:root:root body.appbody[data-view="sell"] .shell { width: auto; max-width: none; margin: 0; padding: 8px 8px 16px; gap: 8px; }
+:root:root:root .appbody .tradeview { display: grid; gap: 8px; }
+:root:root:root .appbody .tradeview[hidden] { display: none; }
+:root:root:root .appbody .tradeview .tbar { padding: 10px 18px; gap: 8px 34px; border-radius: 14px; margin: 0; }
+:root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) 372px !important; gap: 8px !important; grid-template-rows: auto auto !important; margin: 0; }
+:root:root:root .appbody .tradeview .tslot .chartcard { min-height: 0; height: auto; border-radius: 14px; }
+:root:root:root .appbody .tradeview .chart-box { height: max(420px, calc(100vh - 486px)); }
+:root:root:root .appbody .tradeview .cols > .side { display: flex; flex-direction: column; gap: 8px; align-self: stretch; }
+:root:root:root .appbody .tradeview .cols > .side > * { margin: 0; }
+:root:root:root .appbody .tradeview .cols > .side > .ticket { flex: 1; border-radius: 14px; }
+:root:root:root .appbody .tradeview .cols > .side > .panel, :root:root:root .appbody .tradeview .deck > .panel { border-radius: 14px; }
+:root:root:root .appbody .tradeview .deck > .tcard { min-height: 240px; }
+/* order types: plain tabs with a line under the chosen one */
+:root:root:root .appbody .tradeview .ticket > .tabs { background: none; box-shadow: none; border-radius: 0; padding: 0 4px; gap: 20px; display: flex; border-bottom: 1px solid var(--line); }
+:root:root:root .appbody .tradeview .ticket > .tabs button { flex: none; padding: 8px 0 10px; background: none; box-shadow: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; color: var(--muted); }
+:root:root:root .appbody .tradeview .ticket > .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--text); background: none; }
+/* account box under the order form */
+:root:root:root body.appbody[data-view="vault"] > header.top, :root:root:root body.appbody[data-view="sell"] > header.top { padding: 0 16px; }
+:root:root:root .appbody .tradeview section.panel.acct { display: block !important; padding: 14px 16px; }
+:root:root:root .appbody .acct h2 { margin: 0 0 10px; font-size: 15px; }
+:root:root:root .appbody .acct dl { margin: 0; display: grid !important; grid-template-columns: 1fr !important; gap: 9px; }
+:root:root:root .appbody .acct dl > div { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+:root:root:root .appbody .acct dt { color: var(--muted); }
+:root:root:root .appbody .acct dd { margin: 0; font-family: var(--mono); letter-spacing: -0.02em; }
+@media (max-width: 1000px) {
+  :root:root:root .appbody .tradeview .cols { grid-template-columns: minmax(0, 1fr) !important; }
+  :root:root:root .appbody .tradeview .chart-box { height: 330px; }
+}
+
+/* 24) Trade page, wide window: orders and balances are real table rows (one line per order, a header on top)
+       instead of cards. On a narrow window the orders stay as cards. */
+:root:root:root .appbody .bal-table { overflow-x: auto; }
+:root:root:root .appbody .bal-table table { width: 100%; border-collapse: collapse; }
+:root:root:root .appbody .bal-table th, :root:root:root .appbody .bal-table td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--line); font-size: 13px; white-space: nowrap; }
+:root:root:root .appbody .bal-table th { font-weight: 500; font-size: 12px; color: var(--muted); }
+:root:root:root .appbody .bal-table td { font-family: var(--mono); letter-spacing: -0.02em; }
+:root:root:root .appbody .bal-table th:first-child, :root:root:root .appbody .bal-table td:first-child { text-align: left; font-family: var(--sans); font-weight: 600; }
+@media (min-width: 1001px) {
+  :root:root:root .appbody .tradeview #orders table, :root:root:root .appbody .tradeview #sv-orders table { display: table; width: 100%; border-collapse: collapse; }
+  :root:root:root .appbody .tradeview #orders thead, :root:root:root .appbody .tradeview #sv-orders thead { display: table-header-group; }
+  :root:root:root .appbody .tradeview #orders tbody, :root:root:root .appbody .tradeview #sv-orders tbody { display: table-row-group; }
+  :root:root:root .appbody .tradeview #orders tr, :root:root:root .appbody .tradeview #sv-orders tr { display: table-row; padding: 0; margin: 0; background: none; box-shadow: none; border-radius: 0; opacity: 1; }
+  :root:root:root .appbody .tradeview #orders[data-show="open"] tr.is-done { display: none; }
+  :root:root:root .appbody .tradeview #orders th, :root:root:root .appbody .tradeview #sv-orders th { padding: 8px 12px; text-align: left; font-weight: 500; font-size: 12px; color: var(--muted); white-space: nowrap; border-bottom: 1px solid var(--line); }
+  :root:root:root .appbody .tradeview #orders td:nth-child(n), :root:root:root .appbody .tradeview #sv-orders td:nth-child(n) { display: table-cell; padding: 10px 12px; border-bottom: 1px solid var(--line); font: 13px var(--mono); letter-spacing: -0.02em; color: var(--text); vertical-align: middle; white-space: nowrap; overflow: visible; }
+  :root:root:root .appbody .tradeview #orders td:nth-child(n)::before, :root:root:root .appbody .tradeview #sv-orders td:nth-child(n)::before { content: none; }
+  :root:root:root .appbody .tradeview #orders td:nth-child(1), :root:root:root .appbody .tradeview #sv-orders td:nth-child(1) { color: var(--muted); }
+  :root:root:root .appbody .tradeview #orders td .bar, :root:root:root .appbody .tradeview #sv-orders td .bar { display: inline-block; vertical-align: middle; width: 48px; margin: 0 8px 0 0; }
+  :root:root:root .appbody .tradeview #orders td:last-child, :root:root:root .appbody .tradeview #sv-orders td:last-child { text-align: right; }
+  :root:root:root .appbody .tradeview #orders td:last-child button, :root:root:root .appbody .tradeview #sv-orders td:last-child button { margin-left: 6px; }
+  :root:root:root .appbody .tradeview #orders tr.is-done td:nth-child(n), :root:root:root .appbody .tradeview #sv-orders tr.is-done td:nth-child(n) { color: var(--text-2); }
+}
+
+/* 25) Portfolio: USDC on the left; the coins the vault holds stacked on the right (a coin that is not held is not
+       shown at all); the "keep my orders" box in the move dialog */
+:root:root:root .appbody .pf-vaults { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+:root:root:root .appbody .pf-side { display: grid; gap: 14px; min-width: 0; align-content: start; }
+:root:root:root .appbody .pf-side:not(:has(.vaultcard)) { display: none; }
+:root:root:root .appbody .pf-others { display: grid; gap: 14px; }
+:root:root:root .appbody .pf-others:empty { display: none; }
+:root:root:root .appbody.pf-nobase .pf-side > .vaultcard.sv-only { display: none !important; }
+:root:root:root .appbody.pf-nobase .pf-side:not(:has(.pf-mini)) { display: none; }
+:root:root:root .appbody .pf-mini { display: block; }
+:root:root:root .appbody .pf-mini .overview-head { display: flex; justify-content: space-between; align-items: center; }
+:root:root:root .appbody .pf-mini .overview-head a, :root:root:root .appbody .pf-mini .more { font-size: 13px; color: var(--accent); }
+:root:root:root .appbody .pf-mini .more { display: inline-block; margin-top: 8px; }
+@media (max-width: 800px) { :root:root:root .appbody .pf-vaults { grid-template-columns: minmax(0, 1fr); } }
+:root:root .appbody .mv-keep { display: flex; align-items: flex-start; gap: 8px; text-align: left; cursor: pointer; }
+:root:root .appbody .mv-keep input { margin-top: 3px; flex: none; }
+
+/* 26) Orders have no end date: the "Expires" column is not shown anywhere */
+:root:root:root .appbody #orders th:nth-child(7), :root:root:root .appbody #sv-orders th:nth-child(7),
+:root:root:root .appbody #orders td:nth-child(7), :root:root:root .appbody #sv-orders td:nth-child(7),
+:root:root:root .appbody .tradeview #orders td:nth-child(7), :root:root:root .appbody .tradeview #sv-orders td:nth-child(7) { display: none !important; }
+
+/* 27) Portfolio as a compact desk: a narrow centred column, small boxes on top (value, interest, summary), one table
+       below with tabs (balances, open orders), actions in the page head. Deposit and withdraw open in a box; the
+       old vault cards stay in the page only as the hidden machinery behind that box. */
+:root:root:root body.appbody[data-view="portfolio"] .shell { width: min(100% - 32px, 1280px); max-width: 1280px; gap: 10px; }
+:root:root:root .appbody .pfpage { gap: 8px; }
+:root:root:root .appbody .pfpage .pf-vaults { display: none !important; }
+:root:root:root .appbody .pfpage .lend-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 6px 0; padding: 0; }
+:root:root:root .appbody .pfpage .lend-head h1 { margin: 0; font-size: 28px; }
+:root:root:root .appbody .pf-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+:root:root:root .appbody .pf-acts button { padding: 7px 14px; border-radius: 10px; border: 0; background: none; box-shadow: inset 0 0 0 1px var(--line-2); color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
+:root:root:root .appbody .pf-acts button.pri { background: var(--accent); box-shadow: none; color: var(--accent-ink); font-weight: 600; }
+:root:root:root .appbody .pf-acts button[hidden] { display: none; }
+:root:root:root .appbody .pf-box { background: var(--card); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); min-width: 0; }
+:root:root:root .appbody .pf-top { display: grid; gap: 8px; grid-template-columns: minmax(0, 250px) minmax(0, 270px) minmax(0, 1fr); }
+:root:root:root .appbody .pf-top .pf-kpis { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); margin: 0; }
+:root:root:root .appbody .pf-top .pf-kpi { padding: 12px 14px; display: block; }
+:root:root:root .appbody .pf-top .pf-kpi > span { display: block; color: var(--muted); font-size: 12.5px; }
+:root:root:root .appbody .pf-top .pf-kpi > b { display: block; margin: 5px 0; font: 500 23px/1.3 var(--sans); letter-spacing: -0.01em; }
+:root:root:root .appbody .pf-top .pf-kpi > b small { font-size: 13px; color: var(--muted); font-weight: 400; }
+:root:root:root .appbody .pf-top .pf-kpi > small { display: block; font-size: 12px; color: var(--muted); }
+:root:root:root .appbody .pf-top .pf-kpi a, :root:root:root .appbody .pf-top .pf-kpi .link { color: var(--accent); font-size: 12px; }
+:root:root:root .appbody .pf-sum-head { display: flex; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+:root:root:root .appbody .pf-sum dl { margin: 0; padding: 10px 14px 12px; display: grid !important; grid-template-columns: minmax(0, 1fr) !important; gap: 8px; }
+:root:root:root .appbody .pf-sum dl > div { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+:root:root:root .appbody .pf-sum dt { color: var(--muted); }
+:root:root:root .appbody .pf-sum dd { margin: 0; font-family: var(--mono); letter-spacing: -0.02em; }
+:root:root:root .appbody .pf-sum dd .muted { font-family: var(--sans); }
+:root:root:root .appbody .pf-deck { padding: 0; overflow: hidden; }
+:root:root:root .appbody .pf-tabs { display: flex; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+:root:root:root .appbody .pf-tabs button { flex: none; padding: 10px 10px 9px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; background: none; box-shadow: none; color: var(--muted); font: 500 12.5px var(--sans); cursor: pointer; }
+:root:root:root .appbody .pf-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+:root:root:root .appbody .pf-deck .pf-t { width: 100%; border-collapse: collapse; }
+:root:root:root .appbody .pf-deck .pf-t th { padding: 9px 14px 5px; font-weight: 400; font-size: 12px; color: var(--muted); white-space: nowrap; text-align: left; border: 0; background: none; }
+:root:root:root .appbody .pf-deck .pf-t td { padding: 8px 14px; font-size: 12.5px; border: 0; border-top: 1px solid var(--line); white-space: nowrap; }
+:root:root:root .appbody .pf-deck .pf-t th.num, :root:root:root .appbody .pf-deck .pf-t td.num { text-align: right; font-family: var(--mono); }
+:root:root:root .appbody .pf-deck .pf-t th.num { font-family: var(--sans); }
+:root:root:root .appbody .pf-deck .pf-asset { font-weight: 600; }
+:root:root:root .appbody .pf-row-acts { text-align: right; }
+:root:root:root .appbody .pf-row-acts .link, :root:root:root .appbody .pf-row-acts a { margin-left: 12px; padding: 0; border: 0; background: none; box-shadow: none; color: var(--accent); font: 500 12.5px var(--sans); text-decoration: none; cursor: pointer; }
+:root:root:root .appbody .pf-none { padding: 16px 14px; margin: 0; font-size: 13px; }
+:root:root:root .appbody .pfpage > .pf > .fine { font-size: 12px; margin: 8px 2px 0; }
+:root:root:root .appbody .depbox-coins { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+:root:root:root .appbody .depbox-coins:empty { display: none; }
+@media (max-width: 760px) { :root:root:root .appbody .pf-top { grid-template-columns: minmax(0, 1fr); } }
+
+/* 28) Portfolio: value chart, DCA tab, and the slim "earlier vault" line */
+:root:root:root .appbody .pf-chart { display: flex; flex-direction: column; overflow: hidden; }
+:root:root:root .appbody .pf-chart-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding-right: 8px; }
+:root:root:root .appbody .pf-chart-head .pf-tabs { border-bottom: 0; }
+:root:root:root .appbody .pf-ranges { display: flex; gap: 2px; }
+:root:root:root .appbody .pf-ranges button { padding: 3px 7px; border: 0; border-radius: 7px; background: none; box-shadow: none; color: var(--muted); font: 500 11.5px var(--sans); cursor: pointer; }
+:root:root:root .appbody .pf-ranges button[aria-pressed="true"] { background: var(--line); color: var(--text); }
+:root:root:root .appbody .pf-chart svg { display: block; width: 100%; flex: 1; min-height: 150px; }
+:root:root:root .appbody .pf-chart svg .g { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+:root:root:root .appbody .pf-chart svg .l { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+:root:root:root .appbody .pf-chart svg .a { fill: var(--accent); opacity: 0.08; stroke: none; }
+:root:root:root .appbody .pf-chart svg text { fill: var(--muted); font: 10px var(--mono); }
+:root:root:root .appbody .pf-chart-note { margin: 0; padding: 0 14px 9px; font-size: 11.5px; color: var(--muted); }
+:root:root:root .appbody .pf-movenote { display: flex; align-items: center; gap: 14px; padding: 8px 14px; border-radius: 12px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); font-size: 12.5px; }
+:root:root:root .appbody .pf-movenote span { flex: 1; min-width: 0; color: var(--text-2); }
+:root:root:root .appbody .pf-movenote .link, :root:root:root .appbody #pf-move-link .link { padding: 0; border: 0; background: none; box-shadow: none; color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
+:root:root:root .appbody .pf-movenote [data-x] { color: var(--muted); }
+:root:root:root .appbody #pf-move-link { font-size: 12px; margin: 0 2px; }
+:root:root:root .appbody #pf-move-link[hidden] { display: none; }
+@media (max-width: 900px) { :root:root:root .appbody .pf-top { grid-template-columns: minmax(0, 1fr); } }
+
+/* 29) Portfolio, one size up: wider column, larger type and roomier boxes (no pattern behind the page) */
+:root:root:root .appbody .pfpage, :root:root:root .appbody .pf-top, :root:root:root .appbody .pf-top .pf-kpis { gap: 10px; }
+:root:root:root .appbody .pf-top { grid-template-columns: minmax(0, 300px) minmax(0, 330px) minmax(0, 1fr); }
+:root:root:root .appbody .pfpage .lend-head h1 { font-size: 32px; }
+:root:root:root .appbody .pf-acts button { padding: 9px 18px; font-size: 14px; }
+:root:root:root .appbody .pf-box { border-radius: 14px; }
+:root:root:root .appbody .pf-top .pf-kpi { padding: 16px 18px; }
+:root:root:root .appbody .pf-top .pf-kpi > span { font-size: 14px; }
+:root:root:root .appbody .pf-top .pf-kpi > b { font-size: 28px; margin: 7px 0; }
+:root:root:root .appbody .pf-top .pf-kpi > b small { font-size: 15px; }
+:root:root:root .appbody .pf-top .pf-kpi > small, :root:root:root .appbody .pf-top .pf-kpi a, :root:root:root .appbody .pf-top .pf-kpi .link { font-size: 13px; }
+:root:root:root .appbody .pf-sum-head { padding: 13px 18px; font-size: 14px; }
+:root:root:root .appbody .pf-sum dl { padding: 14px 18px 16px; gap: 11px; }
+:root:root:root .appbody .pf-sum dl > div { font-size: 14px; }
+:root:root:root .appbody .pf-tabs button { padding: 13px 14px 12px; font-size: 14px; }
+:root:root:root .appbody .pf-ranges button { padding: 4px 9px; font-size: 12.5px; }
+:root:root:root .appbody .pf-chart svg { min-height: 200px; }
+:root:root:root .appbody .pf-chart svg text { font-size: 9px; }
+:root:root:root .appbody .pf-deck .pf-t th { padding: 12px 18px 7px; font-size: 13px; }
+:root:root:root .appbody .pf-deck .pf-t td { padding: 12px 18px; font-size: 14px; }
+:root:root:root .appbody .pf-row-acts .link, :root:root:root .appbody .pf-row-acts a { font-size: 14px; margin-left: 16px; }
+:root:root:root .appbody .pf-movenote { padding: 11px 18px; font-size: 14px; border-radius: 14px; }
+:root:root:root .appbody .pf-movenote .link, :root:root:root .appbody #pf-move-link .link { font-size: 14px; }
+:root:root:root .appbody .pf-none { padding: 20px 18px; font-size: 14px; }
+:root:root:root .appbody .pfpage > .pf > .fine, :root:root:root .appbody #pf-move-link { font-size: 13px; }
+:root:root:root .appbody .pf-chart-note { padding: 0 18px 11px; font-size: 12.5px; }
+@media (max-width: 900px) { :root:root:root .appbody .pf-top { grid-template-columns: minmax(0, 1fr); } }
+
+/* 30) "Iora was updated" notice: a small card at the bottom right instead of a bar across the top */
+:root:root .stale { position: fixed; top: auto; left: auto; right: 20px; bottom: 20px; z-index: 200; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-start; gap: 16px; width: auto; max-width: min(420px, calc(100vw - 24px)); padding: 12px 12px 12px 16px; border-radius: 14px; background: var(--card, var(--surface)); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-2), 0 12px 32px rgba(0, 0, 0, 0.35); font: 14px/1.4 var(--sans); }
+:root:root .stale span { display: grid; gap: 2px; min-width: 0; }
+:root:root .stale b { font-weight: 600; }
+:root:root .stale small { font-size: 12.5px; color: var(--muted); }
+:root:root .stale button { flex: none; padding: 8px 16px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font: 600 13.5px var(--sans); cursor: pointer; box-shadow: none; }
+@media (max-width: 560px) { :root:root .stale { left: 12px; right: 12px; bottom: 12px; max-width: none; justify-content: space-between; } }

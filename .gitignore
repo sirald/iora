@@ -45,4 +45,5 @@ testnet/*
 !testnet/generations.env
 !testnet/markets.env
 !testnet/batch.env
+!testnet/filler.env
 !testnet/pairs.env

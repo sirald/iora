@@ -14,7 +14,7 @@
     <meta property="og:title" content="Iora App" />
     <meta property="og:description" content="Open your Iora vault on Stellar testnet and place a yield-bearing limit order." />
     <meta property="og:url" content="https://iorafi.com/app.html" />
-    <meta property="og:image" content="https://iorafi.com/og.png" />
+    <meta property="og:image" content="https://iorafi.com/og-2.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -146,7 +146,7 @@
       <div class="view marketspage" data-view-pane="markets">
         <section class="lend-head mk-head">
           <h1>Markets</h1>
-          <p class="muted">Set a price to buy or sell. While the order waits, your deposit earns interest on Blend. Rates are live from Stellar testnet and change all the time.</p>
+          <p class="muted">Set a price to buy or sell. While the order waits, your deposit earns interest on Blend if the pool lists that coin. Rates are live from Stellar testnet and change all the time.</p>
         </section>
         <section class="panel mk">
           <div class="table-wrap">
@@ -172,6 +172,7 @@
         <div class="tb-stat"><span>24h change</span><b class="tb-chg">—</b></div>
         <div class="tb-stat"><span>24h high</span><b class="tb-hi">—</b></div>
         <div class="tb-stat"><span>24h low</span><b class="tb-lo">—</b></div>
+        <div class="tb-stat"><span>24h volume <i class="tip" tabindex="0" data-tip="Estimated from the price moves of one trading pool over the last 24 hours. Trades on other venues are not counted.">i</i></span><b class="tb-vol">—</b></div>
         <div class="tb-stat"><span>Lending pool in use <i class="tip" tabindex="0" data-tip="Share of the USDC in the Blend pool that is currently borrowed. Higher use means higher rates, but less cash for instant withdrawals.">i</i></span><b id="m-util">—</b><small id="m-size" hidden></small><span class="util-bar" hidden><span id="m-util-bar"></span></span></div>
         <div class="tb-earn">Waiting buy orders earn <b id="m-apr">—</b> a year <i class="tip" tabindex="0" data-tip="Estimated yearly interest Blend lenders earn on USDC right now. It changes all the time.">i</i></div>
       </section>
@@ -239,7 +240,7 @@
               </div>
               <output id="receive" hidden>0</output>
               <div class="maxrow"><span>Max. buy</span><b id="max-qty">—</b></div>
-              <label class="chk keeprow"><input type="checkbox" id="keep-on" checked /> <span>Keep the XLM in my vault <i class="tip" tabindex="0" data-tip="When the order fills, the XLM stays in your vault and earns interest on Blend. You can withdraw it any time. Untick to have it sent to your wallet instead."></i></span></label>
+              <label class="chk keeprow"><input type="checkbox" id="keep-on" checked /> <span>Keep the XLM in my vault <i class="tip" tabindex="0" data-tip="When the order fills, the XLM stays in your vault and earns interest on Blend. You can withdraw it later. Untick to have it sent to your wallet instead."></i></span></label>
 
               <details id="preview" class="preview" hidden>
                 <summary class="preview-title">What happens next</summary>
@@ -253,17 +254,6 @@
                   <div class="gauge-mark limit"><span>Limit</span><b id="gauge-limit-v"></b></div>
                 </div>
                 <p id="gauge-note" class="gauge-note" aria-live="polite"></p>
-              </div>
-
-              <div class="expiry" hidden>
-                <span>Expires in</span>
-                <div class="chips" id="days-chips" role="group" aria-label="Order duration">
-                  <button type="button" data-days="1">1 day</button>
-                  <button type="button" data-days="3">3 days</button>
-                  <button type="button" data-days="7" aria-pressed="true">1 week</button>
-                  <button type="button" data-days="30">1 month</button>
-                </div>
-                <input type="hidden" id="odays" value="365" />
               </div>
 
               <div class="sc-only">
@@ -303,7 +293,7 @@
 
               <p id="pool-note" class="xwarn" hidden></p>
               <button id="place" class="btn primary block go-buy">Buy XLM</button>
-              <p class="fine">The keeper fills orders automatically. If it is offline, orders wait; you can cancel and withdraw at any time.</p>
+              <p class="fine">The keeper fills orders automatically. If it is offline, orders wait. You can cancel at any time; a withdrawal can wait if the lending pool is short of cash.</p>
             </div>
               </div>
             <div data-pane="mkt" class="mkt-slot" hidden>
@@ -312,6 +302,7 @@
                 <span class="mkt-title" id="mkt-title">Buy XLM at the market price</span>
                 <div class="chips" id="slip-chips" role="group" aria-label="Maximum slippage">
                   <span class="muted small">Max slippage</span>
+                  <button type="button" id="slip-mine" data-slip="" title="Your own setting" hidden></button>
                   <button type="button" data-slip="0.5">0.5%</button>
                   <button type="button" data-slip="1" aria-pressed="true">1%</button>
                   <label class="slip-own"><input id="slip-own" inputmode="decimal" placeholder="other" autocomplete="off" aria-label="Your own maximum slippage, in percent" /><span>%</span></label>
@@ -363,8 +354,19 @@
                 <div><dt>Runs for</dt><dd id="dca-len">—</dd></div>
               </dl>
               <button id="dca-go" class="btn primary block go-buy" type="button">Start DCA buy</button>
-              <p class="fine" id="dca-note">Only the next buy is set aside. The rest of your balance keeps earning and you can withdraw it or stop the plan at any time. The plan ends when your vault cannot cover the next buy.</p>
+              <p class="fine" id="dca-note">Only the next buy is set aside. The rest of your balance stays free and keeps earning. You can stop the plan at any time; it ends by itself when your vault cannot cover the next buy.</p>
             </div>
+          </section>
+
+          <section class="panel acct" aria-label="Account">
+            <h2>Account</h2>
+            <dl>
+              <div><dt>USDC in vault</dt><dd data-mirror="avail-buy">—</dd></div>
+              <div><dt><span data-bs>XLM</span> in vault</dt><dd data-mirror="sv-free2">—</dd></div>
+              <div><dt>USDC in wallet</dt><dd data-mirror="wallet-usdc">—</dd></div>
+              <div><dt><span data-bs>XLM</span> in wallet</dt><dd data-mirror="sv-wallet">—</dd></div>
+              <div><dt>USDC earns</dt><dd data-mirror="m-apr">—</dd></div>
+            </dl>
           </section>
 
           <section class="panel">
@@ -380,6 +382,7 @@
               <button role="tab" data-tab="t-open" aria-selected="true">Orders <span id="orders-count" class="count"></span></button>
               <button role="tab" data-tab="t-hist" aria-selected="false">History</button>
               <button role="tab" data-tab="t-sum" aria-selected="false">Summary</button>
+              <button role="tab" data-tab="t-bal" aria-selected="false">Balances</button>
             </div>
             <div data-pane="t-open">
               <div class="head">
@@ -393,6 +396,7 @@
             </div>
             <div data-pane="t-hist" hidden><div id="history"></div></div>
             <div data-pane="t-sum" hidden><div id="summary"></div></div>
+            <div data-pane="t-bal" hidden><div class="bal-table"></div></div>
             <div id="ladder" hidden></div>
           </section>
         </main>
@@ -403,7 +407,7 @@
       <div class="view pfpage user-only" data-view-pane="portfolio" hidden>
         <section class="lend-head">
           <h1>Portfolio</h1>
-          <p class="muted">What you hold, what is tied to open orders, and what it has earned while waiting.</p>
+          <div class="pf-acts"><button type="button" id="pf-wd">Withdraw</button><button type="button" id="pf-dep" class="pri">Deposit</button></div>
         </section>
         <div id="pfolio" class="pf"><p class="muted">Loading…</p></div>
         <div class="pf-vaults">
@@ -439,6 +443,7 @@
               <button id="withdraw" class="btn primary block">Withdraw</button>
             </div>
       </section>
+      <div class="pf-side">
       <section class="overview vaultcard sv-only" data-tabs aria-label="Your sell vault">
         <div class="overview-head">
           <h2 id="sv-title">Your sell vault</h2>
@@ -469,8 +474,11 @@
               <button id="sv-wd-go" class="btn primary block">Withdraw</button>
             </div>
       </section>
+      <div id="pf-others" class="pf-others"></div>
+      </div>
         </div>
         <div id="pf-orders" class="pf"></div>
+        <p class="fine" id="pf-move-link" hidden></p>
       </div>
 
       <div class="view lendpage user-only" data-view-pane="lend" hidden>
@@ -553,10 +561,11 @@
         <div class="tb-stat"><span>24h change</span><b class="tb-chg">—</b></div>
         <div class="tb-stat"><span>24h high</span><b class="tb-hi">—</b></div>
         <div class="tb-stat"><span>24h low</span><b class="tb-lo">—</b></div>
+        <div class="tb-stat"><span>24h volume <i class="tip" tabindex="0" data-tip="Estimated from the price moves of one trading pool over the last 24 hours. Trades on other venues are not counted.">i</i></span><b class="tb-vol">—</b></div>
         <div class="tb-stat"><span>Lending pool in use <i class="tip" tabindex="0" data-tip="Share of the XLM in the Blend pool that is currently borrowed. Higher use means higher rates, but less cash for instant withdrawals.">i</i></span><b id="sv-util">—</b><small id="sv-size" hidden></small><span class="util-bar" hidden><span id="sv-util-bar"></span></span></div>
         <div class="tb-earn">Waiting sell orders earn <b id="sv-apr">—</b> a year <i class="tip" tabindex="0" data-tip="Estimated yearly interest Blend lenders earn on XLM right now. It changes all the time.">i</i></div>
       </section>
-        <p id="sv-warn" class="xwarn user-only" hidden><b>Showcase market.</b> This test pool is thin and its price is not a real market price: it only moves when someone trades. Orders here may wait a long time or never fill, and larger fills move the price a lot. Your XLM still earns on Blend while it waits, and you can cancel and withdraw at any time.</p>
+        <p id="sv-warn" class="xwarn user-only" hidden><b>Showcase market.</b> This test pool is thin and its price is not a real market price: it only moves when someone trades. Orders here may wait a long time or never fill, and larger fills move the price a lot. Your XLM still earns on Blend while it waits, and you can cancel at any time.</p>
         <p id="sv-trust" class="xwarn user-only" hidden></p>
 
       <div class="cols user-only">
@@ -606,22 +615,12 @@
               </div>
               <output id="sv-receive" hidden>0</output>
               <div class="maxrow"><span>Max. sell</span><b id="sv-max-val">—</b></div>
-              <label class="chk keeprow"><input type="checkbox" id="keep-on-sell" checked /> <span>Keep the USDC in my vault <i class="tip" tabindex="0" data-tip="When the order fills, the USDC stays in your vault and earns interest on Blend. You can withdraw it any time. Untick to have it sent to your wallet instead."></i></span></label>
+              <label class="chk keeprow"><input type="checkbox" id="keep-on-sell" checked /> <span>Keep the USDC in my vault <i class="tip" tabindex="0" data-tip="When the order fills, the USDC stays in your vault and earns interest on Blend. You can withdraw it later. Untick to have it sent to your wallet instead."></i></span></label>
 
               <details id="sv-preview" class="preview" hidden>
                 <summary class="preview-title">What happens next</summary>
                 <ol id="sv-preview-list"></ol>
               </details>
-
-              <div class="expiry" hidden>
-                <span>Expires in</span>
-                <div class="chips" id="sv-days" role="group" aria-label="Order duration">
-                  <button type="button" data-days="1">1 day</button>
-                  <button type="button" data-days="3">3 days</button>
-                  <button type="button" data-days="7" aria-pressed="true">1 week</button>
-                  <button type="button" data-days="30">1 month</button>
-                </div>
-              </div>
 
               <div class="sc-only">
                 <p class="fine sc-what">A scaled order splits one amount into several limit orders across a price range.</p>
@@ -643,7 +642,7 @@
 
               <p id="sv-pool-note" class="xwarn" hidden></p>
               <button id="sv-place" class="btn primary block go-sell">Sell XLM</button>
-              <p class="fine">The keeper sells automatically when your price is met. If it is offline, orders wait; you can cancel and withdraw at any time.</p>
+              <p class="fine" id="sv-leave-note">The keeper sells automatically when your price is met. If it is offline, orders wait. You can cancel at any time; a withdrawal can wait if the lending pool is short of cash.</p>
             </div>
               </div>
             <div data-pane="mkt" class="mkt-slot" hidden></div>
@@ -669,8 +668,19 @@
                 <div><dt>Runs for</dt><dd id="sv-dca-len">—</dd></div>
               </dl>
               <button id="sv-dca-go" class="btn primary block go-sell" type="button">Start DCA sell</button>
-              <p class="fine" id="sv-dca-note">Only the next sale is set aside. The rest of your balance keeps earning and you can withdraw it or stop the plan at any time. The plan ends when your vault cannot cover the next sale.</p>
+              <p class="fine" id="sv-dca-note">Only the next sale is set aside. The rest of your balance stays free. You can stop the plan at any time; it ends by itself when your vault cannot cover the next sale.</p>
             </div>
+          </section>
+
+          <section class="panel acct" aria-label="Account">
+            <h2>Account</h2>
+            <dl>
+              <div><dt>USDC in vault</dt><dd data-mirror="avail-buy">—</dd></div>
+              <div><dt><span data-bs>XLM</span> in vault</dt><dd data-mirror="sv-free2">—</dd></div>
+              <div><dt>USDC in wallet</dt><dd data-mirror="wallet-usdc">—</dd></div>
+              <div><dt><span data-bs>XLM</span> in wallet</dt><dd data-mirror="sv-wallet">—</dd></div>
+              <div><dt>USDC earns</dt><dd data-mirror="m-apr">—</dd></div>
+            </dl>
           </section>
 
           <section class="panel">
@@ -681,9 +691,13 @@
         </aside>
 
         <main class="deck">
-          <section class="panel sv-only tcard">
-            <div class="ttabs"><span class="solo">Orders <span id="sv-count" class="count"></span></span></div>
-            <div id="sv-orders" class="sv-table"></div>
+          <section class="panel sv-only tcard" data-tabs>
+            <div class="ttabs" role="tablist" aria-label="Your orders and balances">
+              <button role="tab" data-tab="sv-t-open" aria-selected="true">Orders <span id="sv-count" class="count"></span></button>
+              <button role="tab" data-tab="sv-t-bal" aria-selected="false">Balances</button>
+            </div>
+            <div data-pane="sv-t-open"><div id="sv-orders" class="sv-table"></div></div>
+            <div data-pane="sv-t-bal" hidden><div class="bal-table"></div></div>
           </section>
         </main>
       </div>
@@ -763,6 +777,23 @@
           <a class="btn ghost" href="/docs.html#risks" target="_blank" rel="noopener">Read the risks</a>
           <button value="ok" class="btn primary" id="risk-go" disabled>Continue</button>
         </div>
+      </form>
+    </dialog>
+
+    <dialog id="depbox" class="ask depbox" aria-labelledby="depbox-title">
+      <form method="dialog">
+        <h2 id="depbox-title">Deposit</h2>
+        <p class="ask-lede" id="depbox-lede">From your wallet into your vault. Orders use what is in the vault.</p>
+        <div class="chips depbox-coins" id="depbox-coins" role="group" aria-label="Coin"></div>
+        <div class="box">
+          <div class="box-top"><label for="depbox-amt">Amount</label><button type="button" class="link" id="depbox-max"><span id="depbox-from">Wallet</span> <span id="depbox-wal">—</span></button></div>
+          <div class="box-main"><input id="depbox-amt" class="big" inputmode="decimal" placeholder="0" autocomplete="off" /><span class="token" id="depbox-sym">USDC</span></div>
+        </div>
+        <div class="ask-actions">
+          <button value="cancel" class="btn ghost">Cancel</button>
+          <button value="ok" class="btn primary" id="depbox-yes">Deposit</button>
+        </div>
+        <p class="ask-fine">Next, your wallet opens so you can review and sign the transaction.</p>
       </form>
     </dialog>
 

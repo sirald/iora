@@ -17,7 +17,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTransaction } from "@stellar/freighter-api";
-import { makeServer, RPC_FALLBACK, RPC_PRIMARY } from "./rpc.js";
+import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from "./rpc.js";
 import { StellarWalletsKit } from "swk-sdk";
 import { defaultModules } from "swk-modules";
 
@@ -36,6 +36,19 @@ const C = {
 const PASS = Networks.TESTNET;
 // The fast RPC first, the fallback if there is a problem (see rpc.js)
 const server = makeServer([C.rpc, import.meta.env.VITE_RPC_FALLBACK, RPC_PRIMARY, RPC_FALLBACK]);
+// Reads are shared for a few seconds by rpc.js. Some answers can be reused for much longer:
+//  - a wallet's vault in a factory never changes once it exists, so it is remembered in this browser for good;
+//    "no vault here" can only change in the newest factory (where a vault is opened), so for the older factories
+//    it is remembered for a few hours as well (opening a vault clears these: see call());
+//  - names, decimals, pool lists and contract settings do not change while the page is open.
+const FACTORY_LATEST = C.factory;
+const STATIC_READS = new Set(["version", "decimals", "symbol", "name", "token_0", "token_1", "router_pair_for", "get_reserve_list", "get_pools"]);
+setReadPolicy(({ contract, fn, empty }) => {
+  if (fn === "vault_of") return empty ? (contract === FACTORY_LATEST ? null : { ttl: 6 * 3600_000, keep: true }) : { ttl: Infinity, keep: true };
+  if (STATIC_READS.has(fn)) return { ttl: 10 * 60_000 };
+  if (fn === "get_config") return { ttl: 5 * 60_000 };
+  return null;
+});
 const U = 10_000_000n;
 // Pool guard. Iora is also a place to trade: when an order fills, funds are withdrawn from Blend, and if most of
 // the pool is lent out both withdrawals and fills wait. So the limit is kept below Blend's own limit (95%).
@@ -46,7 +59,7 @@ const ORDER_SHARE = 0.25; // a single deposit or order is at most a quarter of w
 const POOLSTAT = {}; // symbol -> { u, avail } (filled by loadPool)
 
 // State of the sell page. Defined at the top because showView needs it when the page opens.
-const SV = { factory: import.meta.env.VITE_FACTORY_SELL || "", vault: null, bal: null, free: null, apr: null, mkt: null, days: 365 };
+const SV = { factory: import.meta.env.VITE_FACTORY_SELL || "", vault: null, bal: null, free: null, apr: null, mkt: null };
 SV.home = SV.factory; // default sell market (XLM -> USDC)
 SV.out = { sym: "USDC", addr: C.usdc }; // the token bought on this page
 
@@ -86,6 +99,9 @@ const BASE = (() => {
 const BS = BASE.sym; // symbol of the traded coin
 const XB = BASE.extra; // a coin other than XLM: not in the Blend pool, earns no interest in the vault, needs no reserve for network fees
 const BASE_KEEP = XB ? 0n : 5n * U; // reserve left in the wallet (XLM only: network fees)
+// Leaving: cancelling never needs anyone else. A withdrawal comes out of the lending pool, so it can wait while the
+// pool is short of cash; a coin that is not in the pool (XB) sits in the vault itself and has no such wait.
+const LEAVE_NOTE = XB ? "You can cancel and withdraw at any time." : "You can cancel at any time; a withdrawal can wait if the lending pool is short of cash.";
 function setBase(sym, hash) {
   try {
     if (sym === "XLM") localStorage.removeItem("iora-base");
@@ -240,13 +256,13 @@ const VAULT_ERRORS = {
   2: "Not enough available balance (amounts reserved for open orders are excluded)",
   3: "Order not found",
   4: "Order is not open",
-  5: "Order has expired",
+  5: "This order is no longer active",
   6: "Fill is below the minimum size",
   7: "Fill exceeds the remaining amount",
   8: "Limit price not met",
   9: "Invalid limit price",
   10: "Not enough cash in the Blend pool",
-  11: "Invalid expiry",
+  11: "The order's duration is not valid",
   12: "Could not read Blend data",
   13: "Price impact limit exceeded",
   14: "Invalid price impact limit",
@@ -294,16 +310,17 @@ function log(msg, kind = "") {
   $("log").prepend(li);
   // While the access gate is closed, wallet errors must show on the gate
   const gm = $("gate-msg");
-  if (gm && kind === "err" && document.documentElement.classList.contains("app-closed")) {
+  if (gm && (kind === "err" || kind === "wait") && document.documentElement.classList.contains("app-closed")) {
     gm.innerHTML = msg;
-    gm.className = "gate-msg";
+    gm.className = kind === "err" ? "gate-msg" : "gate-msg ok";
   }
   // Show the last message at the bottom of the screen too; the log box may be closed.
   const st = $("status");
   st.innerHTML = msg;
   st.className = `status show ${kind}`;
   clearTimeout(log.t);
-  if (kind !== "err") log.t = setTimeout(() => st.classList.remove("show"), 7000);
+  // "wait": the app is waiting for the user (a wallet window is open); it stays until the next message replaces it
+  if (kind !== "err" && kind !== "wait") log.t = setTimeout(() => st.classList.remove("show"), 7000);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +338,11 @@ async function buildCall(contractId, method, args) {
 // An account that always exists (the USDC issuer) is used so that reads work without a connected wallet.
 const READ_SOURCE = import.meta.env.VITE_USDC_ISSUER || "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56";
 function readCall(contractId, method, args) {
-  return new TransactionBuilder(new Account(me || READ_SOURCE, "0"), { fee: BASE_FEE, networkPassphrase: PASS })
+  // A read gives the same answer whoever asks. Asked in the name of one fixed account, the same question before
+  // and after the wallet connects is one question, and rpc.js shares it. The exception is the swap probe, which
+  // reads what a swap would do in the wallet's own name.
+  const source = method === "swap" && me ? me : READ_SOURCE;
+  return new TransactionBuilder(new Account(source, "0"), { fee: BASE_FEE, networkPassphrase: PASS })
     .addOperation(new Contract(contractId).call(method, ...args))
     .setTimeout(180)
     .build();
@@ -349,7 +370,19 @@ function walletTimeout(p) {
   ]);
 }
 
+let atWallet = false; // a signing request is open in the wallet
+// Network fees the wallet has paid (the Summary tab): read once, then again only after this page sent something.
+const FEES = { who: null, at: 0, sum: null, stale: false, asking: null };
 async function signAndSend(tx) {
+  atWallet = true;
+  try {
+    return await signAndSendNow(tx);
+  } finally {
+    atWallet = false;
+    FEES.stale = true;
+  }
+}
+async function signAndSendNow(tx) {
   let signed;
   if (useKit) {
     try {
@@ -373,6 +406,7 @@ async function signAndSend(tx) {
     if (signed.error) throw new Error(signed.error.message || "Signature rejected");
   }
   if (!signed || !signed.signedTxXdr) throw new Error("Signature rejected");
+  atWallet = false; // signed: from here on the network is working, not the wallet
   const ready = TransactionBuilder.fromXDR(signed.signedTxXdr, PASS);
   const sent = await server.sendTransaction(ready);
   if (sent.status === "TRY_AGAIN_LATER") throw new Error("The network is busy and did not accept the transaction. Nothing was sent; try again in a moment.");
@@ -382,7 +416,7 @@ async function signAndSend(tx) {
   const link = `<a href="${EXPLORER}/tx/${sent.hash}" target="_blank" rel="noopener">${short(sent.hash)}</a>`;
   const deadline = Date.now() + 195_000;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
     let r;
     try {
       r = await server.getTransaction(sent.hash);
@@ -392,7 +426,7 @@ async function signAndSend(tx) {
     if (r.status === "SUCCESS") return { hash: sent.hash, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
     if (r.status === "FAILED") throw new Error(`Transaction failed on-chain (${link})`);
   }
-  throw new Error(`Not confirmed in time; it expired without being applied, so it is safe to try again (${link})`);
+  throw new Error(`Not confirmed in time; the transaction was not applied, so it is safe to try again (${link})`);
 }
 
 /** Contract call: simulate, get approval, sign, send. */
@@ -489,7 +523,7 @@ function showStale() {
   bar.id = "stale";
   bar.className = "stale";
   bar.setAttribute("role", "alert");
-  bar.innerHTML = `<span><b>Iora was updated.</b> Reload this page before you do anything else. Your funds are not affected.</span><button class="btn primary" type="button">Reload</button>`;
+  bar.innerHTML = `<span><b>Iora was updated</b><small>Reload before you continue. Your funds are not affected.</small></span><button type="button">Reload</button>`;
   bar.querySelector("button").onclick = () => location.reload();
   document.body.prepend(bar);
 }
@@ -513,13 +547,18 @@ async function call(contractId, method, args, label, errors) {
       log(`${label}: your wallet says it is on ${/PUBLIC|MAIN/i.test(r.name) ? "Mainnet" : esc(r.name || "another network")}. Switch it to Test Net (see the yellow box at the top). Already switched? Press the button again.`, "err");
       return null;
     }
-    if (r.ok) {
+    if (r.ok && !r.unknown) {
       mark("testnet", true);
       netGuard(true);
     }
   }
   if (busy) {
-    log("Another transaction is still in progress. Wait for it to finish, then try again.", "err");
+    log(
+      atWallet
+        ? "Your wallet is still waiting for an answer to the last request. Open the wallet window (it may be behind this one) and approve or reject it first."
+        : "Another transaction is still in progress. Wait for it to finish, then try again.",
+      "err",
+    );
     return null;
   }
   busy = true;
@@ -545,10 +584,11 @@ async function call(contractId, method, args, label, errors) {
       sim = await server.simulateTransaction(tx);
       if (rpc.Api.isSimulationError(sim)) throw new Error(explain(sim.error, errors));
     }
-    log(`${label}: waiting for wallet approval…`);
+    log(`${label}: waiting for wallet approval…`, "wait");
     padSim(sim);
     if (method === "create_vault") padVaultSlots(sim);
     const res = await signAndSend(rpc.assembleTransaction(tx, sim).build());
+    if (method === "create_vault") flushReads(true);
     log(`${label}: done · <a href="${EXPLORER}/tx/${res.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
     return res;
   } catch (e) {
@@ -610,6 +650,9 @@ if (StellarWalletsKit) {
   }
 }
 if (KIT) $("connect").textContent = "Connect wallet";
+const CONNECT_IDLE = $("connect").textContent;
+const WAS_CONNECTED = "iora-wallet-on"; // this tab had a wallet connected (kept for the tab's lifetime)
+let connecting = 0; // connections the user started that have not finished yet
 
 // ---------------------------------------------------------------------------
 // Wallet menu: clicking the address button at the top right shows the profile and "Disconnect"
@@ -675,6 +718,7 @@ async function disconnectWallet() {
   // Wallets do not let sites remove the connection on their side; the app forgets the connection
   // and does not reconnect automatically until the user presses "Connect" again.
   try { localStorage.setItem(DISC_KEY, "1"); } catch {}
+  try { sessionStorage.removeItem(WAS_CONNECTED); } catch {}
   try {
     if (useKit && StellarWalletsKit.disconnect) await StellarWalletsKit.disconnect();
   } catch {}
@@ -695,9 +739,11 @@ async function currentNetworkOk() {
       return { ok: !n || !n.networkPassphrase || n.networkPassphrase === PASS, name: n && n.network ? String(n.network) : "another network" };
     }
     const n = await getNetwork();
-    return { ok: n.network === "TESTNET", name: n.network ? String(n.network) : "another network" };
+    // no answer (the wallet is locked or busy): not known, so neither a warning nor "you are on Testnet now"
+    if (!n || n.error || !n.network) return { ok: true, name: "", unknown: true };
+    return { ok: n.network === "TESTNET", name: String(n.network) };
   } catch {
-    return { ok: true, name: "" };
+    return { ok: true, name: "", unknown: true };
   }
 }
 function netGuard(ok, name) {
@@ -714,7 +760,7 @@ function netGuard(ok, name) {
   if (netTimer) return;
   netTimer = setInterval(async () => {
     const r = await currentNetworkOk();
-    if (!r.ok) return;
+    if (!r.ok || r.unknown) return;
     netGuard(true);
     mark("testnet", true);
     log("Wallet switched to Testnet. You're all set.", "ok");
@@ -742,7 +788,9 @@ function connected(address, networkOk, name) {
   document.body.classList.add("connected");
   window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
   log(`Wallet connected${name ? ` (${esc(name)})` : ""}: ${short(me)}`, "ok");
+  try { sessionStorage.setItem(WAS_CONNECTED, "1"); } catch {}
   watchAccount();
+  prewarm();
 }
 
 async function connect() {
@@ -768,53 +816,169 @@ async function connect() {
     }
     return;
   }
-  const inst = await isConnected();
-  if (inst.error || !inst.isConnected) {
-    log('No supported wallet found. The testnet beta works with Varial (formerly Freighter): install it from <a href="https://varialwallet.com" target="_blank" rel="noopener">varialwallet.com</a>, then reload this page. On a phone or tablet there is no wallet extension, so please use a computer (Chrome, Brave or Firefox). LOBSTR and other wallets are not supported during the testnet beta.', "err");
-    return;
+  // The button answers at once: the wallet can take a moment to open its window.
+  const btn = $("connect");
+  btn.textContent = "Connecting…";
+  connecting++;
+  try {
+    // The wallet's own script is on the page from the start; without it the library waits two seconds for an answer.
+    if (!window.freighter) log("Looking for your wallet…", "wait");
+    const inst = await isConnected();
+    if (inst.error || !inst.isConnected) {
+      log('No supported wallet found. The testnet beta works with Varial (formerly Freighter): install it from <a href="https://varialwallet.com" target="_blank" rel="noopener">varialwallet.com</a>, then reload this page. On a phone or tablet there is no wallet extension, so please use a computer (Chrome, Brave or Firefox). LOBSTR and other wallets are not supported during the testnet beta.', "err");
+      return;
+    }
+    log("Approve the connection in your wallet. If no window opened, click the wallet's icon in your browser's toolbar.", "wait");
+    const acc = await requestAccess();
+    if (me) return void $("status").classList.remove("show"); // connected meanwhile (a second click, or the automatic connection)
+    if (acc.error || !acc.address) {
+      const why = acc.error && (acc.error.message || (typeof acc.error === "string" ? acc.error : ""));
+      log(`The wallet did not connect${why ? `: ${esc(String(why).slice(0, 140))}` : "."} Press Connect to try again.`, "err");
+      return;
+    }
+    if (!validAddr(acc.address)) return log("The wallet returned an invalid address.", "err");
+    await adoptWallet(acc.address, false);
+  } catch (e) {
+    console.warn("connect", e);
+    log(`Wallet connection failed: ${esc((e && e.message) || e)}`, "err");
+  } finally {
+    connecting--;
+    if (!me && !connecting) btn.textContent = CONNECT_IDLE;
   }
-  const acc = await requestAccess();
-  if (acc.error || !acc.address) {
-    log("Wallet connection rejected.", "err");
-    return;
-  }
-  if (!validAddr(acc.address)) return log("The wallet returned an invalid address.", "err");
-  me = acc.address;
-  const net = await getNetwork();
+}
+
+// The wallet shows as connected the moment it gives an address. The network check and the first load of the
+// balances follow, so a slow answer from either does not hold the button back.
+async function adoptWallet(address, quiet) {
+  if (me === address && document.body.classList.contains("connected")) return;
+  me = address;
+  mark("freighter", true);
   mark("connect", true);
-  mark("testnet", net.network === "TESTNET");
-  netGuard(net.network === "TESTNET", net.network);
   walletName = walletName || "Varial";
   setWalletButton();
   document.body.classList.add("connected");
   window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
-  log(`Wallet connected: ${short(me)}`, "ok");
+  if (!quiet) log(`Wallet connected: ${short(me)}`, "ok");
+  try { sessionStorage.setItem(WAS_CONNECTED, "1"); } catch {}
   watchAccount();
-  await refresh();
+  getNetwork()
+    .then((net) => {
+      // Only a network the wallet actually names counts as wrong; an empty answer is not a reason to warn.
+      if (!net || net.error || !net.network) return;
+      mark("testnet", net.network === "TESTNET");
+      netGuard(net.network === "TESTNET", net.network);
+    })
+    .catch(() => {});
+  const loaded = firstLoad(); // the vault lookup queues its reads first; the wallet-level reads go right behind them
+  prewarm();
+  await loaded;
   if (location.hash === "#lend") loadLend();
+}
+/** The first load after connecting. A network error must not leave the page empty: it is tried again. */
+async function firstLoad() {
+  for (let i = 0; i < 3; i++) {
+    try {
+      await refresh();
+      if (i > 0) log("Your balances are loaded.", "ok");
+      return;
+    } catch (e) {
+      console.warn("first load failed", e);
+      if (i === 0) log("Your wallet is connected. Loading your balances is taking longer than usual…", "wait");
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  log("Your wallet is connected, but the network did not answer. Check your connection and reload the page.", "err");
+}
+/**
+ * The connected address, without opening a wallet window. The wallet library gives up after two seconds and returns
+ * an empty address when the extension's background was asleep; a real "not connected" answer comes back at once.
+ * Only the first case is worth asking again (by then the extension is awake).
+ */
+async function quietAddress() {
+  for (let i = 0; i < 3; i++) {
+    const t = performance.now();
+    const a = await getAddress();
+    if (!a.error && validAddr(a.address)) return a.address;
+    if (a.error || performance.now() - t < 1800) return null;
+  }
+  return null;
+}
+
+// The first screen needs these whichever vault the wallet turns out to use. They are asked the moment the wallet
+// is known, at the same time as the vault lookup; when the screen code asks for them a moment later it gets the
+// same answers without waiting again (rpc.js shares reads).
+function prewarm() {
+  const warm = (p) => Promise.resolve(p).catch(() => {});
+  try {
+    warm(server.accountExists(me));
+    warm(read(C.xlm, "balance", [addr(me)]));
+    warm(read(C.usdc, "balance", [addr(me)]));
+    if (XB) warm(read(BASE.addr, "balance", [addr(me)]));
+    warm(read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, BASE.addr])]));
+    warm(aquaBest(C.usdc, BASE.addr, U));
+    if (SV.factory && (location.hash === "#sell" || location.hash === "#portfolio")) {
+      warm(read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]));
+      warm(aquaBest(BASE.addr, SV.out.addr, U));
+    }
+  } catch (e) {
+    console.warn("prewarm", e);
+  }
+}
+
+// A button that needs a wallet opens the wallet list itself instead of only saying so
+async function needWallet() {
+  if (me) return true;
+  try { localStorage.removeItem(DISC_KEY); } catch {}
+  await connect();
+  return !!me;
 }
 
 async function tryAutoConnect() {
   // If the user pressed "Disconnect", do not reconnect automatically until they connect again themselves
   try { if (localStorage.getItem(DISC_KEY)) return; } catch {}
-  const inst = await isConnected();
+  // A tab that was connected before the reload says so on the button while the wallet is asked again
+  let before = false;
+  try { before = !!sessionStorage.getItem(WAS_CONNECTED); } catch {}
+  if (before && !me) $("connect").textContent = "Connecting…";
+  try {
+    await autoConnect();
+  } finally {
+    if (!me && !connecting) $("connect").textContent = CONNECT_IDLE;
+  }
+}
+async function autoConnect() {
+  // A wallet chosen in the wallet list (xBull, LOBSTR, Albedo…) is remembered by the kit; pick it up again after a reload
+  if (KIT) {
+    try {
+      const { address } = await StellarWalletsKit.getAddress();
+      if (validAddr(address)) {
+        useKit = true;
+        let ok = true;
+        try {
+          const net = await StellarWalletsKit.getNetwork();
+          ok = !net || !net.networkPassphrase || net.networkPassphrase === PASS;
+          netGuard(ok, net && net.network);
+        } catch {}
+        let name = "";
+        try { name = StellarWalletsKit.selectedModule.productName; } catch {}
+        connected(address, ok, name);
+        await refresh();
+        if (location.hash === "#lend") loadLend();
+        return;
+      }
+    } catch {}
+  }
+  let inst = await isConnected();
+  if (inst.error || !inst.isConnected) {
+    // The wallet's script can reach the page a moment after it opens: look once more before giving up.
+    await new Promise((r) => setTimeout(r, 1500));
+    if (me) return;
+    inst = await isConnected();
+  }
   mark("freighter", !inst.error && inst.isConnected);
   if (inst.error || !inst.isConnected) return;
-  const a = await getAddress();
-  if (!a.error && validAddr(a.address)) {
-    me = a.address;
-    mark("connect", true);
-    const net = await getNetwork();
-    mark("testnet", net.network === "TESTNET");
-    netGuard(net.network === "TESTNET", net.network);
-    walletName = "Varial";
-    setWalletButton();
-    document.body.classList.add("connected");
-    window.dispatchEvent(new CustomEvent("iora:wallet", { detail: me }));
-    watchAccount();
-    await refresh();
-    if (location.hash === "#lend") loadLend();
-  }
+  const address = await quietAddress();
+  if (address && !me) await adoptWallet(address, true);
 }
 
 // If the user switches to another account in the wallet the page must not stay on the old one (the signature would be requested from a different key).
@@ -916,7 +1080,6 @@ function updateTicket() {
     return;
   }
   box.hidden = false;
-  const days = Number($("odays").value) || 365;
   const n = nfmt;
   const items = [];
   if (supplyApr !== null) {
@@ -930,7 +1093,7 @@ function updateTicket() {
       ? `<span class="bad">${WORSE_BUY(-drop)}</span>`
       : `When ${BS} is at <b>${n(limit, 4)} USDC or less</b>${drop !== null ? ` (${n(drop, 1)}% below today)` : ""}, the keeper fills it and at least <b>${n(out)} ${BS}</b> ${outTo(vault)}.`,
   );
-  items.push(`The order stays open until it fills or you cancel it${noEnd(vault) ? "" : " (it ends by itself after a year)"}. Until then the USDC keeps earning.`);
+  items.push(`The order stays open until it fills or you cancel it. Until then the USDC keeps earning.`);
   if (feeNote(vault, BS)) items.push(feeNote(vault, BS));
   items.push(`Placing it costs a network fee of about <b>0.02 XLM</b>. Iora takes no fee.`);
   if (AUTO.px && !$("autosell-row").hidden) {
@@ -1043,11 +1206,6 @@ async function readPool() {
   }
 }
 
-function syncDays() {
-  const d = String($("odays").value);
-  for (const c of document.querySelectorAll("#days-chips [data-days]")) c.setAttribute("aria-pressed", String(c.dataset.days === d));
-}
-
 // Refreshes the wallet/buy vault screen; and the sell page too if it is open (the wallet balance comes from here).
 // ---- Generations: the user stays in the vault where their funds are ----
 // When a new factory is deployed the old vaults keep working. Nobody can move the funds for the user (only the
@@ -1073,26 +1231,69 @@ const GENERATIONS = [
 ];
 let GEN = GEN_LATEST;
 let genFor = null;
+/** Index of the first promise that gives true, known once every promise before it has given false (-1: none). */
+function firstTrue(list) {
+  return new Promise((resolve, reject) => {
+    const state = list.map(() => null);
+    let done = false;
+    const check = () => {
+      if (done) return;
+      for (let i = 0; i < state.length; i++) {
+        if (state[i] === null) return;
+        if (state[i]) return void ((done = true), resolve(i));
+      }
+      done = true;
+      resolve(-1);
+    };
+    list.forEach((p, i) =>
+      p.then(
+        (v) => {
+          state[i] = !!v;
+          check();
+        },
+        (e) => {
+          if (!done) ((done = true), reject(e));
+        },
+      ),
+    );
+    check();
+  });
+}
 async function pickGeneration() {
   if (!me || genFor === me) return;
   const who = me;
   let pick = GEN_LATEST;
   if (GENERATIONS.length > 1) {
     try {
-      const funded = await Promise.all(
-        GENERATIONS.map(async (g) => {
+      // The newest generation with funds wins, so the answer is known as soon as every newer generation has said
+      // "nothing here": the older ones are not waited for (firstTrue).
+      let warmed = Infinity; // index of the newest generation whose vault was read ahead
+      const i = await firstTrue(
+        GENERATIONS.map(async (g, gi) => {
           const facs = [g.buy, g.sell].filter(Boolean);
           const vs = await Promise.all(facs.map((f) => read(f, "vault_of", [addr(who)])));
           for (const [k, r] of vs.entries()) {
             if (!(r.ok && r.value)) continue;
             const v = k === 0 && facs[0] === g.buy ? wrapBuy(r.value, g.buy) : wrapSell(r.value, g.sell);
-            const [bal, open] = await Promise.all([read(v, "balance"), openOrdersIn(v)]);
-            if ((bal.ok && BigInt(bal.value) >= LEGACY_DUST) || open.length) return true;
+            // The screen asks for these right after this lookup; asked now, the answers are already there by then.
+            // Only for the newest generation known to have a vault (the one the screen will most likely use), so a
+            // wallet with vaults in several generations does not pay for reads nobody looks at.
+            if (k === 0 && facs[0] === g.buy && gi < warmed) {
+              warmed = gi;
+              for (const m of ["reserved", "free_balance", "stats"]) read(v, m).catch(() => {});
+              vaultVersion(v).catch(() => {});
+            }
+            // A balance settles it at once. The open orders decide only for an empty vault (they are read either
+            // way: the order list needs them a moment later).
+            const orders = openOrdersIn(v);
+            orders.catch(() => {});
+            const bal = await read(v, "balance");
+            if (bal.ok && BigInt(bal.value) >= LEGACY_DUST) return true;
+            if ((await orders).length) return true;
           }
           return false;
         }),
       );
-      const i = funded.indexOf(true);
       if (i > 0) pick = GENERATIONS[i];
     } catch (e) {
       console.warn("generation lookup failed", e);
@@ -1179,6 +1380,8 @@ if (XB) {
     }
     for (const c of root.querySelectorAll("i.coin.xlm")) c.className = "coin other";
   }
+  const leave = $("sv-leave-note");
+  if (leave) leave.textContent = `The keeper sells automatically when your price is met. If it is offline, orders wait. ${LEAVE_NOTE}`;
   // A stop loss looks at the Blend oracle; these coins have no oracle price
   const sl = document.querySelector('#sv-type [data-type="sl"]');
   if (sl) sl.hidden = true;
@@ -1310,7 +1513,7 @@ $("tp-px").addEventListener("input", () => {
 });
 $("olimit").addEventListener("input", tpApply);
 $("olimit").addEventListener("change", tpApply);
-const AUTO_DAYS = 30;
+const AUTO_DAYS = 365; // older vaults: the longest their contract accepts for the sell order of a take profit
 /** Take profit price -> limit of the order in the sell vault (sell vault unit: XLM for 1 USDC). */
 function autoSellLimit() {
   return { px: AUTO.px, lim: sellLimit(AUTO.px) };
@@ -1344,7 +1547,7 @@ async function ensureFeeder() {
 function autoRows(limit) {
   if (!AUTO.px) return [];
   const up = (Number(AUTO.px) / Number(limit) - 1) * 100;
-  return [["Take profit", `sell at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (+${up.toFixed(1)}%, ${autoSpan(vault)})`]];
+  return [["Take profit", `sell at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (+${up.toFixed(1)}%${autoSpan(vault) ? `, ${autoSpan(vault)}` : ""})`]];
 }
 
 // ---- Old-version vaults: let the user take their funds to the wallet in one click ----
@@ -1373,7 +1576,7 @@ async function renderLegacy() {
   // Old factories are queried at the same time (waiting in turn makes opening slower)
   const found = await Promise.all(
     // The generation the user is using now does not count as "old"
-    OLD_FACTORIES.filter((f) => f !== GEN.buy && f !== GEN.sell).map(async (f) => {
+    OLD_FACTORIES.filter((f) => f !== GEN.buy && f !== GEN.sell && !isV7Factory(f)).map(async (f) => {
       const r = await read(f, "vault_of", [addr(me)]);
       if (!(r.ok && r.value)) return null;
       const v = String(r.value);
@@ -1403,7 +1606,7 @@ async function renderLegacy() {
         <div class="legacy-what">
           <span class="legacy-label">${i.tok === "XLM" ? "Old sell vault" : "Old buy vault"} · <a href="${EXPLORER}/contract/${i.v}" target="_blank" rel="noopener">${short(i.v)}</a></span>
           <b class="legacy-amt">${coin(i.tok)}${fmt(i.b, 2)} <small>${i.tok}</small></b>
-          ${i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: moved with the same price and expiry</span>` : ""}
+          ${i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: placed again at the same price</span>` : ""}
         </div>
         <div class="legacy-actions">
           <button class="btn primary" data-migrate="${i.v}" data-tok="${i.tok}">Move to new ${i.tok === "XLM" ? "sell" : "buy"} vault</button>
@@ -1459,14 +1662,248 @@ async function emptyLegacy(v, tok) {
   await refresh();
 }
 
+// ---- Single vaults (version 7 and later): every coin and every pair in one place ----
+const COINS = () => [{ sym: "USDC", token: C.usdc }, { sym: "XLM", token: C.xlm }, ...PAIRS];
+const coinSym = (t) => (COINS().find((c) => c.token === String(t)) || { sym: short(String(t)) }).sym;
+/** Open orders of every pair in a single vault (plain vault address), with schedule and take-profit settings. */
+async function allOpenOrders(id) {
+  const cnt = await rawRead(id, "order_count");
+  const n = cnt.ok ? Number(cnt.value) : 0;
+  const rows = await Promise.all([...Array(n).keys()].map((i) => rawRead(id, "get_order", [u32(i)])));
+  const out = [];
+  for (const [i, r] of rows.entries()) {
+    if (!r.ok || !r.value || orderStatus(r.value) !== "Open") continue;
+    const o = r.value;
+    const left = BigInt(o.amount_in) - BigInt(o.filled_in);
+    if (left <= 0n) continue;
+    out.push({ id: i, sell: String(o.sell), buy: String(o.buy), left, limit: BigInt(o.limit_price), minFill: BigInt(o.min_fill), impact: Number(o.max_impact_bps), trigger: BigInt(o.trigger_price || 0), band: Number(o.stop_band_bps || 0), expiry: BigInt(o.expiry), keep: o.keep !== false });
+  }
+  return out;
+}
+/** Vaults of this wallet in earlier single-vault generations that still hold coins or open orders. */
+async function olderVaults() {
+  if (!V7 || !me) return [];
+  const who = me;
+  const found = await Promise.all(
+    GENERATIONS.filter((g) => g !== GEN_LATEST && isV7Factory(g.buy)).map(async (g) => {
+      const r = await read(g.buy, "vault_of", [addr(who)]);
+      if (!(r.ok && r.value)) return null;
+      const id = String(r.value);
+      const [ps, orders] = await Promise.all([rawRead(id, "positions"), allOpenOrders(id)]);
+      const coins = (ps.ok && Array.isArray(ps.value) ? ps.value : []).filter((p) => BigInt(p.balance) >= LEGACY_DUST).map((p) => ({ token: String(p.token), bal: BigInt(p.balance) }));
+      return coins.length || orders.length ? { id, coins, orders } : null;
+    }),
+  );
+  return found.filter(Boolean);
+}
+/** Portfolio: while coins or orders are still in an earlier vault, one slim line offers to move them. It can be
+    closed; after that only a small link under the table remains. */
+async function genNote() {
+  const host = $("pfolio"), link = $("pf-move-link");
+  if (!host || !link) return;
+  let list = [];
+  try {
+    list = await olderVaults();
+  } catch (e) {
+    console.warn("older vaults", e);
+  }
+  let el = document.getElementById("pf-move-note");
+  if (!list.length) {
+    if (el) el.remove();
+    link.hidden = true;
+    return;
+  }
+  const v = list[0];
+  const key = `iora-move-hide:${v.id}`;
+  let closed = false;
+  try {
+    closed = localStorage.getItem(key) === "1";
+  } catch {}
+  const parts = v.coins.map((c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`);
+  const what = [...parts, v.orders.length ? `${v.orders.length} open order${v.orders.length > 1 ? "s" : ""}` : ""].filter(Boolean).join(", ");
+  link.innerHTML = `${what} in an earlier version of your vault. <button type="button" class="link">Move to the new vault</button>`;
+  link.querySelector("button").onclick = () => moveToLatest(v);
+  link.hidden = !closed;
+  if (closed) return void (el && el.remove());
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "pf-move-note";
+    el.className = "pf-movenote";
+    host.before(el);
+  }
+  el.innerHTML = `<span><b>${what}</b> in an earlier version of your vault.</span><button type="button" class="link" data-go>Move to the new vault</button><button type="button" class="link" data-x aria-label="Close" title="Close">✕</button>`;
+  el.querySelector("[data-go]").onclick = () => moveToLatest(v);
+  el.querySelector("[data-x]").onclick = () => {
+    try {
+      localStorage.setItem(key, "1");
+    } catch {}
+    el.remove();
+    link.hidden = false;
+  };
+}
+// ---- Portfolio chart: the vault's value over time. Nothing on chain keeps this, so the page notes the value each
+// time the Portfolio is read (in this browser, per wallet); the line starts on the first visit and grows from there.
+const PFH_MAX = 3000;
+const pfhKey = () => `iora-pfhist:${me}`;
+function pfhRead() {
+  try {
+    const a = JSON.parse(localStorage.getItem(pfhKey()) || "[]");
+    return Array.isArray(a) ? a.filter((x) => Array.isArray(x) && x.length === 3 && x[0] > 0) : [];
+  } catch {
+    return [];
+  }
+}
+function pfhAdd(total, earned) {
+  const a = pfhRead();
+  const t = Math.floor(Date.now() / 1000);
+  const last = a[a.length - 1];
+  const r = (x, d) => Math.round(x * d) / d;
+  const row = [t, r(total, 1e4), r(earned, 1e6)];
+  // a new point at most every 10 minutes, unless the value moved by more than 0.2%
+  if (last && t - last[0] < 600 && Math.abs(row[1] - last[1]) <= Math.abs(last[1]) * 0.002) a[a.length - 1] = [last[0], row[1], row[2]];
+  else a.push(row);
+  try {
+    localStorage.setItem(pfhKey(), JSON.stringify(a.slice(-PFH_MAX)));
+  } catch {}
+  return a;
+}
+let pfChart = "value", pfRange = "all";
+function pfChartHtml(hist) {
+  const span = { "1d": 86400, "1w": 604800, "1m": 2592000 }[pfRange];
+  const now = Date.now() / 1000;
+  let pts = hist.filter((x) => !span || x[0] >= now - span).map((x) => [x[0], pfChart === "value" ? x[1] : x[2]]);
+  if (!pts.length && hist.length) pts = [[hist[hist.length - 1][0], pfChart === "value" ? hist[hist.length - 1][1] : hist[hist.length - 1][2]]];
+  const W = 520, Hh = 172, L = 52, R = 10, T = 14, B = 22;
+  let body = "";
+  if (pts.length) {
+    if (pts.length === 1) pts = [[pts[0][0] - 1, pts[0][1]], pts[0]];
+    let lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]));
+    if (hi - lo < Math.abs(hi) * 0.002 || hi === lo) {
+      const pad = Math.max(Math.abs(hi) * 0.01, pfChart === "value" ? 0.01 : 0.000001);
+      lo -= pad;
+      hi += pad;
+    }
+    const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+    const X = (t) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R), Y = (v) => T + ((hi - v) / (hi - lo)) * (Hh - T - B);
+    const dp = pfChart === "value" ? 2 : 6;
+    for (let k = 0; k <= 3; k++) {
+      const v = lo + ((hi - lo) * k) / 3;
+      body += `<line x1="${L}" x2="${W - R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" class="g"/><text x="${L - 6}" y="${(Y(v) + 3.5).toFixed(1)}" text-anchor="end">${v.toLocaleString("en-US", { maximumFractionDigits: dp })}</text>`;
+    }
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(" ");
+    body += `<path d="${d} L${W - R} ${Hh - B} L${L} ${Hh - B} Z" class="a"/><path d="${d}" class="l"/>`;
+    const day = (t) => new Date(t * 1000).toLocaleString("en-US", t1 - t0 < 2 * 86400 ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" });
+    body += `<text x="${L}" y="${Hh - 6}">${day(t0)}</text><text x="${W - R}" y="${Hh - 6}" text-anchor="end">${day(t1)}</text>`;
+  }
+  const tabs = [["value", "Vault value"], ["earned", "Interest earned"]].map(([k, l]) => `<button type="button" data-pfc="${k}" aria-selected="${pfChart === k}">${l}</button>`).join("");
+  const ranges = [["1d", "1D"], ["1w", "1W"], ["1m", "1M"], ["all", "All"]].map(([k, l]) => `<button type="button" data-pfr="${k}" aria-pressed="${pfRange === k}">${l}</button>`).join("");
+  const young = hist.length < 3;
+  return `<div class="pf-chart-head"><div class="pf-tabs">${tabs}</div><div class="pf-ranges">${ranges}</div></div><svg viewBox="0 0 ${W} ${Hh}" preserveAspectRatio="none" role="img" aria-label="${pfChart === "value" ? "Vault value in USDC over time" : "Interest earned in USDC over time"}">${body}</svg>${young ? `<p class="pf-chart-note">The line starts today and grows each time you open this page (kept in this browser).</p>` : ""}`;
+}
+function pfChartDraw(hist) {
+  const el = $("pf-chart");
+  if (!el) return;
+  el.innerHTML = pfChartHtml(hist);
+  for (const b of el.querySelectorAll("[data-pfc]")) b.onclick = () => ((pfChart = b.dataset.pfc), pfChartDraw(hist));
+  for (const b of el.querySelectorAll("[data-pfr]")) b.onclick = () => ((pfRange = b.dataset.pfr), pfChartDraw(hist));
+}
+/** Earlier single vault -> newest vault: cancel, withdraw every coin, open the new vault if needed, deposit, and
+    (if the owner keeps the box ticked) place the open orders again with the same settings. Every step is signed. */
+async function moveToLatest(v) {
+  const live = v.orders; // every open order is carried; in the new vault an order has no end date
+  const cur = await read(GEN_LATEST.buy, "vault_of", [addr(me)]);
+  let dest = cur.ok && cur.value ? String(cur.value) : null;
+  const side = (o) => (o.sell === C.usdc ? `buy ${esc(coinSym(o.buy))}` : `sell ${esc(coinSym(o.sell))}`);
+  const rows = [
+    ["From", `Earlier vault ${short(v.id)}`],
+    ["To", dest ? `Your newest vault ${short(dest)}` : "A new vault, opened for you"],
+    ["Coins", v.coins.length ? v.coins.map((c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`).join(", ") + " (interest included)" : "none"],
+  ];
+  if (v.orders.length)
+    rows.push([
+      "Open orders",
+      `<label class="mv-keep"><input type="checkbox" id="mv-keep" checked /> Keep my ${live.length} open order${live.length > 1 ? "s" : ""}: placed again in the new vault with the same prices (${live.map(side).join(", ")})</label>`,
+    ]);
+  const base = v.orders.length + v.coins.length * 2 + (dest ? 0 : 1);
+  const notes = [
+    `You'll approve about ${base}${live.length ? ` to ${base + live.length}` : ""} steps in your wallet: ${v.orders.length ? "cancel the orders, " : ""}withdraw each coin${dest ? "" : ", open the new vault"}, deposit${live.length ? ", then place the orders again if you keep the box ticked" : ""}.`,
+    "The coins only ever move between your own vaults and your wallet. If you stop halfway, they stay safe in your wallet and you can deposit them on this page.",
+  ];
+  if (!(await ask({ title: "Move to your newest vault", rows, notes, confirm: "Start" }))) return;
+  const keepBox = document.getElementById("mv-keep");
+  const keepOrders = !!(keepBox && keepBox.checked);
+
+  // Settings that are stored beside an order (schedule, take profit) are read before the order is cancelled
+  const extra = new Map();
+  if (keepOrders)
+    for (const o of live) {
+      const [sc, fu] = await Promise.all([rawRead(v.id, "get_schedule", [u32(o.id)]).catch(() => ({ ok: false })), rawRead(v.id, "get_follow_up", [u32(o.id)]).catch(() => ({ ok: false }))]);
+      extra.set(o.id, { sc: sc.ok && sc.value ? sc.value : null, fu: fu.ok && fu.value ? fu.value : null });
+    }
+  for (const o of v.orders) if (!(await call(v.id, "cancel_order", [u32(o.id)], `Cancel order #${o.id} in the earlier vault`, VAULT_ERRORS))) return refresh();
+  const moved = [];
+  for (const c of v.coins) {
+    const sym = coinSym(c.token);
+    const [free, before] = await Promise.all([rawRead(v.id, "free_balance", [addr(c.token)]), read(c.token, "balance", [addr(me)])]);
+    const amt = free.ok ? BigInt(free.value) : 0n;
+    if (amt <= 0n) continue;
+    if (!(await call(v.id, "withdraw", [addr(c.token), i128(amt)], `Withdraw ${fmt(amt, 2)} ${sym} from the earlier vault`, VAULT_ERRORS))) return refresh();
+    const after = await read(c.token, "balance", [addr(me)]);
+    moved.push({ token: c.token, sym, got: before.ok && after.ok ? BigInt(after.value) - BigInt(before.value) : amt, wallet: after.ok ? BigInt(after.value) : null });
+  }
+  if (!dest) {
+    if (!(await call(GEN_LATEST.buy, "create_vault", [addr(me)], "Open your new vault", FACTORY_ERRORS))) return refresh();
+    const r = await read(GEN_LATEST.buy, "vault_of", [addr(me)]);
+    dest = r.ok && r.value ? String(r.value) : null;
+    if (!dest) {
+      log("The new vault was opened but could not be read yet. Your coins are in your wallet; reload the page and deposit them here.", "err");
+      return refresh();
+    }
+  }
+  for (const m of moved) {
+    let dep = m.got;
+    if (m.token === C.xlm && m.wallet !== null && m.wallet - XLM_KEEP < dep) dep = m.wallet - XLM_KEEP; // XLM: keep the reserve for network fees
+    if (dep <= 0n) continue;
+    if (!(await call(dest, "deposit", [addr(m.token), i128(dep)], `Deposit ${fmt(dep, 2)} ${m.sym} into your new vault`, VAULT_ERRORS))) return refresh();
+  }
+  let placed = 0;
+  if (keepOrders) {
+    const bool = (b) => nativeToScVal(!!b, { type: "bool" });
+    for (const [i, o] of live.entries()) {
+      const rm = await rawRead(dest, "orderable_balance", [addr(o.sell)]);
+      const room = rm.ok ? BigInt(rm.value) : o.left;
+      const x = extra.get(o.id) || {};
+      const label = `Place order ${i + 1}/${live.length} again`;
+      const S = addr(o.sell), B = addr(o.buy);
+      let ok;
+      if (x.sc) {
+        const part = BigInt(x.sc.part) < room ? BigInt(x.sc.part) : room;
+        if (part <= 0n) continue;
+        const fills = Number(x.sc.fills) === 0 ? 0 : Math.max(1, Number(x.sc.fills) - Number(x.sc.done));
+        ok = await call(dest, "place_dca", [S, B, i128(part), u32(fills), u64(x.sc.every), i128(o.limit), u32(o.impact), u32(o.band), u64(NO_EXPIRY), bool(o.keep)], label, VAULT_ERRORS);
+      } else {
+        const size = o.left < room ? o.left : room;
+        if (size <= 0n) continue;
+        const mf = fillFloor(size, o.minFill < size ? o.minFill : size);
+        if (o.trigger > 0n) ok = await call(dest, "place_stop_order", [S, B, i128(size), i128(o.trigger), i128(o.limit), i128(mf), u32(o.impact), u64(NO_EXPIRY), u32(o.band || SL_BAND_BPS), bool(o.keep)], label, VAULT_ERRORS);
+        else if (x.fu) ok = await call(dest, "place_order_then", [S, B, i128(size), i128(o.limit), i128(mf), u32(o.impact), u64(NO_EXPIRY), i128(BigInt(x.fu.limit_price)), u32(Number(x.fu.max_impact_bps)), u64(x.fu.duration)], label, VAULT_ERRORS);
+        else ok = await call(dest, "place_order", [S, B, i128(size), i128(o.limit), i128(mf), u32(o.impact), u64(NO_EXPIRY), bool(o.keep)], label, VAULT_ERRORS);
+      }
+      if (!ok) break;
+      placed++;
+    }
+  }
+  log(`Done: your coins are in your newest vault${keepOrders && live.length ? `; ${placed} of ${live.length} order${live.length > 1 ? "s" : ""} placed again` : live.length ? "; the open orders were cancelled, not placed again" : ""}. Reloading…`, !keepOrders || placed === live.length ? "ok" : "err");
+  setTimeout(() => location.reload(), 2500);
+}
+
 /** From the old vault to the new one: cancel + withdraw + (open a new vault if needed) + deposit. */
 async function migrateLegacy(v, tok) {
   const sell = tok === "XLM";
   const factory = sell ? SV.factory : C.factory;
   if (!factory) return log("The new vault is not available yet.", "err");
   const open = await openOrdersIn(v);
-  const nowS = Math.floor(Date.now() / 1000);
-  const carry = open.filter((o) => o.expiry > nowS + 120); // expired orders are not moved
+  const carry = open; // every open order is placed again in the new vault, at the same price
   const bal = await read(v, "balance");
   const amt = bal.ok ? BigInt(bal.value) : 0n;
   const target = sell ? await sellVaultOf() : vault;
@@ -1480,10 +1917,7 @@ async function migrateLegacy(v, tok) {
     const px = (o) => (sell ? `≥ ${px4(sellPrice(o.limit))}` : `≤ ${fmt(o.limit)}`);
     rows.push([
       "Open orders",
-      carry.length
-        ? `${carry.length} moved with the same price and expiry: ${carry.map((o) => `${fmt(o.leftU, 2)} ${tok} at ${px(o)}`).join(", ")}` +
-          (open.length > carry.length ? ` (${open.length - carry.length} expired order${open.length - carry.length > 1 ? "s are" : " is"} only cancelled)` : "")
-        : `${open.length} expired order${open.length > 1 ? "s" : ""} will be cancelled`,
+      `${carry.length} placed again at the same price: ${carry.map((o) => `${fmt(o.leftU, 2)} ${tok} at ${px(o)}`).join(", ")}`,
     ]);
   }
   const notes = [
@@ -1515,9 +1949,11 @@ async function migrateLegacy(v, tok) {
   if (dep > 0n) {
     const ok = await call(dest, "deposit", [i128(dep)], `Deposit ${fmt(dep, 2)} ${tok} into your new vault`, sell ? SELL_ERRORS : VAULT_ERRORS);
     if (!ok) return refresh();
-    // Reopen the orders in the new vault with the same price, remaining amount and end date
+    // Reopen the orders in the new vault with the same price and remaining amount
     let placed = 0;
+    await vaultVersion(dest).catch(() => 0);
     for (const [i, o] of carry.entries()) {
+      const expiry = expiryOf(dest, OLD_VAULT_DAYS);
       const room = (await roomIn(dest)) ?? o.leftU;
       const size = o.leftU < room ? o.leftU : room;
       if (size <= 0n) break;
@@ -1526,8 +1962,8 @@ async function migrateLegacy(v, tok) {
       const errs = sell ? SELL_ERRORS : VAULT_ERRORS;
       const r =
         o.trigger > 0n
-          ? await call(dest, "place_stop_order", [i128(size), i128(o.trigger), i128(o.limit), i128(mf), u32(o.impact), u64(o.expiry), ...(V4 ? [u32(o.band || SL_BAND_BPS)] : [])], label, errs)
-          : await call(dest, "place_order", [i128(size), i128(o.limit), i128(mf), u32(o.impact), u64(o.expiry)], label, errs);
+          ? await call(dest, "place_stop_order", [i128(size), i128(o.trigger), i128(o.limit), i128(mf), u32(o.impact), u64(expiry), ...(V4 ? [u32(o.band || SL_BAND_BPS)] : [])], label, errs)
+          : await call(dest, "place_order", [i128(size), i128(o.limit), i128(mf), u32(o.impact), u64(expiry)], label, errs);
       if (!r) break;
       placed++;
     }
@@ -1553,6 +1989,7 @@ async function homeSellVault() {
 }
 /** Portfolio page: the two vaults' total, the part tied to orders, interest earned and open orders. Reads only while the page is open. */
 let pfBusy = false;
+let pfTab = "bal";
 async function renderPortfolio() {
   const box = $("pfolio");
   if (!box || !me || document.body.dataset.view !== "portfolio" || pfBusy) return;
@@ -1616,41 +2053,111 @@ async function renderPortfolio() {
     const total = (b ? b.bal : 0) + (s ? s.bal * px : 0) + others.reduce((a, o) => a + (o.usd || 0), 0);
     const tied = (b ? b.res : 0) + (s ? s.res * px : 0) + others.reduce((a, o) => a + o.resUsd, 0);
     const earned = (b ? b.earned : 0) + (s ? s.earned * px : 0);
-    const row = (sym, coin, r, apr, href, usd) =>
-      r
-        ? `<tr><td><span class="pf-asset"><i class="coin ${coin}" aria-hidden="true"></i>${sym}</span></td><td class="num">${n(r.bal, 4)}</td><td class="num">${usd === null ? "—" : `≈ ${n(usd)}`}</td><td class="num">${n(r.res)}</td><td class="num">${n(r.free, 4)}</td><td class="num pos">${pct(apr)}</td><td class="num pos">+${n(r.earned, 6)}</td><td><a href="${href}">Trade</a></td></tr>`
-        : "";
     const orders = [
       ...bo.map((o) => `<tr><td><span class="tag buy">Buy</span></td><td>${BS} / USDC</td><td class="num">≤ ${px4(Number(o.limit) / 1e7)}</td><td class="num">${n(o.left)} USDC</td><td><a href="#vault">Manage</a></td></tr>`),
       ...so.map((o) => `<tr><td><span class="tag sell">${o.trigger > 0n ? "Stop" : "Sell"}</span></td><td>${BS} / USDC</td><td class="num">${o.trigger > 0n ? `≤ ${px4(sellPrice(o.trigger))}` : `≥ ${px4(sellPrice(o.limit))}`}</td><td class="num">${n(o.left)} ${BS}</td><td><a href="#sell">Manage</a></td></tr>`),
     ];
-    box.innerHTML = `
-      <div class="pf-kpis">
-        <div class="pf-kpi"><span>${sideOf(vault) || sideOf(SV.vault) ? "Total in your vault" : "Total in vaults"}</span><b>≈ ${n(total)} <small>USDC</small></b><small>${sideOf(vault) || sideOf(SV.vault) ? `your USDC plus your ${others.length ? "coins" : BS}, valued in USDC` : "all of it earning on Blend"}</small></div>
-        <div class="pf-kpi"><span>Tied to open orders</span><b>≈ ${n(tied)} <small>USDC</small></b><small>${total > 0 ? Math.round((tied / total) * 100) : 0}% of your ${sideOf(vault) || sideOf(SV.vault) ? "vault" : "vaults"}</small></div>
-        <div class="pf-kpi"><span>Interest earned</span><b class="pos">≈ +${n(earned, 4)} <small>USDC</small></b><small>since you opened ${sideOf(vault) || sideOf(SV.vault) ? "the vault" : "the vaults"}</small></div>
-        <div class="pf-kpi"><span>Open orders</span><b>${bo.length + so.length}</b><small>${bo.length} buy, ${so.length} sell</small></div>
-      </div>${!b ? `<p class="fine">No buy vault yet. <a href="#vault">Open one</a> on the Trade page to place buy orders.</p>` : ""}${!s && SV.home ? `<p class="fine">No sell vault yet. <a href="#sell">Open one</a> on the Sell side of the Trade page to place sell orders.</p>` : ""}`;
-    $("pf-orders").innerHTML = `
-      <section class="pf-card"><h2>Open orders</h2>${
-        orders.length
-          ? `<div class="table-wrap"><table class="pf-t"><thead><tr><th>Side</th><th>Market</th><th class="num">Price</th><th class="num">Still waiting</th><th></th></tr></thead><tbody>${orders.join("")}</tbody></table></div>`
-          : `<p class="muted">No open orders. Place one on the <a href="#vault">Trade</a> page; it earns while it waits.</p>`
-      }</section>
-      ${
-        others.length
-          ? `<section class="pf-card"><h2>Other coins in your vault</h2><div class="table-wrap"><table class="pf-t"><thead><tr><th>Coin</th><th class="num">Balance</th><th class="num">Value in USDC</th><th class="num">In open orders</th><th></th></tr></thead><tbody>${others
-              .map((o) => `<tr><td><span class="pf-asset"><i class="coin ${o.sym === "XLM" ? "xlm" : "other"}" aria-hidden="true"></i>${esc(o.sym)}</span></td><td class="num">${nfmt(o.bal, 4)}</td><td class="num">${o.usd === null ? "—" : `≈ ${n(o.usd)}`}</td><td class="num">${nfmt(o.res, 4)}</td><td><a href="#vault" data-base="${esc(o.sym)}">Trade ${esc(o.sym)} / USDC</a></td></tr>`)
-              .join("")}</tbody></table></div></section>`
-          : ""
+    // Single vault: open orders of every pair, not only the selected one
+    let nBuy = bo.length, nSell = so.length;
+    const dcaRows = [];
+    if (rv) {
+      const all = await allOpenOrders(rv.id).catch(() => null);
+      if (who !== me) return;
+      if (all) {
+        orders.length = 0;
+        nBuy = nSell = 0;
+        // scheduled orders (DCA) get their own tab; the schedule is stored beside the order
+        if ((await vaultVersion(vault || SV.vault || sv)) >= 11) {
+          const scs = await Promise.all(all.map((o) => rawRead(rv.id, "get_schedule", [u32(o.id)]).catch(() => ({ ok: false }))));
+          if (who !== me) return;
+          scs.forEach((r, i) => (all[i].sc = r.ok && r.value ? r.value : null));
+        }
+        for (const o of all) {
+          if (o.sc) {
+            const buying = o.sell === C.usdc;
+            const coin = coinSym(buying ? o.buy : o.sell);
+            const wait = Number(o.sc.next) - Date.now() / 1000;
+            dcaRows.push(
+              `<tr><td><span class="tag ${buying ? "buy" : "sell"}">${buying ? "Buy" : "Sell"}</span></td><td>${esc(coin)} / USDC</td><td class="num">${fmt(o.sc.part, buying || o.sell === C.xlm ? 2 : 7)} ${esc(coinSym(o.sell))}</td><td class="num">every ${dcaSpan(Number(o.sc.every))}</td><td class="num">${Number(o.sc.done)}${Number(o.sc.fills) ? ` of ${Number(o.sc.fills)}` : ""}</td><td class="num">${wait <= 0 ? "due now" : `in ${dcaSpan(wait)}`}</td><td class="num">${o.limit >= DCA_NO_LIMIT ? "any" : buying ? `≤ ${px4(Number(o.limit) / 1e7)}` : `≥ ${px4(sellPrice(o.limit))}`}</td><td class="pf-row-acts"><a href="${buying ? "#vault" : "#sell"}" data-base="${esc(coin)}" data-go="${buying ? "#vault" : "#sell"}">Manage</a></td></tr>`,
+            );
+            continue;
+          }
+          const buying = o.sell === C.usdc;
+          const coin = coinSym(buying ? o.buy : o.sell);
+          const any = o.limit >= DCA_NO_LIMIT;
+          if (buying) nBuy++;
+          else nSell++;
+          orders.push(
+            `<tr><td><span class="tag ${buying ? "buy" : "sell"}">${buying ? "Buy" : o.trigger > 0n ? "Stop" : "Sell"}</span></td><td>${esc(coin)} / USDC</td><td class="num">${any ? "any" : buying ? `≤ ${px4(Number(o.limit) / 1e7)}` : o.trigger > 0n ? `≤ ${px4(sellPrice(o.trigger))}` : `≥ ${px4(sellPrice(o.limit))}`}</td><td class="num">${fmt(o.left, buying || o.sell === C.xlm ? 2 : 7)} ${esc(coinSym(o.sell))}</td><td><a href="${buying ? "#vault" : "#sell"}" data-base="${esc(coin)}" data-go="${buying ? "#vault" : "#sell"}">Manage</a></td></tr>`,
+          );
+        }
       }
-      <p class="fine">Values in USDC use the current market price${px ? ` (1 ${BS} = ${px4(px)} USDC)` : ""}.${V7 ? (PAIRS.length ? ` Open orders are listed for ${BS} / USDC; pick another pair to see its orders.` : "") : " Showcase markets are not included."}</p>`;
+    }
+    const vid = realId(vault || SV.vault || sv || "");
+    const wal = (walletUsdc !== null ? Number(walletUsdc) / 1e7 : 0) + (walletXlm !== null ? (Number(walletXlm) / 1e7) * px : 0);
+    box.innerHTML = `
+      <div class="pf-top">
+        <div class="pf-kpis">
+          <section class="pf-box pf-kpi"><span>Vault value</span><b>≈ ${n(total)} <small>USDC</small></b>${vid ? `<small><a href="${EXPLORER}/contract/${vid}" target="_blank" rel="noopener">Vault ${short(vid)}</a> · <button type="button" class="link" id="pf-copy">Copy</button></small>` : ""}</section>
+          <section class="pf-box pf-kpi"><span>Interest earned</span><b class="pos">≈ +${n(earned, 4)} <small>USDC</small></b><small>${supplyApr !== null ? `USDC earns ${pct(supplyApr)} a year now` : "since you opened the vault"}</small></section>
+        </div>
+        <section class="pf-box pf-sum">
+          <div class="pf-sum-head"><span>Your vault</span><span class="muted">All coins, valued in USDC</span></div>
+          <dl>
+            <div><dt>Total</dt><dd>≈ ${n(total)} USDC</dd></div>
+            <div><dt>In open orders</dt><dd>≈ ${n(tied)} USDC</dd></div>
+            <div><dt>Available</dt><dd>≈ ${n(Math.max(0, total - tied))} USDC</dd></div>
+            <div><dt>Open orders</dt><dd>${nBuy + nSell} <span class="muted">(${nBuy} buy, ${nSell} sell)</span></dd></div>
+            <div><dt>In your wallet</dt><dd>≈ ${n(wal)} USDC</dd></div>
+          </dl>
+        </section>
+        <section class="pf-box pf-chart" id="pf-chart"></section>
+      </div>`;
+    pfChartDraw(pfhAdd(total, earned));
+    const cp = $("pf-copy");
+    if (cp) cp.onclick = () => navigator.clipboard && navigator.clipboard.writeText(vid).then(() => (cp.textContent = "Copied"));
+    // Balances: one row per coin the vault holds (USDC always); a coin that is not held is not listed
+    const balRow = (sym, bal, usd, res, apr, earnedTxt, acts) =>
+      `<tr><td><span class="pf-asset"><i class="coin ${sym === "USDC" ? "usdc" : sym === "XLM" ? "xlm" : "other"}" aria-hidden="true"></i>${esc(sym)}</span></td><td class="num">${nfmt(bal, 4)}</td><td class="num">${usd === null ? "—" : `≈ ${n(usd)}`}</td><td class="num">${nfmt(res, 4)}</td><td class="num">${nfmt(Math.max(0, bal - res), 4)}</td><td class="num pos">${apr}</td><td class="num pos">${earnedTxt}</td><td class="pf-row-acts">${acts}</td></tr>`;
+    const act = (label, coin, mode) => `<button type="button" class="link" data-move="${mode}" data-coin="${esc(coin)}">${label}</button>`;
+    const trade = (coin) => `<a href="#vault" data-base="${esc(coin)}" data-go="#vault">Trade</a>`;
+    const balRows = [
+      b ? balRow("USDC", b.bal, b.bal, b.res, pct(supplyApr), `+${n(b.earned, 6)}`, act("Deposit", "USDC", "dep") + act("Withdraw", "USDC", "wd")) : "",
+      s && (s.bal > 0 || s.res > 0) ? balRow(BS, s.bal, px ? s.bal * px : null, s.res, XB ? "—" : pct(xApr), XB ? "—" : `+${n(s.earned, 6)}`, act("Deposit", BS, "dep") + act("Withdraw", BS, "wd") + trade(BS)) : "",
+      ...others.map((o) => balRow(o.sym, o.bal, o.usd, o.res, "—", "—", act("Deposit", o.sym, "dep") + act("Withdraw", o.sym, "wd") + trade(o.sym))),
+    ].join("");
+    const tab = ["orders", "dca"].includes(pfTab) ? pfTab : "bal";
+    $("pf-orders").innerHTML = `
+      <section class="pf-box pf-deck">
+        <div class="pf-tabs" role="tablist"><button type="button" role="tab" data-pft="bal" aria-selected="${tab === "bal"}">Balances</button><button type="button" role="tab" data-pft="orders" aria-selected="${tab === "orders"}">Open orders · ${nBuy + nSell}</button><button type="button" role="tab" data-pft="dca" aria-selected="${tab === "dca"}">DCA · ${dcaRows.length}</button></div>
+        <div data-pfp="bal"${tab === "bal" ? "" : " hidden"}><div class="table-wrap"><table class="pf-t"><thead><tr><th>Coin</th><th class="num">Balance</th><th class="num">Value in USDC</th><th class="num">In open orders</th><th class="num">Available</th><th class="num">Earns</th><th class="num">Interest earned</th><th></th></tr></thead><tbody>${balRows}</tbody></table></div></div>
+        <div data-pfp="orders"${tab === "orders" ? "" : " hidden"}>${
+          orders.length
+            ? `<div class="table-wrap"><table class="pf-t"><thead><tr><th>Side</th><th>Market</th><th class="num">Price</th><th class="num">Still waiting</th><th></th></tr></thead><tbody>${orders.join("")}</tbody></table></div>`
+            : `<p class="muted pf-none">No open orders. Place one on the <a href="#vault">Trade</a> page; it earns while it waits.</p>`
+        }</div>
+        <div data-pfp="dca"${tab === "dca" ? "" : " hidden"}>${
+          dcaRows.length
+            ? `<div class="table-wrap"><table class="pf-t"><thead><tr><th>Side</th><th>Market</th><th class="num">Each time</th><th class="num">How often</th><th class="num">Done</th><th class="num">Next</th><th class="num">Price</th><th></th></tr></thead><tbody>${dcaRows.join("")}</tbody></table></div>`
+            : `<p class="muted pf-none">No DCA plans. Start one on the <a href="#vault">Trade</a> page, in the DCA tab of the order form.</p>`
+        }</div>
+      </section>
+      <p class="fine">Values in USDC use the current market price${px ? ` (1 ${BS} = ${px4(px)} USDC)` : ""}.${V7 ? "" : " Showcase markets are not included."}</p>`;
+    for (const t of $("pf-orders").querySelectorAll("[data-pft]")) {
+      t.onclick = () => {
+        pfTab = t.dataset.pft;
+        for (const o of $("pf-orders").querySelectorAll("[data-pft]")) o.setAttribute("aria-selected", String(o === t));
+        for (const p of $("pf-orders").querySelectorAll("[data-pfp]")) p.hidden = p.dataset.pfp !== pfTab;
+      };
+    }
+    for (const m of $("pf-orders").querySelectorAll("[data-move]")) m.onclick = () => pickMoveCoin(m.dataset.coin, m.dataset.move);
     for (const a of $("pf-orders").querySelectorAll("a[data-base]")) {
       a.onclick = (e) => {
         e.preventDefault();
-        setBase(a.dataset.base, "#vault");
+        setBase(a.dataset.base, a.dataset.go || "#vault");
       };
     }
+    genNote();
   } catch (e) {
     console.warn("portfolio", e);
   } finally {
@@ -1663,7 +2170,7 @@ async function refreshBuy() {
   await pickGeneration();
   // Account check and the first reads at the same time: every RPC round adds to the wait.
   const [acct, xlmBal, usdcBal, q, vaultOf, baseBal] = await Promise.all([
-    server.getAccount(me).then(() => true, () => false),
+    server.accountExists(me).catch(() => false),
     read(C.xlm, "balance", [addr(me)]),
     read(C.usdc, "balance", [addr(me)]),
     read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, BASE.addr])]),
@@ -1741,6 +2248,7 @@ async function refreshBuy() {
     read(vault, "reserved"),
     read(vault, "free_balance"),
     read(vault, "stats"),
+    vaultVersion(vault).catch(() => 0), // needed before the first order: the version decides how an order is placed (see noEnd)
   ]);
   // Lifetime interest = balance + withdrawn + spent - deposited
   let earned = null;
@@ -1815,15 +2323,35 @@ function updateGauge() {
       : `${BS} has to fall ${drop.toFixed(1)}% to reach your limit. Until then the USDC keeps earning on Blend.`;
 }
 
+/**
+ * Network fees over the wallet's last 200 transactions, from Horizon. The list is about 0.8 MB, so it is not
+ * fetched on every refresh: once per wallet, again after this page has sent a transaction, or after ten minutes.
+ */
+function walletFees() {
+  const who = me;
+  if (FEES.who === who && !FEES.stale && Date.now() - FEES.at < 600_000) return Promise.resolve(FEES.sum);
+  if (FEES.asking && FEES.asking.who === who) return FEES.asking.p;
+  FEES.stale = false;
+  const p = fetch(`https://horizon-testnet.stellar.org/accounts/${who}/transactions?limit=200&order=desc`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (!j) throw new Error("no answer");
+      const sum = j._embedded.records.reduce((a, t) => a + BigInt(t.fee_charged), 0n);
+      Object.assign(FEES, { who, at: Date.now(), sum });
+      return sum;
+    })
+    .catch(() => {
+      FEES.stale = true; // not read: the next refresh asks again; meanwhile the last known total stays
+      return FEES.who === who ? FEES.sum : null;
+    })
+    .finally(() => {
+      if (FEES.asking && FEES.asking.p === p) FEES.asking = null;
+    });
+  FEES.asking = { who, p };
+  return p;
+}
 async function renderSummary(st) {
-  let fees = null;
-  try {
-    const r = await fetch(`https://horizon-testnet.stellar.org/accounts/${me}/transactions?limit=200&order=desc`);
-    if (r.ok) {
-      const j = await r.json();
-      fees = j._embedded.records.reduce((sum, t) => sum + BigInt(t.fee_charged), 0n);
-    }
-  } catch {}
+  const fees = await walletFees();
   const spent = st ? BigInt(st.total_spent) : 0n;
   const got = st ? BigInt(st.total_received) : 0n;
   const avg = got > 0n ? (Number(spent) / Number(got)).toLocaleString("en-US", { maximumFractionDigits: 4 }) : "—";
@@ -1914,16 +2442,20 @@ const DCA_NO_LIMIT = U * 1_000_000_000n; // the contract's highest price: "no pr
 const DCA_BAND_BPS = 300; // without a price limit every part must be within 3% of the oracle price
 const DCA_MIN_EVERY = 60;
 const DCA_MAX_EVERY = 28 * 86400;
-const DCA_DAYS = 365; // older vaults: a plan stops by itself after a year at the latest
-// Version 12 vaults: an order has no latest expiry. The app then places every order "until I cancel it".
+// An order stays open until it fills or its owner cancels it. Version 12 vaults have no end time at all. A vault
+// of an earlier version cannot hold an order for more than a year, so there the app asks for the longest the
+// contract accepts.
+const OLD_VAULT_DAYS = 365;
+const DCA_DAYS = OLD_VAULT_DAYS;
 const NO_EXPIRY = 18446744073709551615n;
+/** True for a vault whose orders have no end time. The version must have been read (vaultVersion) before this is asked. */
 const noEnd = (v) => (vaultVer.get(sideOf(v)?.id) || 0) >= 12;
-/** Expiry for a new order in vault `v`: no end where the vault allows it, otherwise `days` from now. */
+/** The `expiry` argument for a new order in vault `v`: none where the vault allows it, otherwise `days` from now. */
 const expiryOf = (v, days) => (noEnd(v) ? NO_EXPIRY : Math.floor(Date.now() / 1000) + Math.round(days * 86400));
-const expiryText = (e) => (e === NO_EXPIRY ? "Never: it stays open until you cancel it" : new Date(Number(e) * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }));
 /** How long the sell order of a take profit lives, in seconds (counted from the fill). */
 const autoSecs = (v) => (noEnd(v) ? 100 * 365 * 86400 : AUTO_DAYS * 86400);
-const autoSpan = (v) => (noEnd(v) ? "open until you cancel" : `${AUTO_DAYS} days`);
+/** Review boxes: said about the sell order of a take profit where the vault keeps it without an end time. */
+const autoSpan = (v) => (noEnd(v) ? "open until you cancel" : "");
 const vaultVer = new Map(); // vault address -> version (0: older than 8)
 const doneSchedules = new Map(); // "vault:id" -> schedule | null, for orders that can no longer change
 async function vaultVersion(v) {
@@ -2016,7 +2548,7 @@ function paintOrders() {
     .map((o) => {
       const status = Array.isArray(o.status) ? o.status[0] : o.status?.tag || String(o.status);
       const expired = status === "Open" && Number(o.expiry) < now;
-      const label = expired ? "Expired" : { Open: "Open", Filled: "Filled", Cancelled: "Cancelled" }[status] || status;
+      const label = expired ? "Ended" : { Open: "Open", Filled: "Filled", Cancelled: "Cancelled" }[status] || status;
       const filled = BigInt(o.filled_in);
       let avg = "—";
       if (filled > 0n) {
@@ -2030,9 +2562,6 @@ function paintOrders() {
         openCount++;
         if (BigInt(o.limit_price) < DCA_NO_LIMIT) openOrders.push({ id: o.id, left: Number(BigInt(o.amount_in) - filled) / 1e7, limit: Number(BigInt(o.limit_price)) / 1e7, expiry: Number(o.expiry) });
       }
-      const left = Number(o.expiry) - now;
-      const exp =
-        status !== "Open" ? "—" : expired ? "Ended" : left > 3650 * 86400 ? "No end" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
       // Waiting interest (estimate): at today's Blend rate, from when the order was placed until it filled or was cancelled
       const times = orderTimes[o.id] || {};
       let waitCell = `<span class="muted">—</span>`;
@@ -2057,14 +2586,14 @@ function paintOrders() {
         <td><div class="bar"><span style="width:${pct}%"></span></div>${d ? d.prog : `${pct}%`}<span class="muted">${fmt(o.filled_out, 2)} ${BS}</span></td>
         <td>${avg}</td>
         <td>${waitCell}</td>
-        <td>${exp}</td>
+        <td></td>
         <td><span class="tag ${status.toLowerCase()}${expired ? " expired" : ""}">${label}</span></td>
         <td>${status === "Open" ? `<button class="small ghost" data-cancel="${o.id}">Cancel</button>` : ""}${fus.has(o.id) ? "" : flipButton(o)}</td>
       </tr>`;
     })
     .join("");
   $("orders").innerHTML = `<table>
-    <thead><tr><th>#</th><th>Amount</th><th>Limit</th><th>Filled</th><th>Avg. price</th><th>Earned waiting ${tip("Estimated interest the order's USDC earned on Blend while it waited, from when you placed it until it filled or was cancelled. Uses today's rate, so it is approximate.")}</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Amount</th><th>Limit</th><th>Filled</th><th>Avg. price</th><th>Earned waiting ${tip("Estimated interest the order's USDC earned on Blend while it waited, from when you placed it until it filled or was cancelled. Uses today's rate, so it is approximate.")}</th><th></th><th>Status</th><th></th></tr></thead>
     <tbody>${html}</tbody></table>`;
   $("orders-count").textContent = `(${openCount})`;
   waitEarned = totalWait;
@@ -2087,7 +2616,7 @@ async function addTrustline() {
       .addOperation(Operation.changeTrust({ asset: new Asset("USDC", C.usdcIssuer) }))
       .setTimeout(180)
       .build();
-    log("USDC trustline: waiting for wallet approval…");
+    log("USDC trustline: waiting for wallet approval…", "wait");
     const r = await signAndSend(tx);
     log(`USDC trustline added · <a href="${EXPLORER}/tx/${r.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
   } catch (e) {
@@ -2198,9 +2727,8 @@ async function placeOrder({ single = false } = {}) {
   const impactPct = Number(String($("oimpact").value).replace(",", "."));
   if (!(impactPct > 0 && impactPct <= 100)) return log("Price impact limit must be between 0 and 100.", "err");
   const bps = Math.max(1, Math.round(impactPct * 100));
-  const days = Number($("odays").value);
-  if (!(days > 0 && days <= 365)) return log("Duration must be 1 to 365 days.", "err");
-  const expiry = expiryOf(vault, days);
+  await vaultVersion(vault).catch(() => 0);
+  const expiry = expiryOf(vault, OLD_VAULT_DAYS);
   if (!single && LADDER.on) {
     const limit2 = toUnitsSafe($("olimit2").value);
     if (limit2 === null) return;
@@ -2217,7 +2745,6 @@ async function placeOrder({ single = false } = {}) {
     ["You receive at least", `${fmt(minOut(amount, limit), 2)} ${BS}`],
   ];
   if (marketPrice) rows.push(["Market price now", `${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC${lim < marketPrice ? ` (limit is ${((1 - lim / marketPrice) * 100).toFixed(1)}% below)` : ""}`]);
-  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Minimum fill", `${fmt(minFill, 2)} USDC per piece`]);
   rows.push(["Max price impact", `${impactPct}% per fill`]);
   if (!autoOk(limit)) return;
@@ -2285,7 +2812,10 @@ $("create").onclick = createVault;
 $("deposit").onclick = deposit;
 $("withdraw").onclick = withdraw;
 $("place").onclick = placeOrder;
-$("refresh").onclick = refresh;
+$("refresh").onclick = () => {
+  flushReads();
+  return refresh();
+};
 $("status").onclick = () => $("status").classList.remove("show");
 // Deposit / withdraw tabs and the order filter
 for (const t of document.querySelectorAll("[data-tab]")) {
@@ -2302,13 +2832,6 @@ for (const c of document.querySelectorAll("#limit-chips [data-pct]")) {
     const v = marketPrice * (1 + Number(c.dataset.pct) / 100);
     $("olimit").value = v.toFixed(4);
     updateGauge();
-    updateTicket();
-  };
-}
-for (const c of document.querySelectorAll("#days-chips [data-days]")) {
-  c.onclick = () => {
-    $("odays").value = c.dataset.days;
-    syncDays();
     updateTicket();
   };
 }
@@ -2335,19 +2858,81 @@ function walletDepositable(which) {
   const v = which === "dep" ? bal : bal - BASE_KEEP;
   return v > 0n ? v : 0n;
 }
-/** Opens the vault's Deposit tab on the Portfolio page; with an amount, fills it in. */
-function openDeposit(which, amount = null) {
-  location.hash = "portfolio"; // the vault cards (balance, deposit, withdraw) are on the Portfolio page
-  setTimeout(() => {
-    const tab = document.querySelector(`.vtabs [data-tab="${which}"]`);
-    if (!tab) return;
-    tab.click();
-    tab.closest(".overview").scrollIntoView({ block: "center", behavior: "smooth" });
-    const input = $(which === "dep" ? "depamount" : "sv-dep");
-    if (amount !== null && amount > 0n) input.value = toPlain(amount);
-    input.focus({ preventScroll: true });
-  }, 60);
+/** Opens the deposit (or withdraw) box on the page you are on; with an amount, fills it in. Confirming runs the
+    vault card's own deposit / withdraw, so the checks and the transaction are the same. */
+const MOVE_FLAG = "iora-open-move"; // set before a reload to another coin: "dep" | "wd"
+function moveLimit(which, mode) {
+  if (mode === "dep") return walletDepositable(which);
+  const v = which === "dep" ? freeUnits : SV.free;
+  return v !== null && v !== undefined && v > 0n ? v : 0n;
 }
+function openMove(which, mode = "dep", amount = null) {
+  const d = $("depbox");
+  const sym = which === "dep" ? "USDC" : BS;
+  const dep = mode === "dep";
+  d.dataset.which = which;
+  d.dataset.mode = mode;
+  $("depbox-title").textContent = `${dep ? "Deposit" : "Withdraw"} ${sym}`;
+  $("depbox-lede").textContent = dep ? "From your wallet into your vault. Orders use what is in the vault." : "From your vault back to your wallet, interest included. What open orders have set aside stays until you cancel them.";
+  $("depbox-sym").textContent = sym;
+  $("depbox-from").textContent = dep ? "Wallet" : "Available";
+  $("depbox-wal").textContent = fmt(moveLimit(which, mode), XB && which !== "dep" ? 7 : 2);
+  $("depbox-amt").placeholder = dep ? "0" : "All available";
+  $("depbox-amt").value = amount !== null && amount > 0n ? toPlain(amount) : "";
+  $("depbox-yes").textContent = dep ? "Deposit" : "Withdraw";
+  // coin choice: USDC, the selected coin, and (single vault) the other coins, which reload the page on that coin
+  const coins = V7 ? COINS() : [{ sym: "USDC" }, { sym: BS }];
+  $("depbox-coins").innerHTML = coins.map((c) => `<button type="button" data-coin="${esc(c.sym)}" aria-pressed="${c.sym === sym}">${esc(c.sym)}</button>`).join("");
+  for (const c of $("depbox-coins").querySelectorAll("button")) c.onclick = () => pickMoveCoin(c.dataset.coin, mode);
+  d.returnValue = "";
+  if (!d.open) d.showModal();
+  $("depbox-amt").focus();
+}
+function pickMoveCoin(sym, mode) {
+  if (sym === "USDC") return openMove("dep", mode);
+  if (sym === BS) return openMove("sv-dep", mode);
+  try {
+    sessionStorage.setItem(MOVE_FLAG, mode);
+  } catch {}
+  setBase(sym, location.hash || "#portfolio");
+}
+const openDeposit = (which, amount = null) => openMove(which, "dep", amount);
+$("depbox-max").onclick = () => {
+  const d = $("depbox");
+  const can = moveLimit(d.dataset.which, d.dataset.mode);
+  if (can > 0n) $("depbox-amt").value = toPlain(can);
+};
+$("depbox").addEventListener("click", (e) => {
+  if (e.target === $("depbox")) $("depbox").close("cancel");
+});
+$("depbox").addEventListener("close", () => {
+  const d = $("depbox");
+  if (d.returnValue !== "ok") return;
+  const usdc = d.dataset.which === "dep";
+  if (d.dataset.mode === "wd") {
+    $(usdc ? "wdamount" : "sv-wd").value = $("depbox-amt").value; // empty: everything that is available
+    $(usdc ? "withdraw" : "sv-wd-go").click();
+  } else {
+    $(usdc ? "depamount" : "sv-dep").value = $("depbox-amt").value;
+    $(usdc ? "deposit" : "sv-dep-go").click();
+  }
+});
+$("pf-dep").onclick = () => openMove("dep", "dep");
+$("pf-wd").onclick = () => openMove("dep", "wd");
+// after a reload on another coin (chosen in the box): open the box again for that coin, once the balances are read
+try {
+  const m = sessionStorage.getItem(MOVE_FLAG);
+  if (m) {
+    sessionStorage.removeItem(MOVE_FLAG);
+    let tries = 0;
+    const t = setInterval(() => {
+      if (++tries > 40) return clearInterval(t);
+      if (!me || (m === "wd" ? SV.free === null : walletXlm === null)) return;
+      clearInterval(t);
+      openMove("sv-dep", m);
+    }, 500);
+  }
+} catch {}
 /** The order needs `missing` more than the vault has. If the wallet holds it, go to Deposit and say so. */
 function offerDeposit(which, missing, sym) {
   const can = walletDepositable(which);
@@ -2903,7 +3488,7 @@ function renderFaucet(funded, hasTrust) {
 }
 
 async function fundFriendbot() {
-  if (!me) return log("Connect your wallet first.", "err");
+  if (!(await needWallet())) return;
   const b = $("friendbot");
   b.disabled = true;
   log("Asking Friendbot for test XLM…");
@@ -2917,6 +3502,7 @@ async function fundFriendbot() {
   } catch {
     log("Could not reach Friendbot. Check your connection and try again.", "err");
   }
+  flushReads();
   await refresh();
 }
 
@@ -2982,13 +3568,16 @@ async function aquaPools(a, b) {
 /** The best Aquarius pool for this swap: { out, hash } or null. */
 async function aquaBest(tin, tout, amt) {
   let best = null;
-  for (const hash of await aquaPools(tin, tout)) {
-    const r = await rawRead(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(amt)]);
+  const pools = await aquaPools(tin, tout);
+  const reads = await Promise.all(
+    pools.map((hash) => rawRead(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(hash), u128(amt)])),
+  );
+  reads.forEach((r, i) => {
     if (r.ok && r.value !== undefined) {
       const out = BigInt(r.value);
-      if (!best || out > best.out) best = { out, hash };
+      if (!best || out > best.out) best = { out, hash: pools[i] };
     }
-  }
+  });
   return best;
 }
 
@@ -2997,7 +3586,6 @@ async function aquaBest(tin, tout, amt) {
 // Aquarius pools can return more than the best single pool. The filler takes exactly the amount you sign for,
 // runs the swaps and sends everything back in the same transaction; with less than your minimum it all fails.
 const FILLER = (import.meta.env.VITE_FILLER || "").trim();
-const SPLIT_SLICES = 4;
 const SPLIT_PROBE = 100_000n; // 0.01 token: the amount used to read how a pool takes its token
 const symVal = (x) => xdr.ScVal.scvSymbol(x);
 const structVal = (o) => xdr.ScVal.scvMap(Object.keys(o).sort().map((k) => new xdr.ScMapEntry({ key: symVal(k), val: o[k] })));
@@ -3325,6 +3913,22 @@ const slipSaved = () => {
     return 1;
   }
 };
+// The owner's own value becomes a chip of its own, first in the row, and stays there (also after a reload) so it
+// is one click away even after trying another choice. The box beside the chips is only for typing a new value.
+const SLIP_MINE_KEY = "iora-slip-own";
+function showMine(v) {
+  const b = $("slip-mine");
+  if (!(v >= 0.01 && v <= 50) || v === 0.5 || v === 1) return;
+  b.dataset.slip = String(v);
+  b.textContent = `${v}%`;
+  b.hidden = false;
+  try {
+    localStorage.setItem(SLIP_MINE_KEY, String(v));
+  } catch {}
+}
+try {
+  showMine(Number(localStorage.getItem(SLIP_MINE_KEY)));
+} catch {}
 function setSlip(v, { own = false, save = true } = {}) {
   SW.slip = v;
   if (save) {
@@ -3332,24 +3936,43 @@ function setSlip(v, { own = false, save = true } = {}) {
       localStorage.setItem(SLIP_KEY, String(v));
     } catch {}
   }
-  const chip = [...document.querySelectorAll("#slip-chips [data-slip]")].find((o) => Number(o.dataset.slip) === v);
-  for (const o of document.querySelectorAll("#slip-chips [data-slip]")) o.setAttribute("aria-pressed", String(o === chip && !own));
-  if (!own) $("slip-own").value = chip ? "" : String(v);
-  $("slip-own").parentElement.classList.toggle("on", own || !chip);
+  if (!own) showMine(v);
+  const chip = own ? null : [...document.querySelectorAll("#slip-chips [data-slip]")].find((o) => !o.hidden && Number(o.dataset.slip) === v);
+  for (const o of document.querySelectorAll("#slip-chips [data-slip]")) o.setAttribute("aria-pressed", String(o === chip));
+  if (!own) $("slip-own").value = "";
+  $("slip-own").parentElement.classList.toggle("on", own);
   $("slip-own").parentElement.classList.remove("bad");
   doQuote();
 }
 for (const c of document.querySelectorAll("#slip-chips [data-slip]")) c.onclick = () => setSlip(Number(c.dataset.slip));
-$("slip-own").addEventListener("input", () => {
+const slipTyped = () => {
   const raw = $("slip-own").value.trim().replace(",", ".");
   const v = /^\d*\.?\d+$/.test(raw) ? Number(raw) : NaN;
-  if (v >= 0.01 && v <= 50) return setSlip(Math.round(v * 100) / 100, { own: true });
-  if (!raw) return setSlip(1);
-  $("slip-own").parentElement.classList.add("bad"); // not a usable number: the last valid choice stays
+  return v >= 0.01 && v <= 50 ? Math.round(v * 100) / 100 : raw ? NaN : null;
+};
+$("slip-own").addEventListener("input", () => {
+  const v = slipTyped();
+  if (v === null) return setSlip(slipSaved(), { save: false });
+  if (Number.isNaN(v)) return $("slip-own").parentElement.classList.add("bad"); // not a usable number: the last valid choice stays
+  setSlip(v, { own: true });
+});
+// done typing (Enter or leaving the box): the value moves into its chip and the box is empty again
+const slipCommit = () => {
+  const v = slipTyped();
+  if (v === null || Number.isNaN(v)) return;
+  setSlip(v);
+};
+$("slip-own").addEventListener("change", slipCommit);
+$("slip-own").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    slipCommit();
+    $("slip-own").blur();
+  }
 });
 if (slipSaved() !== 1) queueMicrotask(() => setSlip(slipSaved(), { save: false }));
 $("swap-go").onclick = async () => {
-  if (!me) return log("Connect your wallet first.", "err");
+  if (!(await needWallet())) return;
   const raw = String($("swap-in").value).trim().replace(",", ".");
   const amt = toUnitsSafe(raw);
   if (amt === null) return;
@@ -3420,11 +4043,10 @@ async function flipToSell(bought, buyPx) {
     [`Sell when 1 ${BS} is at`, `<div class="chips" id="flip-chips">${[5, 10, 20].map((p) => `<button type="button" data-pct="${p}" aria-pressed="${p === pct}">+${p}%</button>`).join("")}</div>`],
     ["Sell price", `<b id="flip-px"></b>`],
     ["You receive at least", `<b id="flip-out"></b>`],
-    ["Expires", "in 30 days"],
   ];
   const notes = [
     `You'll sign ${steps} transactions: ${sv ? "" : "open your sell vault, "}deposit the ${BS}, then place the sell order.`,
-    `Until it sells, the ${BS} earns interest on Blend. You can cancel and withdraw at any time.`,
+    `${XB ? "" : `Until it sells, the ${BS} earns interest on Blend. `}${LEAVE_NOTE}`,
   ];
   const paint = () => {
     const pu = toUnits(pxAt(pct).toFixed(7));
@@ -3457,12 +4079,13 @@ async function flipToSell(bought, buyPx) {
   const size = canOrder !== null && canOrder < amount ? canOrder : amount;
   if (size < MIN_ORDER) return log("The deposit arrived, but it is too small to place a sell order.", "err");
   const minFill = size / 4n >= (XB ? 1000n : U) ? size / 4n : size;
-  const expiry = expiryOf(SV.vault, 30);
+  await vaultVersion(SV.vault).catch(() => 0);
+  const expiry = expiryOf(SV.vault, OLD_VAULT_DAYS);
   const placed = await call(SV.vault, "place_order", [i128(size), i128(limit), i128(minFill), u32(300), u64(expiry)], "Place sell order", SELL_ERRORS);
   await refreshSell();
   await refresh();
   if (placed) {
-    log(`Sell order placed: ${fmt(size, 2)} ${BS} at ${px4(pxAt(pct))} USDC or more, for 30 days. It earns on Blend while it waits.`, "ok");
+    log(`Sell order placed: ${fmt(size, 2)} ${BS} at ${px4(pxAt(pct))} USDC or more. It earns on Blend while it waits.`, "ok");
     askNotify();
   }
 }
@@ -3473,13 +4096,6 @@ async function sellVaultOf() {
   if (SV.vault) return SV.vault;
   const r = await read(SV.factory, "vault_of", [addr(me)]);
   return r.ok && r.value ? wrapSell(r.value) : null;
-}
-async function vaultInterest(v) {
-  const [bal, st] = await Promise.all([read(v, "balance"), read(v, "stats")]);
-  if (!bal.ok || !st.ok) return null;
-  const s = st.value;
-  const earned = BigInt(bal.value) + BigInt(s.total_withdrawn) + BigInt(s.total_spent) - BigInt(s.total_deposited);
-  return { earned: earned > 0n ? earned : 0n, bal: BigInt(bal.value) };
 }
 async function openOrdersIn(v) {
   const out = [];
@@ -3657,9 +4273,8 @@ async function placeLadder(amount, limit, limit2, bps, impactPct, expiry) {
   const lv = buyLevels(amount, limit, limit2);
   if (lv.some((l) => l.amt < MIN_ORDER || l.lim <= 0n)) return log("Amount is too small to split into that many orders (each order needs at least 0.1).", "err");
   const rows = lv.map((l, i) => [`Order ${i + 1}`, `${fmt(l.amt, 2)} USDC at ≤ ${fmt(l.lim)} (≥ ${fmt(minOut(l.amt, l.lim), 2)} ${BS})`]);
-  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactPct}% per fill`]);
-  if (AUTO.px) rows.push(["Take profit", `each order's ${BS} is sold at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault (${autoSpan(vault)})`]);
+  if (AUTO.px) rows.push(["Take profit", `each order's ${BS} is sold at ≥ ${px4(Number(AUTO.px) / 1e7)} USDC from your sell vault${autoSpan(vault) ? ` (${autoSpan(vault)})` : ""}`]);
   const notes = [`You'll sign ${lv.length} transactions, one per order. You can stop at any point; orders already placed stay open.`];
   if (supplyApr !== null) notes.push(`All ${fmt(amount, 2)} USDC keeps earning about ${((Number(amount) / 1e7) * supplyApr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC a day until each order fills.`);
   if (!(await ask({ title: `Review ${lv.length} scaled orders`, rows, notes, confirm: `Place ${lv.length} orders` }))) return;
@@ -3822,7 +4437,7 @@ async function checkOutTrust() {
     try {
       const account = await server.getAccount(me);
       const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASS }).addOperation(Operation.changeTrust({ asset: new Asset(sym, issuer) })).setTimeout(180).build();
-      log(`${esc(sym)} trustline: waiting for wallet approval…`);
+      log(`${esc(sym)} trustline: waiting for wallet approval…`, "wait");
       const r = await signAndSend(tx);
       log(`${esc(sym)} trustline added · <a href="${EXPLORER}/tx/${r.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
     } catch (e) {
@@ -3921,6 +4536,7 @@ async function refreshSell() {
     </dl>`;
 
   SV.vault = vo.ok && vo.value ? wrapSell(vo.value) : null;
+  if (SV.vault) await vaultVersion(SV.vault).catch(() => 0); // as on the buy side: known before the first order is placed
   loadFeeCap(SV.vault);
   document.body.classList.toggle("has-svault", !!SV.vault);
   if (SV.vault && V3.sell === null) V3.sell = await isV3(SV.vault);
@@ -4066,7 +4682,7 @@ function updateSellTicket() {
         : `<span class="bad">This price is at or above the market, so it would sell right away. A stop loss is usually set below the market.</span>`,
     );
     items.push(`It never sells below <b>${px4(worst)} ${SV.out.sym}</b> (${SL_SLIP}% under your stop) and you receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b>. If the price gaps lower than that, it waits.`);
-    items.push(`The stop stays in place until it triggers or you cancel it${noEnd(SV.vault) ? "" : " (it ends by itself after a year)"}.`);
+    items.push(`The stop stays in place until it triggers or you cancel it.`);
     $("sv-preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
     return;
   }
@@ -4086,13 +4702,13 @@ function updateSellTicket() {
     items.length = 1; // the first item (interest) stays; the range is described instead of the single-price sentence
     items.push(`It is split into <b>${scale.length} limit orders</b>, evenly spaced from <b>${px4(Number(scale[0].px) / 1e7)}</b> up to <b>${px4(Number(scale[scale.length - 1].px) / 1e7)} ${SV.out.sym}</b>. Each one sells by itself when the price reaches it.`);
     items.push(`If all of them sell you receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b> ${outIn(SV.vault)}.`);
-    items.push(`Each order is placed with its own signature: <b>${scale.length} signatures</b>. Unsold orders keep earning; you can cancel any of them at any time.`);
+    items.push(`Each order is placed with its own signature: <b>${scale.length} signatures</b>. ${XB ? "You" : "Unsold orders keep earning; you"} can cancel any of them at any time.`);
     $("sv-preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
     return;
   }
   items.push(`You receive at least <b>${fmt(out, outDp(4))} ${SV.out.sym}</b> ${outIn(SV.vault)}.`);
   if (feeNote(SV.vault, SV.out.sym)) items.push(feeNote(SV.vault, SV.out.sym));
-  items.push(`The order stays open until it sells or you cancel it${noEnd(SV.vault) ? "" : " (it ends by itself after a year)"}. You can cancel and withdraw at any time.`);
+  items.push(`The order stays open until it sells or you cancel it. ${LEAVE_NOTE}`);
   $("sv-preview-list").innerHTML = items.map((t) => `<li>${t}</li>`).join("");
 }
 
@@ -4113,7 +4729,7 @@ async function renderSellOrders() {
       const status = Array.isArray(o.status) ? o.status[0] : o.status?.tag || String(o.status);
       const expired = status === "Open" && Number(o.expiry) < now;
       if (status === "Open" && !expired) openCount++;
-      const label = expired ? "Expired" : status;
+      const label = expired ? "Ended" : status;
       const sold = BigInt(o.filled_in);
       const pct = Number((sold * 100n) / BigInt(o.amount_in));
       let avg = "—";
@@ -4122,8 +4738,6 @@ async function renderSellOrders() {
         const better = (got / sellPrice(BigInt(o.limit_price)) - 1) * 100;
         avg = `${px4(got)}${BigInt(o.limit_price) >= DCA_NO_LIMIT ? "" : ` <span class="muted">${better.toFixed(1)}% better</span>`}`;
       }
-      const left = Number(o.expiry) - now;
-      const exp = status !== "Open" ? "—" : expired ? "Ended" : left > 3650 * 86400 ? "No end" : left > 86400 ? `in ${Math.floor(left / 86400)} d` : left > 3600 ? `in ${Math.floor(left / 3600)} h` : "< 1 h";
       let waitCell = `<span class="muted">—</span>`;
       if (SV.apr !== null && status === "Open" && !expired) {
         const base = Number(BigInt(o.amount_in) - sold) / 1e7;
@@ -4137,7 +4751,7 @@ async function renderSellOrders() {
         <td><div class="bar"><span style="width:${pct}%"></span></div>${d ? d.prog : `${pct}%`}<span class="muted">${fmt(o.filled_out, outDp(2))} ${SV.out.sym}</span></td>
         <td>${avg}</td>
         <td>${waitCell}</td>
-        <td>${exp}</td>
+        <td></td>
         <td><span class="tag ${status.toLowerCase()}${expired ? " expired" : ""}">${esc(label)}</span></td>
         <td>${status === "Open" ? `<button class="small ghost" data-sv-cancel="${o.id}">Cancel</button>` : ""}</td>
       </tr>`;
@@ -4145,7 +4759,7 @@ async function renderSellOrders() {
     .join("");
   checkSellFills(rows);
   $("sv-count").textContent = `(${openCount})`;
-  $("sv-orders").innerHTML = `<table><thead><tr><th>#</th><th>Amount</th><th>Price</th><th>Sold</th><th>Avg. price</th><th>Earning ${tip(`Estimated ${BS} interest the unsold part earns on Blend per day, at today's rate.`)}</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>${html}</tbody></table>`;
+  $("sv-orders").innerHTML = `<table><thead><tr><th>#</th><th>Amount</th><th>Price</th><th>Sold</th><th>Avg. price</th><th>Earning ${tip(`Estimated ${BS} interest the unsold part earns on Blend per day, at today's rate.`)}</th><th></th><th>Status</th><th></th></tr></thead><tbody>${html}</tbody></table>`;
   for (const b of document.querySelectorAll("[data-sv-cancel]")) b.onclick = () => cancelSell(Number(b.dataset.svCancel));
   tradeLinesSoon();
 }
@@ -4219,13 +4833,6 @@ for (const c of document.querySelectorAll("#sv-px-chips [data-up]")) {
     updateSellTicket();
   };
 }
-for (const c of document.querySelectorAll("#sv-days [data-days]")) {
-  c.onclick = () => {
-    SV.days = Number(c.dataset.days);
-    for (const o of document.querySelectorAll("#sv-days [data-days]")) o.setAttribute("aria-pressed", String(o === c));
-    updateSellTicket();
-  };
-}
 $("sv-amt").addEventListener("input", updateSellTicket);
 $("sv-px").addEventListener("input", updateSellTicket);
 
@@ -4251,7 +4858,8 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
   const limit = sellLimit(price);
   if (limit <= 0n) return log("Sell price is too high.", "err");
   const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount; // pieces of at least 1 XLM, a single piece for a small order
-  const expiry = expiryOf(SV.vault, SV.days);
+  await vaultVersion(SV.vault).catch(() => 0);
+  const expiry = expiryOf(SV.vault, OLD_VAULT_DAYS);
   const p = Number(price) / 1e7;
   const rows = [
     ["You sell", `${fmt(amount, 4)} ${BS}`],
@@ -4259,7 +4867,6 @@ async function placeSellOrder(impactBps = 300, { single = false } = {}) {
     ["You receive at least", `${fmt(minOut(amount, limit), outDp(4))} ${SV.out.sym}`],
   ];
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}${p > SV.mkt ? ` (your price is ${((p / SV.mkt - 1) * 100).toFixed(1)}% above)` : ""}`]);
-  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactBps / 100}% per fill`]);
   const notes = [];
   if (SV.apr !== null) notes.push(`While it waits, your ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day on Blend.`);
@@ -4279,7 +4886,8 @@ async function placeStopLoss(amount, price, impactBps) {
   if (trigger <= 0n || limit <= 0n) return log("Stop price is not valid.", "err");
   const p = Number(price) / 1e7;
   const minFill = amount / 4n >= (XB ? 1000n : U) ? amount / 4n : amount;
-  const expiry = expiryOf(SV.vault, SV.days);
+  await vaultVersion(SV.vault).catch(() => 0);
+  const expiry = expiryOf(SV.vault, OLD_VAULT_DAYS);
   const rows = [
     ["You sell", `${fmt(amount, 4)} ${BS}`],
     [`Sell if 1 ${BS} drops to`, `${px4(p)} ${SV.out.sym}`],
@@ -4287,7 +4895,6 @@ async function placeStopLoss(amount, price, impactBps) {
     ["You receive at least", `${fmt(minOut(amount, limit), outDp(4))} ${SV.out.sym}`],
   ];
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}${p < SV.mkt ? ` (your stop is ${((1 - p / SV.mkt) * 100).toFixed(1)}% below)` : ""}`]);
-  rows.push(["Expires", expiryText(expiry)]);
   const notes = [];
   if (SV.apr !== null) notes.push(`Until then your ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day on Blend.`);
   if (SV.mkt && p >= SV.mkt) notes.push("Your stop is at or above the market price, so it can sell on the keeper's next scan.");
@@ -4306,10 +4913,10 @@ async function placeSellLadder(amount, price, price2, impactBps) {
   if (!poolGuard(BS, amount, "order")) return;
   const lv = sellLevels(amount, price, price2);
   if (lv.some((l) => l.amt < MIN_ORDER || l.lim <= 0n)) return log("Amount is too small to split into that many orders (each order needs at least 0.1).", "err");
-  const expiry = expiryOf(SV.vault, SV.days);
+  await vaultVersion(SV.vault).catch(() => 0);
+  const expiry = expiryOf(SV.vault, OLD_VAULT_DAYS);
   const rows = lv.map((l, i) => [`Order ${i + 1}`, `${fmt(l.amt, 2)} ${BS} at ≥ ${px4(Number(l.px) / 1e7)} (≥ ${fmt(minOut(l.amt, l.lim), outDp(2))} ${SV.out.sym})`]);
   if (SV.mkt) rows.push(["Market price now", `${px4(SV.mkt)} ${SV.out.sym}`]);
-  rows.push(["Expires", expiryText(expiry)]);
   rows.push(["Max price impact", `${impactBps / 100}% per fill`]);
   const notes = [`You'll sign ${lv.length} transactions, one per order. You can stop at any point; orders already placed stay open.`];
   if (SV.apr !== null) notes.push(`All ${fmt(amount, 2)} ${BS} keeps earning about ${((Number(amount) / 1e7) * SV.apr / 365).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${BS} a day until each order sells.`);
@@ -4970,6 +5577,19 @@ function paintTradeBar() {
   }
   for (const el of document.querySelectorAll(".tb-hi")) el.textContent = hi;
   for (const el of document.querySelectorAll(".tb-lo")) el.textContent = lo;
+  // 24h volume, estimated: in a constant-product pool the quote reserve at price p is sqrt(k * p), so each price move
+  // tells how much was traded. One pool only; liquidity added or removed does not move the price and is not counted.
+  let vol = "—";
+  if (pts.length && TR.res) {
+    const k = TR.res.base * TR.res.quote;
+    let prev = null, sum = 0;
+    for (const x of pts) {
+      if (x.t > from && prev !== null && !x.live) sum += Math.abs(Math.sqrt(k * x.p) - Math.sqrt(k * prev));
+      prev = x.p;
+    }
+    if (TR.scanned || pts[0].t <= from) vol = `${compact(sum)} ${SV.out && SV.out.sym ? SV.out.sym : "USDC"}`;
+  }
+  for (const el of document.querySelectorAll(".tb-vol")) el.textContent = vol;
 }
 
 /** Pool depth: how much can be traded in a constant-product (x*y=k) pool before the price reaches each level. */
@@ -5216,17 +5836,17 @@ for (const s of [
     const fits = Number(room / part);
     const k = n > 0 ? Math.min(n, fits) : fits;
     el("cover").textContent = `${k.toLocaleString("en-US")} ${w}${k === 1 ? "" : "s"}${n > 0 && fits >= n ? "" : " at this size"}`;
-    el("len").textContent = k > 1 && every > 0 ? (noEnd(s.v()) ? `about ${dcaSpan(every * (k - 1))}` : `about ${dcaSpan(Math.min(every * (k - 1), DCA_DAYS * 86400))}${every * (k - 1) > DCA_DAYS * 86400 ? " (a plan stops after a year)" : ""}`) : k === 1 ? `one ${w}` : "—";
+    el("len").textContent = k > 1 && every > 0 ? (noEnd(s.v()) ? `about ${dcaSpan(every * (k - 1))}` : `about ${dcaSpan(Math.min(every * (k - 1), DCA_DAYS * 86400))}`) : k === 1 ? `one ${w}` : "—";
   };
   for (const id of ["part", "every", "n", "px"]) el(id).addEventListener("input", paint);
   el("unit").addEventListener("change", paint);
   for (const t of document.querySelectorAll(`[data-tab="${s.p}"]`)) t.addEventListener("click", paint);
   el("go").onclick = async () => {
-    if (!me) return log("Connect your wallet first.", "err");
+    if (!(await needWallet())) return;
     const v = s.v();
     if (!v) return log(`Open your vault first: deposit ${esc(s.sym())} on the Portfolio page.`, "err");
     if ((await vaultVersion(v)) < 11)
-      return log("DCA needs the newest vault, and your funds are in an older one. Cancel your open orders and withdraw everything on the Portfolio page; your next deposit opens a new vault that has DCA.", "err");
+      return log("DCA needs the newest vault, and your funds are in an earlier one. On the Portfolio page, use “Move to the new vault”: it carries your coins and open orders over, and DCA works from then on.", "err");
     const { part, every, n, nRaw } = read1();
     if (part < MIN_ORDER) return log(`Type how much to ${s.sell ? "sell" : "spend"} each time (at least ${fmt(MIN_ORDER, 1)} ${esc(s.sym())}).`, "err");
     if (!(every >= DCA_MIN_EVERY && every <= DCA_MAX_EVERY)) return log("The time between two orders must be between 1 minute and 28 days.", "err");
@@ -5255,8 +5875,8 @@ for (const s of [
           ["Price", priceRow],
         ],
         notes: [
-          `Only the next ${w} is set aside; the rest of your balance stays free and keeps earning.`,
-          `You can stop the plan at any time with Cancel in the order list.${noEnd(v) ? "" : " It stops by itself after a year at the latest."}`,
+          `Only the next ${w} is set aside; the rest of your balance stays free${s.sell && XB ? "" : " and keeps earning"}.`,
+          `You can stop the plan at any time with Cancel in the order list.`,
           ...(px > 0n ? [] : [`With no price limit, a ${w} is skipped while the pool price is more than ${DCA_BAND_BPS / 100}% away from the oracle price, and filled once it is back.`]),
         ],
         confirm: "Start",
@@ -5385,7 +6005,26 @@ function ticketExtras() {
   $("sv-max-val").textContent = SV.free !== null && spx ? `${n((Number(SV.free) / 1e7) * spx, SV.out.sym === "USDC" ? 2 : 7)} ${SV.out.sym}` : "—";
 }
 for (const id of ["avail-buy", "sv-free2", "market", "sv-mkt"]) new MutationObserver(ticketExtras).observe($(id), { childList: true, characterData: true, subtree: true });
-// "+" : the Deposit tab of the vault card
+// Account box under the order form: the same figures the tickets and the vault cards show, in one place
+for (const el of document.querySelectorAll("[data-mirror]")) {
+  const src = $(el.dataset.mirror);
+  if (!src) continue;
+  const copy = () => (el.textContent = src.textContent || "—");
+  copy();
+  new MutationObserver(copy).observe(src, { childList: true, characterData: true, subtree: true });
+}
+for (const el of document.querySelectorAll("[data-bs]")) el.textContent = BS;
+// Balances tab under the chart: per coin, what the vault holds, what open orders have set aside, what is free, and the wallet
+function renderBalances() {
+  const f = (v, d = 2) => (v === null || v === undefined ? "—" : fmt(v, d));
+  const svRes = SV.bal !== null && SV.free !== null ? SV.bal - SV.free : null;
+  const row = (sym, bal, res, free, wal, d) => `<tr><td>${esc(sym)}</td><td>${f(bal, d)}</td><td>${f(res, d)}</td><td>${f(free, d)}</td><td>${f(wal, d)}</td></tr>`;
+  const html = `<table><thead><tr><th>Coin</th><th>In vault</th><th>In open orders</th><th>Available</th><th>In wallet</th></tr></thead><tbody>${row("USDC", balanceUnits, reservedUnits, freeUnits, walletUsdc, 2)}${row(BS, SV.bal, svRes, SV.free, walletXlm, XB ? 7 : 2)}</tbody></table>`;
+  for (const el of document.querySelectorAll(".bal-table")) el.innerHTML = html;
+}
+renderBalances();
+for (const id of ["avail-buy", "sv-free2", "wallet-usdc", "sv-wallet"]) new MutationObserver(() => setTimeout(renderBalances, 0)).observe($(id), { childList: true, characterData: true, subtree: true });
+// "+" : the deposit box, on this page
 for (const b of document.querySelectorAll("[data-open-dep]")) b.onclick = () => openDeposit(b.dataset.openDep);
 $("buy-wal-dep").onclick = () => openDeposit("dep", walletDepositable("dep"));
 $("sv-wal-dep").onclick = () => openDeposit("sv-dep", walletDepositable("sv-dep"));

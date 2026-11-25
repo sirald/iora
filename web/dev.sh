@@ -15,6 +15,8 @@ source ../testnet/factory.env
 [ -f ../testnet/markets.env ] && source ../testnet/markets.env
 # Other coins that trade against USDC (BTC, EURC ...): set up by scripts/create-test-markets.sh
 [ -f ../testnet/pairs.env ] && source ../testnet/pairs.env
+# Other trading venues (the Aquarius router) and the filler contract, as on the published site
+[ -f ../testnet/filler.env ] && source ../testnet/filler.env
 cat > .env.local <<EOF
 VITE_RPC_URL=https://soroban-rpc.testnet.stellar.gateway.fm
 VITE_RPC_FALLBACK=https://soroban-testnet.stellar.org
@@ -25,9 +27,12 @@ VITE_GENERATIONS=${GENERATIONS:-}
 VITE_VAULT_V=${VAULT_V:-3}
 VITE_MARKETS=${MARKETS:-}
 VITE_PAIRS=${PAIRS:-}
+VITE_UTIL_ENFORCE=${UTIL_ENFORCE:-0}
 VITE_USDC=$USDC
 VITE_XLM=$XLM
 VITE_ROUTER=$ROUTER
+VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
+VITE_FILLER=${FILLER:-}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56
 EOF
