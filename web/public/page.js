@@ -159,17 +159,24 @@ window.fetch = (url, opt) => {
     return c && { ...c, rate };
   }).filter(Boolean);
   let seconds = 0;
-  let shown = "";
+  let shown = "", places = 6;
   const paint = () => {
-    const txt = `+${(start + seconds * perSecond).toFixed(6)}`;
+    const txt = `+${(start + seconds * perSecond).toFixed(places)}`;
     live.innerHTML = [...txt].map((ch, i) => `<span${shown && shown.length === txt.length && shown[i] !== ch && !reduced() ? ' class="roll"' : ""}>${ch}</span>`).join("");
     shown = txt;
     for (const e of earned) e.paint(e.start + seconds * e.rate);
   };
-  const refit = () => { for (const e of earned) e.fit(e.start + seconds * e.rate); };
+  // the total keeps as many decimals as its box has room for (a phone's two boxes a row are narrow)
+  const refit = () => {
+    for (places of [6, 4, 2]) {
+      shown = "";
+      paint();
+      if (el.scrollWidth <= el.clientWidth + 0.5) break;
+    }
+    for (const e of earned) e.fit(e.start + seconds * e.rate);
+  };
   refit();
   onRelayout(refit);
-  paint();
   let on = true;
   if (typeof IntersectionObserver === "function") new IntersectionObserver((e) => (on = e[e.length - 1].isIntersecting)).observe(b);
   setInterval(() => {

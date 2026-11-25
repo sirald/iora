@@ -397,14 +397,33 @@
 @media (max-width: 900px) {
   .mk-cols { grid-template-columns: minmax(0, 1fr); }
   .mk-acct, .mk-strip span, .mk-strip .mk-sp { display: none; }
-  .mk-td .mk-tr { grid-template-columns: 1.3fr 1.1fr 1.1fr 0.8fr; }
-  .mk-td .mk-tr > span:nth-child(1), .mk-td .mk-tr > span:nth-child(4), .mk-td .mk-tr > span:nth-child(7) { display: none; }
   .mk-chartbig svg { height: 200px; }
   .mk-kpis { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .mk-kpis .mk-kpi:nth-child(3) { display: none; }
   .mk-pf .mk-tr { grid-template-columns: 0.8fr 1fr 1fr 1fr; }
   .mk-pf .mk-tr > span:nth-child(3), .mk-pf .mk-tr > span:nth-child(5) { display: none; }
 }
+/* up to a laptop (1279px): the order table leaves out the order's number, the filled share and the cancel button,
+   so every amount and what it has earned shows whole */
+@media (max-width: 1279px) {
+  .mk-td .mk-tr { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 0.65fr); }
+  .mk-td .mk-tr > span:nth-child(1), .mk-td .mk-tr > span:nth-child(4), .mk-td .mk-tr > span:nth-child(7) { display: none; }
+  .mk-td .mk-tr > span:nth-child(2) { text-align: left; }
+}
+/* a phone: each order on two lines (its number, amount and status; then its limit and what it has earned), and the
+   balances keep the coin, the balance and the interest */
+@media (max-width: 639px) {
+  .mk-td .mk-tr { grid-template-columns: 30px minmax(0, 1fr) auto; grid-template-areas: "id amt st" ". lim earn"; column-gap: 10px; row-gap: 3px; }
+  .mk-td .mk-tr > span:nth-child(1) { display: block; grid-area: id; }
+  .mk-td .mk-tr > span:nth-child(2) { grid-area: amt; text-align: left; }
+  .mk-td .mk-tr > span:nth-child(3) { grid-area: lim; text-align: left; color: var(--u-muted); }
+  .mk-td .mk-tr > span:nth-child(5) { grid-area: earn; }
+  .mk-td .mk-tr > span:nth-child(6) { grid-area: st; }
+  .mk-pf .mk-tr { grid-template-columns: 0.6fr 1fr 1.3fr; }
+  .mk-pf .mk-tr > span:nth-child(4) { display: none; }
+  .mk-kpi b { font-size: 16px; }
+}
+@media (max-width: 374px) { .mk-td .mk-tr small { display: none; } }
 .mk-form--mini { width: 288px; box-shadow: var(--u-shadow, 0 8px 24px rgb(0 0 0 / 0.12)); }
 .mk-dlg { width: min(100%, 400px); padding: 18px; display: grid; gap: 10px; box-shadow: var(--u-shadow, 0 8px 24px rgb(0 0 0 / 0.12)); }
 .mk-dlg__t { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; margin-bottom: 2px; }
