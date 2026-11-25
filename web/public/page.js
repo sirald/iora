@@ -27,6 +27,38 @@ function whenSeen(el, share, fn, { atLoad } = {}) {
   io.observe(el);
 }
 
+/** A cell whose amount keeps adding up: "+465.50" or "+61.56 USDC" turns into the same amount with as many decimals
+    as its column has room for (six, four or the two it had); only the digits that change move. */
+function liveCell(cell) {
+  const m = cell && /^([+-]?)([\d,]+\.\d+)(.*)$/.exec(cell.textContent.trim());
+  if (!m) return null;
+  const sign = m[1], start = Number(m[2].replace(/,/g, "")), unit = m[3];
+  const live = document.createElement("span");
+  live.className = "mk-live";
+  cell.replaceChildren(live, ...(unit ? [document.createTextNode(unit)] : []));
+  let shown = "", places = 6;
+  const paint = (v, roll = true) => {
+    const txt = sign + num(v, places);
+    if (txt === shown) return;
+    live.innerHTML = [...txt].map((ch, i) => `<span${roll && shown.length === txt.length && shown[i] !== ch && !reduced() ? ' class="roll"' : ""}>${ch}</span>`).join("");
+    shown = txt;
+  };
+  const fit = (v) => {
+    for (places of [6, 4, 2]) {
+      shown = "";
+      paint(v, false);
+      if (cell.scrollWidth <= cell.clientWidth + 0.5) return;
+    }
+  };
+  return { start, paint, fit };
+}
+/** Runs fn again when the layout may have changed the room a number has: a resize, or the page's fonts arriving. */
+function onRelayout(fn) {
+  let t = 0;
+  addEventListener("resize", () => { clearTimeout(t); t = setTimeout(fn, 150); });
+  if (document.fonts) document.fonts.ready.then(fn);
+}
+
 // ---- the interest calculator ------------------------------------------------------------------------------
 // What a waiting order earns: an order book pays nothing, a vault earns the rate the visitor sets.
 const calc = document.getElementById("calc");
@@ -118,13 +150,25 @@ window.fetch = (url, opt) => {
   live.className = "mk-live";
   b.replaceChild(live, node);
   b.insertBefore(document.createTextNode(" "), live.nextSibling);
+  // the balances under it add up on the same clock: the USDC row at 6.42%, the XLM row at 0.84% (their sum at the
+  // window's price, 0.1311, is the total above)
+  const rows = [...document.querySelectorAll(".hero__window .mk-pf .mk-tr")];
+  const earned = [["USDC", (60587.5 * 0.0642) / 31_536_000], ["XLM", (241005 * 0.0084) / 31_536_000]].map(([coin, rate]) => {
+    const row = rows.find((r) => r.firstElementChild && r.firstElementChild.textContent.trim() === coin);
+    const c = row && liveCell(row.lastElementChild);
+    return c && { ...c, rate };
+  }).filter(Boolean);
   let seconds = 0;
   let shown = "";
   const paint = () => {
     const txt = `+${(start + seconds * perSecond).toFixed(6)}`;
     live.innerHTML = [...txt].map((ch, i) => `<span${shown && shown.length === txt.length && shown[i] !== ch && !reduced() ? ' class="roll"' : ""}>${ch}</span>`).join("");
     shown = txt;
+    for (const e of earned) e.paint(e.start + seconds * e.rate);
   };
+  const refit = () => { for (const e of earned) e.fit(e.start + seconds * e.rate); };
+  refit();
+  onRelayout(refit);
   paint();
   let on = true;
   if (typeof IntersectionObserver === "function") new IntersectionObserver((e) => (on = e[e.length - 1].isIntersecting)).observe(b);
@@ -184,6 +228,116 @@ window.fetch = (url, opt) => {
     await wait(3600);
     const out = note.animate([{ transform: "none", opacity: 1 }, { transform: "translateY(calc(100% + 16px))", opacity: 0 }], { duration: 220, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "forwards" });
     out.onfinish = () => note.remove();
+  });
+})();
+
+// ---- "Every order and what it earned": what the open orders earn adds up by the second while they wait ---------
+// At the rates the window shows: #18's 25,000 USDC at 6.42% (until it fills), the 90,000 XLM of #17 that has not sold
+// yet at 0.84%, and #16's DCA at the pace of what it has earned so far (2.11 USDC in 9 days). Filled orders keep theirs.
+(() => {
+  const win = document.querySelector("#product .mk-td");
+  if (!win || motionOff()) return;
+  const YEAR = 31_536_000;
+  const rates = { "#18": (25000 * 0.0642) / YEAR, "#17": (90000 * 0.0084) / YEAR, "#16": 2.11 / (9 * 86400) };
+  const cells = [...win.querySelectorAll(".mk-deck .mk-tr")].map((row) => {
+    const id = row.firstElementChild && row.firstElementChild.textContent.trim();
+    if (!(id in rates)) return null;
+    const c = liveCell(row.children[4]);
+    return c && { ...c, row, rate: rates[id], until: Infinity };
+  }).filter(Boolean);
+  if (!cells.length) return;
+  let seconds = 0;
+  const value = (c) => c.start + Math.min(seconds, c.until) * c.rate;
+  const paint = () => {
+    for (const c of cells) {
+      if (c.until === Infinity && c.row.classList.contains("mk-done")) c.until = seconds; // it filled: it stops earning
+      c.paint(value(c));
+    }
+  };
+  const refit = () => { for (const c of cells) c.fit(value(c)); };
+  refit();
+  onRelayout(refit);
+  let on = false;
+  if (typeof IntersectionObserver === "function") new IntersectionObserver((e) => (on = e[e.length - 1].isIntersecting)).observe(win);
+  setInterval(() => {
+    if (!on || document.hidden) return;
+    seconds++;
+    paint();
+  }, 1000);
+})();
+
+// ---- "Every order and what it earned": the chart draws itself in once; under the pointer, a crosshair ----------
+(() => {
+  const box = document.querySelector("#product .mk-chartbig");
+  const svg = box && box.querySelector("svg");
+  if (!svg) return;
+  // below the fold at load, the chart waits behind a clip and draws in from the left when it comes into view
+  if (!still() && typeof IntersectionObserver === "function" && svg.getBoundingClientRect().top > innerHeight) {
+    svg.classList.add("is-undrawn");
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      io.disconnect();
+      svg.animate([{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0 0 0)" }], { duration: 800, easing: EASE_IO, fill: "backwards" });
+      svg.classList.remove("is-undrawn");
+    }, { rootMargin: "0px 0px -80px 0px" });
+    io.observe(svg);
+    // if something stops the observer, the chart does not stay hidden
+    setTimeout(() => { if (svg.classList.contains("is-undrawn") && svg.getBoundingClientRect().top < innerHeight) { io.disconnect(); svg.classList.remove("is-undrawn"); } }, 6000);
+  }
+  // the crosshair: a line on the nearest candle and one at the pointer's height, the price there on the right edge,
+  // and that candle's open, high, low and close beside the tabs. The drawing's own price scale: 0.1300 at y 64 and
+  // 0.1250 at y 212 (the two order lines); the last close, y 35.5, is the 0.1311 above the chart.
+  const NS = "http://www.w3.org/2000/svg", K = 0.005 / 148, Y0 = 35.5, P0 = 0.1311;
+  const price = (y) => (P0 + (Y0 - y) * K).toFixed(4);
+  const candles = [...svg.querySelectorAll(":scope > line:not(.o)")].map((w) => {
+    const b = w.nextElementSibling;
+    if (!b || b.tagName.toLowerCase() !== "rect") return null;
+    const up = w.classList.contains("u"), top = +b.getAttribute("y"), h = +b.getAttribute("height");
+    return { x: +w.getAttribute("x1"), hi: +w.getAttribute("y1"), lo: +w.getAttribute("y2"), open: up ? top + h : top, close: up ? top : top + h };
+  }).filter(Boolean);
+  if (!candles.length) return;
+  const xg = document.createElementNS(NS, "g");
+  xg.setAttribute("class", "mk-xh");
+  const vl = document.createElementNS(NS, "line"), hl = document.createElementNS(NS, "line");
+  vl.setAttribute("y1", "0");
+  vl.setAttribute("y2", "300");
+  hl.setAttribute("x1", "0");
+  hl.setAttribute("x2", "900");
+  xg.append(vl, hl);
+  svg.append(xg);
+  const tag = document.createElement("span");
+  tag.className = "mk-xh-tag";
+  tag.setAttribute("aria-hidden", "true");
+  box.append(tag);
+  const read = document.createElement("span");
+  read.className = "mk-xh-read";
+  read.setAttribute("aria-hidden", "true");
+  const tabs = box.querySelector(".mk-tabs");
+  if (tabs) tabs.insertBefore(read, tabs.querySelector(".mk-sp"));
+  const hide = () => box.classList.remove("is-xh");
+  const at = (e) => {
+    const r = svg.getBoundingClientRect();
+    const vx = ((e.clientX - r.left) / r.width) * 900, vy = ((e.clientY - r.top) / r.height) * 300;
+    if (vx < 0 || vx > 900 || vy < 0 || vy > 300) return hide();
+    const c = candles.reduce((a, b) => (Math.abs(b.x - vx) < Math.abs(a.x - vx) ? b : a));
+    vl.setAttribute("x1", String(c.x));
+    vl.setAttribute("x2", String(c.x));
+    hl.setAttribute("y1", vy.toFixed(1));
+    hl.setAttribute("y2", vy.toFixed(1));
+    tag.textContent = price(vy);
+    tag.style.top = `${r.top - box.getBoundingClientRect().top - box.clientTop + (vy / 300) * r.height}px`;
+    read.innerHTML = `O <b>${price(c.open)}</b>H <b>${price(c.hi)}</b>L <b>${price(c.lo)}</b>C <b>${price(c.close)}</b>`;
+    box.classList.add("is-xh");
+  };
+  svg.addEventListener("pointermove", (e) => { if (e.pointerType !== "touch") at(e); });
+  svg.addEventListener("pointerleave", (e) => { if (e.pointerType !== "touch") hide(); });
+  // on a touch screen a tap shows it for a moment; the page still scrolls under the finger
+  let held = 0;
+  svg.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") return;
+    at(e);
+    clearTimeout(held);
+    held = setTimeout(hide, 1600);
   });
 })();
 

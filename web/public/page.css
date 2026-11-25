@@ -419,6 +419,8 @@
 /* hero: interest that keeps adding up; only the digits that change move */
 .mk-live { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mk-live > span { display: inline-block; }
+/* in the KPI the live total keeps the figure's own size and colour (.mk-kpi span is the label's small grey) */
+.mk-kpi b .mk-live, .mk-kpi b .mk-live > span { font-size: inherit; color: inherit; }
 .mk-live > span.roll { animation: mk-roll 220ms var(--m-ease, cubic-bezier(.2, .8, .2, 1)) both; }
 @keyframes mk-roll { from { transform: translateY(45%); opacity: 0; } }
 /* "Every order and what it earned": the fill notice, in the empty lower corner of the chart */
@@ -442,9 +444,9 @@
 
 /* ---------------------------------------------------------------- backgrounds (26 Nov 2026)
    The first screen stands on the painted sky (the kit draws it: data-fx on .hero-sky, the same picture the
-   window's frame had); the window floats on it. Four sections further down have a quiet moving ground of their
-   own (backdrops.js): the statement a price line, the rules a sea chart, the beta form ripples, the footer the
-   tide. Each moves only while it is on screen; on a phone, with data-motion="off" or under reduced motion
+   window's frame had); the window floats on it. Three sections further down have a quiet moving ground of their
+   own (backdrops.js): the statement a price line, the beta form ripples, the footer the tide. Each moves only
+   while it is on screen; on a phone, with data-motion="off" or under reduced motion
    each is drawn once and holds still. */
 main > .hero { overflow-x: clip; }
 .hero-sky {
@@ -466,7 +468,18 @@ main > .hero { overflow-x: clip; }
 .bd > canvas, .bd > svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
 /* the statement keeps a low band under its words, where the price line runs */
 @media (min-width: 640px) { main > #fill.section { padding-bottom: calc(var(--padb) + var(--bar) + 160px); } }
-.bd--chart { -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 86%, transparent 100%); mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 86%, transparent 100%); }
 .bd--tide { top: auto; height: 260px; }
 /* the pause button of a moving ground sits in its section's bottom-right corner, above the words' layer */
 .bd-pause.bd-pause { position: absolute; right: 12px; bottom: 12px; z-index: 6; }
+
+/* "Every order and what it earned": the chart draws in from the left the first time it is seen (page.js); under the
+   pointer, a crosshair with the price at its height and the candle's open, high, low and close */
+.mk-chartbig svg.is-undrawn { clip-path: inset(0 100% 0 0); }
+@media (hover: hover) { .mk-chartbig svg { cursor: crosshair; } }
+.mk svg .mk-xh line { stroke: var(--u-muted); stroke-dasharray: 3 3; }
+.mk-xh, .mk-xh-tag, .mk-xh-read { opacity: 0; transition: opacity 120ms ease; pointer-events: none; }
+.mk-chartbig.is-xh :is(.mk-xh, .mk-xh-tag, .mk-xh-read) { opacity: 1; }
+.mk-xh-tag { position: absolute; right: 6px; transform: translateY(-50%); padding: 2px 6px; border-radius: 5px; background: var(--u-ink); color: var(--u-bg); font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.mk-xh-read { font-size: 11.5px; color: var(--u-muted); font-variant-numeric: tabular-nums; }
+.mk-xh-read b { color: var(--u-ink); font-weight: 500; margin: 0 10px 0 4px; }
+@media (max-width: 900px) { .mk-xh-read { display: none; } }

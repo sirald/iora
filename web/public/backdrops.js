@@ -1,8 +1,7 @@
-// Iora landing: the quiet moving grounds of four sections (26 Nov 2026). page.css places them; the hero's painted
+// Iora landing: the quiet moving grounds of three sections (26 Nov 2026). page.css places them; the hero's painted
 // sky is the kit's own effect (data-fx on .hero-sky).
 //   price  "Every fill is one transaction": faint price levels and a slow price line; where the line meets a level,
 //          a small ring, as when an order fills
-//   chart  "Rules the contract enforces": the depth lines of a sea chart, slowly drifting (WebGL)
 //   rings  "Join the beta": now and then a faint ripple, never behind the words
 //   tide   the footer: three layers of soft waves along the bottom of the page
 // Each moves only while it is on screen and the tab is visible, at about 30 frames a second. On a phone, with
@@ -224,91 +223,6 @@ function price(box) {
   return { ink, redraw: run.redraw };
 }
 
-// ---- chart: the depth lines of a sea chart (WebGL2) ----------------------------------------------------------------
-function chart(box) {
-  const c = document.createElement("canvas");
-  box.appendChild(c);
-  const gl = c.getContext("webgl2", { premultipliedAlpha: true, antialias: false, alpha: true });
-  if (!gl) { c.remove(); return null; }
-  const vs = "#version 300 es\nin vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }";
-  const fs = `#version 300 es
-precision highp float;
-uniform vec2 res; uniform float t; uniform float a0; uniform vec3 col;
-uniform vec4 holes[16]; uniform int nh; uniform float feather;
-out vec4 o;
-float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float n(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3. - 2. * f);
-  return mix(mix(h(i), h(i + vec2(1, 0)), u.x), mix(h(i + vec2(0, 1)), h(i + vec2(1, 1)), u.x), u.y); }
-float fbm(vec2 p){ float v = 0., a = .5; for (int i = 0; i < 5; i++){ v += a * n(p); p = p * 2.02 + vec2(1.7, 9.2); a *= .5; } return v; }
-void main(){
-  vec2 uv = gl_FragCoord.xy / res; uv.y = 1. - uv.y;
-  vec2 p = vec2(uv.x * res.x / res.y, uv.y) * 1.6 * max(1., res.y / res.x * 1.4);
-  float f = fbm(p + vec2(t * .018, -t * .011)) + .45 * fbm(p * 1.6 - vec2(t * .009, t * .004));
-  float v = f * 16.;
-  float d = min(fract(v), 1. - fract(v));
-  float line = 1. - smoothstep(0., fwidth(v) * 1.3, d);
-  float major = 1. - step(.5, mod(floor(v + .5), 5.));
-  float a = line * mix(.55, 1., major);
-  for (int i = 0; i < 16; i++) {
-    if (i >= nh) break;
-    vec4 r = holes[i];
-    vec2 q = abs(gl_FragCoord.xy - (r.xy + r.zw) * .5) - (r.zw - r.xy) * .5;
-    a *= smoothstep(0., feather, length(max(q, 0.)) + min(max(q.x, q.y), 0.));
-  }
-  o = vec4(col * a, a) * a0;
-}`;
-  const sh = (type, src) => { const x = gl.createShader(type); gl.shaderSource(x, src); gl.compileShader(x); return x; };
-  const pr = gl.createProgram();
-  gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs));
-  gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(pr);
-  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) { c.remove(); return null; }
-  gl.useProgram(pr);
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  const loc = gl.getAttribLocation(pr, "p");
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-  const U = (k) => gl.getUniformLocation(pr, k);
-  const ink = inkOf(box);
-  const section = box.parentElement;
-  let scale = 1;
-  const fit = () => {
-    scale = Math.min(1.25, window.devicePixelRatio || 1) * 0.75; // thin lines stay soft enough at three quarters
-    c.width = Math.max(1, Math.round(box.clientWidth * scale));
-    c.height = Math.max(1, Math.round(box.clientHeight * scale));
-    gl.viewport(0, 0, c.width, c.height);
-    gl.uniform2f(U("res"), c.width, c.height);
-    gl.uniform1f(U("feather"), 36 * scale);
-    holes.reset();
-  };
-  // the headings, the cards' words and the labels over the pictures (measured again every second at most)
-  const holes = every(1000, () => {
-    const list = wordsIn(section, box, "h2, h3, p, .panel__bar", 10).slice(0, 16);
-    const data = new Float32Array(64);
-    list.forEach((r, i) => data.set([r.x0 * scale, c.height - r.y1 * scale, r.x1 * scale, c.height - r.y0 * scale], i * 4));
-    gl.uniform4fv(U("holes"), data);
-    gl.uniform1i(U("nh"), list.length);
-    return list.length;
-  });
-  fit();
-  let born = 0;
-  const draw = (t, first) => {
-    if (first) born = t;
-    holes();
-    const k = still() ? 1 : Math.min(1, (t - born) / 1.6);
-    gl.uniform3f(U("col"), ink.line[0] / 255, ink.line[1] / 255, ink.line[2] / 255);
-    gl.uniform1f(U("a0"), (ink.dark ? 0.2 : 0.15) * k);
-    gl.uniform1f(U("t"), t + 40);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-  };
-  const run = animate(box, draw);
-  new ResizeObserver(() => { fit(); run.redraw(); }).observe(box);
-  return { ink, redraw: run.redraw };
-}
-
 // ---- rings: a faint ripple now and then, never behind the words ------------------------------------------------
 function rings(box) {
   const ink = inkOf(box);
@@ -405,7 +319,7 @@ function tide(box) {
 }
 
 // ---- start ----------------------------------------------------------------------------------------------------
-const KINDS = { price, chart, rings, tide };
+const KINDS = { price, rings, tide };
 function start() {
   if (typeof IntersectionObserver !== "function" || typeof ResizeObserver !== "function") return;
   const runs = [];
