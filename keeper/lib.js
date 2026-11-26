@@ -559,3 +559,67 @@ export class WorkBudget {
     this.quotes += n;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Minimum output per route leg (slippage protection for filler routes)
+// ---------------------------------------------------------------------------
+
+/** A leg's minimum: its quote less `bps` basis points, rounded down; 0 without a positive quote. */
+export function legMinOut(quote, bps) {
+  if (quote === null || quote === undefined) return 0n;
+  const q = BigInt(quote);
+  if (q <= 0n) return 0n;
+  const t = BigInt(Math.max(0, Math.min(10_000, Math.round(Number(bps) || 0))));
+  return (q * (10_000n - t)) / 10_000n;
+}
+
+/**
+ * Minimums for the legs of a route whose legs all pay out the bought token (one leg, or a split over pools):
+ * each leg's own quote less the tolerance, raised where needed so that together they still cover `need` (what the
+ * vault's limit requires; 0 = no floor), shared in proportion to the quotes. A leg's minimum never exceeds its quote.
+ * Returns null when the quotes together cannot cover `need` (the route cannot meet the limit).
+ */
+export function splitMins(quotes, need, bps) {
+  const qs = quotes.map((q) => (q === null || q === undefined ? 0n : BigInt(q)));
+  const total = qs.reduce((a, b) => a + b, 0n);
+  const n = BigInt(need || 0);
+  if (n > total) return null;
+  return qs.map((q) => {
+    const tol = legMinOut(q, bps);
+    const share = total > 0n && n > 0n ? (n * q + total - 1n) / total : 0n; // ceil(need * q / total)
+    const m = tol > share ? tol : share;
+    return m > q ? q : m;
+  });
+}
+
+/**
+ * A route through an intermediate token: leg 1 sells the order's amount for the mid token (quote q1), leg 2 sells
+ * the mid token. Leg 2 is planned for leg 1's MINIMUM, so any leg-1 result the tolerance allows can pay for it;
+ * what leg 1 brings above that minimum is sent to the vault by the filler's `sweep` step. Returns { min1, in2 }.
+ */
+export function viaPlan(q1, bps) {
+  const min1 = legMinOut(q1, bps);
+  return { min1, in2: min1 };
+}
+
+/**
+ * Comet's max_price: the highest spot price (token in per token out, 7 decimals) the pool may reach. A loose
+ * ceiling, `factor` times the worst average price the leg's minimum allows (amount in / minimum out); the minimum
+ * itself is the real protection. factor <= 0 or no minimum: no ceiling (i128 max).
+ */
+export function cometMaxPrice(amountIn, minOut, factor, scale = 10_000_000n) {
+  const I128_MAX = 170141183460469231731687303715884105727n;
+  const m = BigInt(minOut || 0);
+  const f = Number(factor);
+  if (!(f > 0) || m <= 0n) return I128_MAX;
+  const avg = (BigInt(amountIn) * scale + m - 1n) / m;
+  const p = (avg * BigInt(Math.round(f * 100))) / 100n;
+  return p > I128_MAX ? I128_MAX : p;
+}
+
+/**
+ * Whether a filler route that failed in simulation should simply be tried again on the next ledger (a quote that
+ * moved past the tolerance: free, no penalty) instead of falling back to the vault's own route. After `max`
+ * misses in a row the fallback is used, so a venue that is broken for good cannot hold an order up.
+ */
+export const retryRoute = (misses, max) => misses < max;

@@ -42,21 +42,26 @@ import {
   TokenBucket,
   WorkBudget,
   acquireLock,
+  cometMaxPrice,
   crossPairs,
   forgetOrder,
   inclusionFeeFrom,
   isBadSeq,
   isNear,
   isRateLimited,
+  legMinOut,
   limitRatio,
   pickSequence,
   retryAfterMs,
+  retryRoute,
   rpcFailReason,
   rpcList,
   rpsList,
   scanIntervalMs,
+  splitMins,
   takeCandidates,
   transientRpc,
+  viaPlan,
   withinFeeCap,
   xlmToStroops,
 } from "./lib.js";
@@ -152,6 +157,15 @@ const CROSS_PER_ORDER = Math.max(1, Number(cfg.CROSS_PER_ORDER || 2));
 const CROSS_MAX_PAIRS = Math.max(1, Number(cfg.CROSS_MAX_PAIRS || 10));
 const CROSS_MAX_QUOTES = Math.max(4, Number(cfg.CROSS_MAX_QUOTES || 24));
 const CROSS_MAX_MS = Math.max(500, Number(cfg.CROSS_MAX_MS || 4000));
+// ----- slippage protection on filler routes -----
+// Every leg of a filler route (fill_via) carries a minimum output: its quote less SLIPPAGE_BPS (default 50 = 0.5%),
+// never below the leg's share of what the vault's limit requires. A leg that would pay less fails in simulation
+// (free) and the order is tried again on the next ledger, at most ROUTE_RETRIES times in a row before the vault's
+// own route is used. COMET_MAX_PRICE_FACTOR: Comet's max_price is this many times the worst average price the
+// leg's minimum allows (0 = no ceiling).
+const SLIPPAGE_BPS = cfg.SLIPPAGE_BPS === undefined || cfg.SLIPPAGE_BPS === "" ? 50 : Math.max(0, Math.min(5000, Number(cfg.SLIPPAGE_BPS) || 0));
+const ROUTE_RETRIES = cfg.ROUTE_RETRIES === undefined || cfg.ROUTE_RETRIES === "" ? 2 : Math.max(0, Number(cfg.ROUTE_RETRIES) || 0);
+const COMET_MAX_PRICE_FACTOR = cfg.COMET_MAX_PRICE_FACTOR === undefined || cfg.COMET_MAX_PRICE_FACTOR === "" ? 2 : Number(cfg.COMET_MAX_PRICE_FACTOR) || 0;
 const RPC_TIMEOUT_MS = Number(cfg.RPC_TIMEOUT_MS || 12_000);
 const TX_TIMEOUT_SEC = 120;
 const TTL_EVERY_SEC = 24 * 3600;
@@ -1422,7 +1436,7 @@ const aquaVenue = {
     const r = await read(AQUA_ROUTER, "estimate_swap", [aquaTokens(tin, tout), addrVal(tin), addrVal(tout), xdr.ScVal.scvBytes(opt.hash), u128(amount)]);
     return r.ok && r.value !== undefined ? BigInt(r.value) : null;
   },
-  async call(user, opt, tin, tout, amount) {
+  async call(user, opt, tin, tout, amount, lim = null) {
     const args = await argsFor("Aquarius", AQUA_ROUTER, "swap", {
       user: addrVal(user),
       tokens: aquaTokens(tin, tout),
@@ -1430,14 +1444,15 @@ const aquaVenue = {
       token_out: addrVal(tout),
       pool_index: xdr.ScVal.scvBytes(opt.hash),
       in_amount: u128(amount),
-      out_min: u128(1),
+      out_min: u128(lim && lim.min > 0n ? lim.min : 1n),
     });
     return args && { contract: AQUA_ROUTER, func: "swap", args };
   },
 };
 
 // ----- Phoenix: one pool per pair, reached through its multihop contract -----
-const phoenixOps = (tin, tout) => xdr.ScVal.scvVec([structVal({ offer_asset: addrVal(tin), ask_asset: addrVal(tout), ask_asset_min_amount: voidVal() })]);
+const phoenixOps = (tin, tout, min = 0n) =>
+  xdr.ScVal.scvVec([structVal({ offer_asset: addrVal(tin), ask_asset: addrVal(tout), ask_asset_min_amount: min > 0n ? i128(min) : voidVal() })]);
 const PHOENIX_XYK = () => u32(0); // PoolType::Xyk
 const phoenixHas = new Map();
 const phoenixVenue = {
@@ -1459,10 +1474,10 @@ const phoenixVenue = {
     const r = await read(PHOENIX_MULTIHOP, "simulate_swap", args);
     return r.ok && r.value && r.value.ask_amount !== undefined ? BigInt(r.value.ask_amount) : null;
   },
-  async call(user, opt, tin, tout, amount) {
+  async call(user, opt, tin, tout, amount, lim = null) {
     const args = await argsFor("Phoenix", PHOENIX_MULTIHOP, "swap", {
       recipient: addrVal(user),
-      operations: phoenixOps(tin, tout),
+      operations: phoenixOps(tin, tout, lim ? lim.min : 0n),
       max_spread_bps: voidVal(),
       amount: i128(amount),
       pool_type: PHOENIX_XYK(),
@@ -1506,13 +1521,14 @@ const cometVenue = {
       return null;
     }
   },
-  async call(user, opt, tin, tout, amount) {
+  async call(user, opt, tin, tout, amount, lim = null) {
+    const min = lim && lim.min > 0n ? lim.min : 0n;
     const args = await argsFor("Comet", opt.pool, "swap_exact_amount_in", {
       token_in: addrVal(tin),
       token_amount_in: i128(amount),
       token_out: addrVal(tout),
-      min_amount_out: i128(0),
-      max_price: i128(I128_MAX),
+      min_amount_out: i128(min),
+      max_price: i128(lim ? cometMaxPrice(amount, min, COMET_MAX_PRICE_FACTOR) : I128_MAX),
       user: addrVal(user),
     });
     return args && { contract: opt.pool, func: "swap_exact_amount_in", args };
@@ -1522,6 +1538,10 @@ const venueList = () => [aquaVenue, phoenixVenue, cometVenue].filter((v) => v.on
 
 // ----- what a venue does in its caller's name -----
 const VENUE_PROBE = 100_000n; // 0.01 token
+// The minimum output the template is learned with. Where a venue's swap passes the caller's minimum on to a pool
+// that checks the caller's signature (Aquarius, Phoenix), the minimum is part of the authorized call: the real
+// leg's minimum then takes its place in venueAuths, exactly like the real amount takes the probe's place.
+const VENUE_MIN_PROBE = 11n;
 /** One authorized call as { contract, func, args (ScVal[]), subs }, two levels deep at most (null if deeper). */
 function authNode(inv, depth) {
   const cf = inv.function && inv.function.contractFn;
@@ -1537,7 +1557,7 @@ function authNode(inv, depth) {
 }
 /** Read from a simulation with the keeper as the caller and a small amount. */
 async function venueLearn(venue, opt, tin, tout) {
-  const c = await venue.call(kp.publicKey(), opt, tin, tout, VENUE_PROBE);
+  const c = await venue.call(kp.publicKey(), opt, tin, tout, VENUE_PROBE, { min: VENUE_MIN_PROBE });
   if (!c) return null;
   const sim = await server.simulateTransaction(readTx(c.contract, c.func, c.args));
   if (rpc.Api.isSimulationError(sim) || !sim.result) return null; // typically: the keeper holds none of the token
@@ -1593,8 +1613,8 @@ async function venueTemplate(venue, opt, tin, tout) {
   venueState.auth.set(key, { at: Date.now(), list });
   return list;
 }
-/** The template with the filler as caller and the real amount, as `Auth` values for the filler contract. */
-function venueAuths(template, amount) {
+/** The template with the filler as caller, the real amount and the leg's minimum, as `Auth` values for the filler. */
+function venueAuths(template, amount, min = 0n) {
   const me = kp.publicKey();
   const subst = (args) =>
     args.map((a) => {
@@ -1602,6 +1622,8 @@ function venueAuths(template, amount) {
       if (j.address === me) return addrVal(FILLER);
       if (j.i128 !== undefined && typeof j.i128 !== "object" && BigInt(j.i128) === VENUE_PROBE) return i128(amount);
       if (j.u128 !== undefined && typeof j.u128 !== "object" && BigInt(j.u128) === VENUE_PROBE) return u128(amount);
+      if (j.i128 !== undefined && typeof j.i128 !== "object" && BigInt(j.i128) === VENUE_MIN_PROBE) return i128(min > 0n ? min : 1n);
+      if (j.u128 !== undefined && typeof j.u128 !== "object" && BigInt(j.u128) === VENUE_MIN_PROBE) return u128(min > 0n ? min : 1n);
       return a;
     });
   const leaf = (n) => structVal({ contract: addrVal(n.contract), func: symVal(n.func), args: xdr.ScVal.scvVec(subst(n.args)) });
@@ -1620,13 +1642,13 @@ async function fillerV() {
   fillerVersion = r.ok ? Number(r.value) : 1;
   return fillerVersion;
 }
-/** The Soroswap pool of a pair as a route step for the filler. */
-function soroStep(tin, tout, pair, amount) {
+/** The Soroswap pool of a pair as a route step for the filler; `min`: the leg's minimum output (amount_out_min). */
+function soroStep(tin, tout, pair, amount, min = 0n) {
   const deadline = Math.floor(Date.now() / 1000) + 300;
   return callVal(
     ROUTER,
     "swap_exact_tokens_for_tokens",
-    [i128(amount), i128(0), xdr.ScVal.scvVec([addrVal(tin), addrVal(tout)]), addrVal(FILLER), u64v(deadline)],
+    [i128(amount), i128(min > 0n ? min : 0n), xdr.ScVal.scvVec([addrVal(tin), addrVal(tout)]), addrVal(FILLER), u64v(deadline)],
     [structVal({ contract: addrVal(tin), func: symVal("transfer"), args: xdr.ScVal.scvVec([addrVal(FILLER), addrVal(pair), i128(amount)]), subs: xdr.ScVal.scvVec([]) })],
   );
 }
@@ -1664,7 +1686,7 @@ async function venueEst(amount, tin, tout) {
 async function sourcesFor(tin, tout, only = null) {
   const list = [];
   const soro = await poolOf(tin, tout);
-  if (soro) list.push({ label: "Soroswap", soroswap: true, quote: (a) => quotePath(a, [tin, tout]), step: async (a) => soroStep(tin, tout, soro.pair, a) });
+  if (soro) list.push({ label: "Soroswap", soroswap: true, quote: (a) => quotePath(a, [tin, tout]), step: async (a, min = 0n) => soroStep(tin, tout, soro.pair, a, min) });
   for (const venue of venueList()) {
     if (only && venue.name !== only) continue;
     const opts = await venue.options(tin, tout);
@@ -1674,10 +1696,10 @@ async function sourcesFor(tin, tout, only = null) {
         soroswap: false,
         quote: (a) => venue.quote(opt, tin, tout, a),
         // How the pool takes its token is read only for a pool that is actually used (many pools are empty or tiny).
-        step: async (a) => {
+        step: async (a, min = 0n) => {
           const template = await venueTemplate(venue, opt, tin, tout);
-          const c = template ? await venue.call(FILLER, opt, tin, tout, a) : null;
-          return c ? callVal(c.contract, c.func, c.args, venueAuths(template, a)) : null;
+          const c = template ? await venue.call(FILLER, opt, tin, tout, a, { min }) : null;
+          return c ? callVal(c.contract, c.func, c.args, venueAuths(template, a, min)) : null;
         },
       });
     }
@@ -1726,7 +1748,7 @@ async function spread(sources, amount) {
   if (!sources.length) return null;
   if (sources.length === 1) {
     const q = await sources[0].quote(amount);
-    return q !== null && q > 0n ? { q, parts: [{ src: sources[0], amount }] } : null;
+    return q !== null && q > 0n ? { q, parts: [{ src: sources[0], amount, q }] } : null;
   }
   // each pool's curve: (0, 0) and what it pays at the sample sizes, as far as it can quote
   const curves = await Promise.all(
@@ -1769,13 +1791,13 @@ async function spread(sources, amount) {
     const used = keep.reduce((a, i) => a + taken[i], 0n);
     const parts = keep.map((i, n) => ({ src: sources[i], amount: taken[i] + (n === 0 ? amount - used : 0n) }));
     const qs = await Promise.all(parts.map((p) => p.src.quote(p.amount)));
-    if (!qs.includes(null)) split = { q: qs.reduce((a, b) => a + b, 0n), parts };
+    if (!qs.includes(null)) split = { q: qs.reduce((a, b) => a + b, 0n), parts: parts.map((p, i) => ({ ...p, q: qs[i] })) };
   }
   // the curve is an estimate between samples: the best single pool is kept if it turns out to pay as much
   let single = null;
   curves.forEach((pts, i) => {
     const last = pts[pts.length - 1];
-    if (last[0] === amount && (!single || last[1] > single.q)) single = { q: last[1], parts: [{ src: sources[i], amount }] };
+    if (last[0] === amount && (!single || last[1] > single.q)) single = { q: last[1], parts: [{ src: sources[i], amount, q: last[1] }] };
   });
   if (split && single) return split.q > single.q ? split : single;
   return split || single;
@@ -1801,7 +1823,9 @@ const partsText = (parts, total) =>
  * `only` (a venue name) and `forceShare` (percent on that venue, the rest on Soroswap) are for the check command.
  * Returns { q, route (ScVal), text } or null.
  */
-async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
+// Every leg gets a minimum output (SLIPPAGE_BPS below its own quote, never below its share of `need`, what the
+// vault's limit requires for `fill`; 0 = no floor). A route whose quotes cannot cover `need` is not built.
+async function venueRoute(fill, tin, tout, forceShare = null, only = null, need = 0n) {
   if (!VENUES || Date.now() < venueState.offUntil) return null;
   try {
     const sources = await sourcesFor(tin, tout, only);
@@ -1816,11 +1840,14 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
       const parts = forceShare >= 100n ? [{ src: top.src, amount: fill }] : [{ src: top.src, amount: a }, { src: soro, amount: fill - a }];
       const qs = await Promise.all(parts.map((p) => p.src.quote(p.amount)));
       if (qs.includes(null)) return null;
-      best = { q: qs.reduce((x, y) => x + y, 0n), steps: parts.map((p) => () => p.src.step(p.amount)), text: partsText(parts, fill) };
+      const mins = splitMins(qs, need, SLIPPAGE_BPS);
+      if (!mins) return null;
+      best = { q: qs.reduce((x, y) => x + y, 0n), steps: parts.map((p, i) => () => p.src.step(p.amount, mins[i])), text: partsText(parts, fill) };
     } else {
       if (sources.length) {
         const sp = await spread(sources, fill);
-        if (sp) best = { q: sp.q, steps: sp.parts.map((p) => () => p.src.step(p.amount)), text: partsText(sp.parts, fill) };
+        const mins = sp ? splitMins(sp.parts.map((p) => p.q), need, SLIPPAGE_BPS) : null;
+        if (sp && mins) best = { q: sp.q, steps: sp.parts.map((p, i) => () => p.src.step(p.amount, mins[i])), text: partsText(sp.parts, fill) };
       }
       // through an intermediate token, each leg in its best pool
       if ((await fillerV()) >= 2) {
@@ -1829,12 +1856,18 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null) {
           const [s1, s2] = await Promise.all([sourcesFor(tin, mid), sourcesFor(mid, tout)]);
           const leg1 = await bestSingle(s1, fill);
           if (!leg1) continue;
-          const leg2 = await bestSingle(s2, leg1.q);
+          // Leg 2 sells leg 1's minimum (see viaPlan): any leg-1 result within the tolerance pays for it, and
+          // what leg 1 brings above it goes to the vault by the sweep step. Leg 2 is quoted for that amount.
+          const plan = viaPlan(leg1.q, SLIPPAGE_BPS);
+          if (plan.in2 <= 0n) continue;
+          const leg2 = await bestSingle(s2, plan.in2);
           if (!leg2) continue;
+          const min2 = splitMins([leg2.q], need, SLIPPAGE_BPS);
+          if (!min2) continue;
           if (!best || leg2.q > best.q) {
             best = {
               q: leg2.q,
-              steps: [() => leg1.src.step(fill), () => leg2.src.step(leg1.q), async () => callVal(FILLER, "sweep", [addrVal(mid)], [])],
+              steps: [() => leg1.src.step(fill, plan.min1), () => leg2.src.step(plan.in2, min2[0]), async () => callVal(FILLER, "sweep", [addrVal(mid)], [])],
               text: `${leg1.src.label} to ${sym(mid)}, then ${leg2.src.label}`,
             };
           }
@@ -1895,13 +1928,15 @@ const lastNote = new Map();
 // "vault:id" -> { n, until }: an order that passes the pre-checks but keeps being rejected by the contract. The wait
 // doubles with each run of rejections (1, 2, 4 ... at most 60 rounds), so a stuck order does not waste RPC calls and log space.
 const stuck = new Map();
+// "vault:id" -> filler routes in a row that failed in simulation (see ROUTE_RETRIES)
+const routeMiss = new Map();
 let scanNo = 0;
 stats.onchainFailures = 0;
 stats.failedFeesStroop = 0n;
 
 /** Forgets everything kept about a closed order (memory stays flat on a long run). */
 function forgetClosed(key) {
-  forgetOrder(key, [closed, stuck, lastNote, schedules, failGuard.map]);
+  forgetOrder(key, [closed, stuck, lastNote, schedules, failGuard.map, routeMiss]);
 }
 
 /**
@@ -2054,7 +2089,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     // Soroswap alone does not reach the limit; another venue might. The cheap near-spot estimate is asked first,
     // so that an order waiting far from its limit does not cost a full route search on every ledger.
     const top = useVenues ? await venueEst(smallest, tin, tout) : null;
-    const alt = top !== null && (top * 1005n) / 1000n + 2n >= minOut(smallest, limit) ? await venueRoute(smallest, tin, tout) : null;
+    const alt = top !== null && (top * 1005n) / 1000n + 2n >= minOut(smallest, limit) ? await venueRoute(smallest, tin, tout, null, null, minOut(smallest, limit)) : null;
     if (!alt || alt.q < minOut(smallest, limit)) noteDistance(key, alt && alt.q > qSmall ? alt.q : qSmall, minOut(smallest, limit));
     if (!alt || alt.q < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, alt && alt.q > qSmall ? alt.q : qSmall, limit));
   }
@@ -2072,7 +2107,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     // Version 13 vaults fill through our own router (the filler contract): the best route over every pool of
     // every venue, with no venue preferred. The vault's built-in single-venue route (`execute`) is only the
     // fallback: when the router has no route, when its route is refused, or when that built-in route pays more.
-    let alt = useVenues ? await venueRoute(fill, tin, tout) : null;
+    let alt = useVenues ? await venueRoute(fill, tin, tout, null, null, minOut(fill, limit)) : null;
     if (alt && alt.q < qSoro) alt = null;
     let q = alt ? alt.q : qSoro;
     if (q < minOut(fill, limit)) {
@@ -2094,6 +2129,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         stats.fills++;
         stuck.delete(key);
         failGuard.clear(key);
+        routeMiss.delete(key);
         if (ra.fee !== null) stats.feesStroop += ra.fee;
         log(`FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} via ${alt.text} (built-in route: ${qSoro > 0n ? fmt(qSoro) : "none"}) fee=${ra.fee !== null ? fmt(ra.fee) : "?"} XLM tx=${ra.hash}`);
         const left = remaining - fill;
@@ -2117,6 +2153,29 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         log(`${tag} the ${alt.text} fill is tried again in ${rounds} round(s) at the earliest`);
         return "error";
       }
+      if (ra.code === 4 || ra.code === 5) {
+        closed.add(key); // the order is no longer open, or has expired according to the chain
+        return "closed";
+      }
+      if (ra.code === 16) return waiting(vault, o, tag, remaining, tin, "the trigger price (oracle) has not been reached yet");
+      if (ra.code === 19) return waiting(vault, o, tag, remaining, tin, "no oracle price available");
+      if (ra.code === 31) return waiting(vault, o, tag, remaining, tin, "scheduled order: the next part is not due yet");
+      // It failed in simulation (free). Most often a leg's price moved past its minimum (SLIPPAGE_BPS) between the
+      // quote and the simulation: the order waits for the next ledger, with no penalty, ROUTE_RETRIES times in a
+      // row; only then the vault's built-in route is used, so a venue that is broken for good cannot hold it up.
+      const misses = routeMiss.get(key) || 0;
+      if (retryRoute(misses, ROUTE_RETRIES)) {
+        routeMiss.set(key, misses + 1);
+        return waiting(
+          vault,
+          o,
+          tag,
+          remaining,
+          tin,
+          `${alt.text} route did not go through in simulation (${errText(ra)}); a leg may have moved more than ${SLIPPAGE_BPS} bps; tried again on the next ledger`,
+        );
+      }
+      routeMiss.delete(key);
       // The router's route did not work out (the price moved, or it was refused): the vault's built-in route.
       const why = `${alt.text} route refused (${errText(ra)})`;
       if (!lastNote.has(`venue:${key}`) || Date.now() - lastNote.get(`venue:${key}`).at > 10 * 60_000) {
@@ -2854,6 +2913,10 @@ async function main() {
   }
   process.on("exit", lock.release); // also on Ctrl+C / SIGTERM / fatal errors (they all end in process.exit)
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
+  log(
+    `filler routes: every leg has a minimum output ${SLIPPAGE_BPS} bps below its quote (never below the vault's limit), ` +
+      `${ROUTE_RETRIES} free retries on a moved price, Comet max_price ${COMET_MAX_PRICE_FACTOR > 0 ? `${COMET_MAX_PRICE_FACTOR}x the worst allowed price` : "off"}`,
+  );
   log(
     `RPC rate limit: ${RPC_URLS.map((u, i) => `${RPC_MAX_RPS[i]}/s`).join(", ")} (burst ${RPC_BURST}); a 429 halves the rate and waits, ` +
       `${RPC_429_SWITCH_AFTER} in a row move to the next server. Scan: every ledger near a limit (${SCAN_NEAR_PCT}%), ` +
