@@ -93,7 +93,8 @@ async function upload(file) {
 }
 
 // Version 7: one multi-asset vault and one factory (no buy/sell split). Deployed with "--v7".
-const V13 = process.argv.includes("--v13"); // version 13: fills through a filler contract (`fill_via`); same constructor and factory as 9
+const V14 = process.argv.includes("--v14"); // version 14: `forget` refuses a token an open order buys (IORA-09); same constructor and factory as 9
+const V13 = process.argv.includes("--v13") || V14; // version 13: fills through a filler contract (`fill_via`); same constructor and factory as 9
 const V12 = process.argv.includes("--v12") || V13; // version 12: an order has no latest expiry; same constructor and factory as 9
 const V11 = process.argv.includes("--v11") || V12; // version 11: scheduled orders (`place_dca`); same constructor and factory as 9
 const V10 = process.argv.includes("--v10") || V11; // version 10: fills without a pool (`take`, `cross`); same constructor and factory as 9
@@ -198,10 +199,10 @@ async function mainV7() {
   );
   if (!factory || !String(factory).startsWith("C")) throw new Error(`could not get the factory address: ${factory}`);
   const envFile = path.join(root, "testnet/factory.env");
-  fs.writeFileSync(envFile, `FACTORY=${factory}\nVAULT_WASM_HASH=${vaultHash.toString("hex")}\nVAULT_V=${V13 ? 13 : V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7}\n`);
+  fs.writeFileSync(envFile, `FACTORY=${factory}\nVAULT_WASM_HASH=${vaultHash.toString("hex")}\nVAULT_V=${V14 ? 14 : V13 ? 13 : V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7}\n`);
   fs.writeFileSync(path.join(root, "testnet/factory-sell.env"), `FACTORY_SELL=${factory}\n`);
   console.log(`FACTORY=${factory}`);
-  console.log(`testnet/factory.env and factory-sell.env updated (one factory, VAULT_V=${V13 ? 13 : V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7})`);
+  console.log(`testnet/factory.env and factory-sell.env updated (one factory, VAULT_V=${V14 ? 14 : V13 ? 13 : V12 ? 12 : V11 ? 11 : V10 ? 10 : V9 ? 9 : V8 ? 8 : 7})`);
 }
 
 async function main() {

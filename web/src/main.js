@@ -294,6 +294,7 @@ const VAULT_ERRORS = {
   29: "The vault still holds this coin, or an open order uses it",
   31: "The next part of this scheduled order is not due yet",
   33: "The time between two orders must be between 1 minute and 28 days",
+  34: "An open order will receive this coin; cancel or close that order first",
 };
 // Contract version (testnet/factory.env VAULT_V). Version 4 signatures: the band parameter for a stop loss,
 // the "withdraw everything" special value for withdraw, collecting output waiting in the vault (sweep).
