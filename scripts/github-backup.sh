@@ -60,8 +60,6 @@ else
   git commit -q -F - <<MSG
 Iora: update $(date +%F)
 
-Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01KvUZJ22R9Nf5uMwS9f5GYk
 MSG
   echo "Commit created: $(git log -1 --format=%h)"
 fi

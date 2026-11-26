@@ -273,36 +273,210 @@ window.fetch = (url, opt) => {
   }, 1000);
 })();
 
-// ---- "Every order and what it earned": the chart draws itself in once; under the pointer, a crosshair ----------
+// ---- "Every order and what it earned": the chart lives -----------------------------------------------------------
+// It draws itself in from the left the first time it is seen, then trades: about twice a second the last candle's
+// close moves a little and the price, the 24h change, high and low above it follow; every six moves a new candle
+// opens and the chart slides one candle to the left. Where the price crosses a dashed order line, a small ring, as
+// when an order fills there. Under the pointer, a crosshair: a line on the nearest candle and one at the pointer's
+// height, the price there on the right edge and that candle's open, high, low and close beside the tabs.
+// It trades only while it is on screen and the tab is visible, has a pause button under the window's corner, and
+// holds still under reduced motion and with data-motion="off". The price scale is the drawing's own: 0.1300 at y 64
+// and 0.1250 at y 212 (the two order lines); the last close, y 35.5, is the 0.1311 above the chart.
 (() => {
-  const box = document.querySelector("#product .mk-chartbig");
+  const win = document.querySelector("#product .mk-td");
+  const box = win && win.querySelector(".mk-chartbig");
   const svg = box && box.querySelector("svg");
   if (!svg) return;
-  // below the fold at load, the chart waits behind a clip and draws in from the left when it comes into view
+  const NS = "http://www.w3.org/2000/svg", STEP = 12.5, HALF = 3.75;
+  const K = 0.005 / 148, Y0 = 35.5, P0 = 0.1311;
+  const price = (y) => P0 + (Y0 - y) * K;
+  const fmt = (p) => p.toFixed(4);
+
+  // the candles as the page drew them (a wick, then its body), moved into one group that can slide
+  const levels = [...svg.querySelectorAll(":scope > line.o")];
+  const g = document.createElementNS(NS, "g");
+  const candles = [];
+  for (const w of [...svg.querySelectorAll(":scope > line:not(.o)")]) {
+    const b = w.nextElementSibling;
+    if (!b || b.tagName.toLowerCase() !== "rect") continue;
+    const up = w.classList.contains("u"), top = +b.getAttribute("y"), h = +b.getAttribute("height");
+    candles.push({ w, b, x: +w.getAttribute("x1"), hi: +w.getAttribute("y1"), lo: +w.getAttribute("y2"), open: up ? top + h : top, close: up ? top : top + h });
+    g.append(w, b);
+  }
+  if (!candles.length) return;
+  svg.append(g);
+  let shift = 0;
+  const paint = (c) => {
+    const cls = c.close <= c.open ? "u" : "d"; // y grows downward: a close above the open is a rise
+    c.w.setAttribute("class", cls);
+    c.b.setAttribute("class", cls);
+    c.w.setAttribute("y1", c.hi.toFixed(1));
+    c.w.setAttribute("y2", c.lo.toFixed(1));
+    c.b.setAttribute("y", Math.min(c.open, c.close).toFixed(1));
+    c.b.setAttribute("height", Math.max(1.5, Math.abs(c.open - c.close)).toFixed(1));
+  };
+
+  // the first look: below the fold at load, the chart waits behind a clip and draws in from the left when seen
+  let readyAt = 0;
   if (!still() && typeof IntersectionObserver === "function" && svg.getBoundingClientRect().top > innerHeight) {
     svg.classList.add("is-undrawn");
+    readyAt = Infinity;
     const io = new IntersectionObserver((entries) => {
       if (!entries.some((e) => e.isIntersecting)) return;
       io.disconnect();
       svg.animate([{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0 0 0)" }], { duration: 800, easing: EASE_IO, fill: "backwards" });
       svg.classList.remove("is-undrawn");
+      readyAt = performance.now() + 800;
+      go();
     }, { rootMargin: "0px 0px -80px 0px" });
     io.observe(svg);
     // if something stops the observer, the chart does not stay hidden
-    setTimeout(() => { if (svg.classList.contains("is-undrawn") && svg.getBoundingClientRect().top < innerHeight) { io.disconnect(); svg.classList.remove("is-undrawn"); } }, 6000);
+    setTimeout(() => {
+      if (!svg.classList.contains("is-undrawn") || svg.getBoundingClientRect().top >= innerHeight) return;
+      io.disconnect();
+      svg.classList.remove("is-undrawn");
+      readyAt = 0;
+      go();
+    }, 6000);
   }
-  // the crosshair: a line on the nearest candle and one at the pointer's height, the price there on the right edge,
-  // and that candle's open, high, low and close beside the tabs. The drawing's own price scale: 0.1300 at y 64 and
-  // 0.1250 at y 212 (the two order lines); the last close, y 35.5, is the 0.1311 above the chart.
-  const NS = "http://www.w3.org/2000/svg", K = 0.005 / 148, Y0 = 35.5, P0 = 0.1311;
-  const price = (y) => (P0 + (Y0 - y) * K).toFixed(4);
-  const candles = [...svg.querySelectorAll(":scope > line:not(.o)")].map((w) => {
-    const b = w.nextElementSibling;
-    if (!b || b.tagName.toLowerCase() !== "rect") return null;
-    const up = w.classList.contains("u"), top = +b.getAttribute("y"), h = +b.getAttribute("height");
-    return { x: +w.getAttribute("x1"), hi: +w.getAttribute("y1"), lo: +w.getAttribute("y2"), open: up ? top + h : top, close: up ? top : top + h };
-  }).filter(Boolean);
-  if (!candles.length) return;
+
+  // the numbers above the chart follow the price
+  const strip = win.querySelector(".mk-strip");
+  const pxEl = strip && strip.querySelector(".mk-px");
+  const cell = (label) => {
+    const s = strip && [...strip.querySelectorAll(":scope > span")].find((c) => (c.querySelector("i") || {}).textContent === label);
+    return s ? s.querySelector("b") : null;
+  };
+  const chg = cell("24h change"), hiEl = cell("24h high"), loEl = cell("24h low");
+  const P24 = P0 / 1.0106;
+  let dayHi = 0.134, dayLo = 0.1288;
+  const showPrice = (p, dir) => {
+    if (!pxEl) return;
+    const t = fmt(p);
+    if (pxEl.textContent === t) return;
+    pxEl.textContent = t;
+    if (dir && !reduced()) pxEl.animate([{ color: dir > 0 ? "var(--mk-up)" : "var(--mk-down)" }, { color: "var(--u-ink)" }], { duration: 600, easing: "ease-out" });
+    if (chg) {
+      const pct = (p / P24 - 1) * 100;
+      chg.textContent = `${pct >= 0 ? "+" : "\u2212"}${Math.abs(pct).toFixed(2)}%`;
+      chg.classList.toggle("mk-up", pct >= 0);
+      chg.style.color = pct >= 0 ? "" : "var(--mk-down)";
+    }
+    if (p > dayHi && hiEl) { dayHi = p; hiEl.textContent = fmt(p); }
+    if (p < dayLo && loEl) { dayLo = p; loEl.textContent = fmt(p); }
+  };
+
+  // the trading
+  const local = () => {
+    const bb = box.getBoundingClientRect(), sb = svg.getBoundingClientRect();
+    return { x: sb.left - bb.left - box.clientLeft, y: sb.top - bb.top - box.clientTop, w: sb.width, h: sb.height };
+  };
+  const ring = (line, vx, vy) => {
+    const l = local(), r = document.createElement("i");
+    r.className = "mk-ring" + (line.classList.contains("s") ? " mk-ring--s" : "");
+    r.setAttribute("aria-hidden", "true");
+    r.style.left = `${l.x + (vx / 900) * l.w}px`;
+    r.style.top = `${l.y + (vy / 300) * l.h}px`;
+    box.append(r);
+    r.animate([{ transform: "scale(0.14)", opacity: 0.9 }, { transform: "scale(1)", opacity: 0 }], { duration: 1200, easing: "cubic-bezier(0.23, 1, 0.32, 1)" }).onfinish = () => r.remove();
+    line.animate([{ opacity: 1 }, { opacity: 0.7 }], { duration: 1200, easing: "ease-out" });
+  };
+  const tween = (c, a, b) => {
+    const t0 = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / 200), e = 1 - Math.pow(1 - k, 3);
+      c.close = a + (b - a) * e;
+      c.hi = Math.min(c.hi, c.close);
+      c.lo = Math.max(c.lo, c.close);
+      paint(c);
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+  const slide = () => {
+    const a = shift, t0 = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / 450), e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+      shift = a + STEP * e;
+      g.setAttribute("transform", `translate(${(-shift).toFixed(2)} 0)`);
+      if (k < 1) return requestAnimationFrame(step);
+      while (candles.length > 1 && candles[0].x - shift < -STEP) { const o = candles.shift(); o.w.remove(); o.b.remove(); }
+    };
+    requestAnimationFrame(step);
+  };
+  const open = () => {
+    const prev = candles[candles.length - 1], x = prev.x + STEP;
+    const w = document.createElementNS(NS, "line"), b = document.createElementNS(NS, "rect");
+    w.setAttribute("x1", x.toFixed(1));
+    w.setAttribute("x2", x.toFixed(1));
+    b.setAttribute("x", (x - HALF).toFixed(1));
+    b.setAttribute("width", "7.5");
+    b.setAttribute("rx", "1");
+    const c = { w, b, x, open: prev.close, close: prev.close, hi: prev.close, lo: prev.close };
+    paint(c);
+    g.append(w, b);
+    candles.push(c);
+    slide();
+  };
+  // where the price leans: a slow swell (95 s of trading) and a shorter one (31 s), so it comes down to the 0.1300
+  // line now and then
+  const lean = (t) => 62 + 40 * Math.sin((t * 2 * Math.PI) / 95 - 0.7) + 14 * Math.sin((t * 2 * Math.PI) / 31);
+  const gauss = () => { let u = 0; while (!u) u = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random()); };
+  let T = 0, moves = 0, timer = 0, running = false, onScreen = false, paused = false;
+  const move = () => {
+    const c = candles[candles.length - 1];
+    T += 1.1;
+    const from = c.close;
+    const to = Math.max(10, Math.min(286, from + (lean(T) - from) * 0.12 + gauss() * 3));
+    if (Math.random() < 0.3) c.hi = Math.min(c.hi, Math.min(from, to) - Math.random() * 4);
+    if (Math.random() < 0.3) c.lo = Math.max(c.lo, Math.max(from, to) + Math.random() * 4);
+    for (const line of levels) {
+      const ly = +line.getAttribute("y1");
+      if ((from - ly) * (to - ly) < 0) ring(line, c.x - shift, ly);
+    }
+    tween(c, from, to);
+    showPrice(price(to), Math.sign(from - to));
+    if (++moves % 6 === 0) setTimeout(() => running && open(), 260);
+  };
+  const step = () => {
+    if (!running) return;
+    if (still()) { running = false; return; }
+    move();
+    timer = setTimeout(step, 450 + Math.random() * 300);
+  };
+  const go = () => {
+    const want = onScreen && !paused && !document.hidden && !still() && readyAt !== Infinity;
+    if (want && !running) {
+      running = true;
+      timer = setTimeout(step, Math.max(0, readyAt - performance.now()) + 400);
+    } else if (!want && running) {
+      running = false;
+      clearTimeout(timer);
+    }
+  };
+  if (!still() && typeof IntersectionObserver === "function") {
+    new IntersectionObserver((e) => { onScreen = e[e.length - 1].isIntersecting; go(); }).observe(box);
+    document.addEventListener("visibilitychange", go);
+    // its pause button, under the window's bottom-right corner (as the hero window's)
+    const host = win.parentElement;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ui-pause loop-pause mk-chart-pause";
+    const show = () => {
+      const label = `${paused ? "Play" : "Pause"} the chart`;
+      btn.innerHTML = paused
+        ? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.7v8.6c0 .62.68 1 1.2.66l6.5-4.3c.47-.31.47-1 0-1.32l-6.5-4.3c-.52-.34-1.2.04-1.2.66Z"/></svg>'
+        : '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4.25" y="3.25" width="2.75" height="9.5" rx="0.9"/><rect x="9" y="3.25" width="2.75" height="9.5" rx="0.9"/></svg>';
+      btn.setAttribute("aria-label", label);
+      btn.title = label;
+      btn.classList.toggle("is-paused", paused);
+    };
+    btn.addEventListener("click", () => { paused = !paused; show(); go(); });
+    show();
+    host.appendChild(btn);
+  }
+
+  // the crosshair
   const xg = document.createElementNS(NS, "g");
   xg.setAttribute("class", "mk-xh");
   const vl = document.createElementNS(NS, "line"), hl = document.createElementNS(NS, "line");
@@ -326,14 +500,15 @@ window.fetch = (url, opt) => {
     const r = svg.getBoundingClientRect();
     const vx = ((e.clientX - r.left) / r.width) * 900, vy = ((e.clientY - r.top) / r.height) * 300;
     if (vx < 0 || vx > 900 || vy < 0 || vy > 300) return hide();
-    const c = candles.reduce((a, b) => (Math.abs(b.x - vx) < Math.abs(a.x - vx) ? b : a));
-    vl.setAttribute("x1", String(c.x));
-    vl.setAttribute("x2", String(c.x));
+    const c = candles.reduce((a, b) => (Math.abs(b.x - shift - vx) < Math.abs(a.x - shift - vx) ? b : a));
+    const cx = (c.x - shift).toFixed(1);
+    vl.setAttribute("x1", cx);
+    vl.setAttribute("x2", cx);
     hl.setAttribute("y1", vy.toFixed(1));
     hl.setAttribute("y2", vy.toFixed(1));
-    tag.textContent = price(vy);
+    tag.textContent = fmt(price(vy));
     tag.style.top = `${r.top - box.getBoundingClientRect().top - box.clientTop + (vy / 300) * r.height}px`;
-    read.innerHTML = `O <b>${price(c.open)}</b>H <b>${price(c.hi)}</b>L <b>${price(c.lo)}</b>C <b>${price(c.close)}</b>`;
+    read.innerHTML = `O <b>${fmt(price(c.open))}</b>H <b>${fmt(price(c.hi))}</b>L <b>${fmt(price(c.lo))}</b>C <b>${fmt(price(c.close))}</b>`;
     box.classList.add("is-xh");
   };
   svg.addEventListener("pointermove", (e) => { if (e.pointerType !== "touch") at(e); });
