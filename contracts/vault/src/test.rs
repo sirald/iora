@@ -875,7 +875,7 @@ fn fill_through_an_intermediate_token() {
 #[test]
 fn version_is_reported() {
     let s = setup();
-    assert_eq!(s.v.version(), 13);
+    assert_eq!(s.v.version(), 14);
 }
 
 #[test]
@@ -904,15 +904,21 @@ fn forget_frees_a_place_on_the_token_list() {
     let id = s.v.place_order(&s.usdc.address, &btc_id, &(50 * U), &(50_000 * U), &(50 * U), &IMPACT, &(NOW + DAY), &true);
     assert_eq!(s.v.try_forget(&s.usdc.address), Err(Ok(ce(Error::TokenInUse))));
 
-    // The order put BTC back on the list (it will receive it). The owner removes it again while the order is open;
-    // the fill still goes through and the token returns to the list with its balance.
+    // The order put BTC back on the list (it will receive it). Since version 14 the owner cannot remove it while
+    // the order is open: the token keeps its place for the order's output.
     assert!(s.v.tokens().contains(&btc_id));
-    s.v.forget(&btc_id);
-    assert!(!s.v.tokens().contains(&btc_id));
+    assert_eq!(s.v.awaited(&btc_id), 1);
+    assert_eq!(s.v.try_forget(&btc_id), Err(Ok(ce(Error::TokenAwaited))));
+    assert!(s.v.tokens().contains(&btc_id));
     let got = s.v.execute(&s.filler, &id, &(50 * U), &None);
     assert!(got > 0);
     assert!(s.v.tokens().contains(&btc_id));
     assert_eq!(s.v.balance(&btc_id), got);
+    assert_eq!(s.v.awaited(&btc_id), 0);
+    // Filled: nothing awaits BTC any more; once the balance is gone it can be removed.
+    s.v.withdraw(&btc_id, &WITHDRAW_ALL);
+    s.v.forget(&btc_id);
+    assert!(!s.v.tokens().contains(&btc_id));
 
     // Only the owner can remove a token.
     s.env.set_auths(&[]);
@@ -1332,4 +1338,220 @@ fn filler_fill_pays_the_fee_only_from_what_beats_the_limit() {
     // 520 XLM arrive, the limit promises 500: the executor gets the capped fee, the owner the rest.
     assert_eq!(s.v.fill_via(&s.filler, &id, &(100 * U), &fid, &route), 520 * U - FEE);
     assert_eq!(s.xlm.balance(&s.filler), FEE);
+}
+
+// ---------------------------------------------------------------------------
+// Version 14: a token an open order buys keeps its place on the list (IORA-09)
+// ---------------------------------------------------------------------------
+
+/// A new 7-decimal token with `amount` in the owner's wallet.
+fn new_token(s: &S, amount: i128) -> Address {
+    let admin = Address::generate(&s.env);
+    let id = s.env.register_stellar_asset_contract_v2(admin).address();
+    StellarAssetClient::new(&s.env, &id).mint(&s.owner, &amount);
+    id
+}
+
+/// The audit's scenario: deposit USDC, open an order that buys XLM, forget XLM, fill the list with other
+/// tokens, fill the old order. In version 13 the list ended with 13 tokens; now `forget` is refused, the list
+/// stops at 12 and the old order still fills.
+#[test]
+fn audit_forget_cannot_free_the_place_of_a_token_an_order_buys() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(100 * U));
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(50 * U), &2_000_000, &(50 * U), &IMPACT, &(NOW + DAY), &true);
+    assert_eq!(s.v.tokens().len(), 2);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+
+    // XLM has no balance and is only the bought side, yet it cannot be removed.
+    assert_eq!(s.v.try_forget(&s.xlm.address), Err(Ok(ce(Error::TokenAwaited))));
+    assert_eq!(s.v.tokens().len(), 2);
+
+    // The other places fill up; the 13th token is refused.
+    for _ in 0..(MAX_TOKENS - 2) {
+        let t = new_token(&s, U);
+        s.v.deposit(&t, &U);
+        assert!(s.v.tokens().len() <= MAX_TOKENS);
+    }
+    assert_eq!(s.v.tokens().len(), MAX_TOKENS);
+    let extra = new_token(&s, U);
+    assert_eq!(s.v.try_deposit(&extra, &U), Err(Ok(ce(Error::TooManyTokens))));
+
+    // The order that was valid when placed still fills, and the list stays at 12.
+    assert_eq!(s.v.execute(&s.filler, &id, &(50 * U), &None), 250 * U);
+    assert_eq!(s.v.tokens().len(), MAX_TOKENS);
+    assert!(s.v.tokens().contains(&s.xlm.address));
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+}
+
+#[test]
+fn awaited_counts_every_open_order_that_buys_a_token() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // Two orders buy XLM; the output goes to the wallet, so the vault never holds XLM.
+    let a = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &false);
+    let b = s.v.place_order(&s.usdc.address, &s.xlm.address, &(200 * U), &2_000_000, &(50 * U), &IMPACT, &(NOW + DAY), &false);
+    // An order that sells XLM does not count for XLM, but counts for USDC.
+    s.v.deposit(&s.xlm.address, &(100 * U));
+    let c = s.v.place_order(&s.xlm.address, &s.usdc.address, &(50 * U), &(5 * U), &(50 * U), &IMPACT, &(NOW + DAY), &true);
+    assert_eq!(s.v.awaited(&s.xlm.address), 2);
+    assert_eq!(s.v.awaited(&s.usdc.address), 1);
+    s.v.cancel_order(&c);
+    assert_eq!(s.v.awaited(&s.usdc.address), 0);
+    s.v.withdraw(&s.xlm.address, &WITHDRAW_ALL);
+    assert_eq!(s.v.balance(&s.xlm.address), 0);
+
+    // One closes: the other still holds the place.
+    s.v.cancel_order(&a);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    assert_eq!(s.v.try_forget(&s.xlm.address), Err(Ok(ce(Error::TokenAwaited))));
+    // A partial fill leaves the order open and counted.
+    s.v.execute(&s.filler, &b, &(50 * U), &None);
+    assert_eq!(s.v.get_order(&b).status, OrderStatus::Open);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    assert_eq!(s.v.try_forget(&s.xlm.address), Err(Ok(ce(Error::TokenAwaited))));
+    // Cancelling the partly filled order releases the token.
+    s.v.cancel_order(&b);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    // A closed order cannot be cancelled again (the count cannot drop twice).
+    assert_eq!(s.v.try_cancel_order(&b), Err(Ok(ce(Error::OrderNotOpen))));
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    s.v.forget(&s.xlm.address);
+    assert!(!s.v.tokens().contains(&s.xlm.address));
+}
+
+#[test]
+fn awaited_drops_to_zero_when_an_order_fills_by_take_or_filler() {
+    // take
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &false);
+    let taker = Address::generate(&s.env);
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&taker, &(500 * U));
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.v.take(&taker, &id, &(100 * U), &(500 * U), &s.filler);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    s.v.forget(&s.xlm.address);
+
+    // fill_via, in two pieces
+    let s = setup();
+    let fid = s.env.register(MockFiller, ());
+    let f = MockFillerClient::new(&s.env, &fid);
+    StellarAssetClient::new(&s.env, &s.xlm.address).mint(&fid, &(100_000 * U));
+    f.set_rate(&(5 * U));
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(50 * U), &IMPACT, &(NOW + DAY), &false);
+    let route: Vec<Val> = Vec::new(&s.env);
+    s.v.fill_via(&s.filler, &id, &(50 * U), &fid, &route);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.v.fill_via(&s.filler, &id, &(50 * U), &fid, &route);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Filled);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    s.v.forget(&s.xlm.address);
+}
+
+#[test]
+fn awaited_drops_to_zero_on_both_sides_of_a_cross() {
+    let s = setup();
+    let (b, _owner2) = second_vault(&s, 0, 0);
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let ida = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &false);
+    b.deposit(&s.xlm.address, &(1_000 * U));
+    let idb = b.place_order(&s.xlm.address, &s.usdc.address, &(500 * U), &(5 * U), &(500 * U), &IMPACT, &(NOW + DAY), &false);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    assert_eq!(b.awaited(&s.usdc.address), 1);
+    s.v.cross(&s.filler, &ida, &(100 * U), &b.address, &idb, &(500 * U));
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    assert_eq!(b.awaited(&s.usdc.address), 0);
+    s.v.forget(&s.xlm.address);
+    b.forget(&s.usdc.address);
+}
+
+#[test]
+fn awaited_drops_to_zero_when_a_stop_order_fills() {
+    let s = setup();
+    s.v.deposit(&s.xlm.address, &(1_000 * U));
+    s.oracle.set_price(&s.usdc.address, &10_000_000);
+    s.oracle.set_price(&s.xlm.address, &2_000_000);
+    let trigger = 10_000_000 * SCALE / 1_500_000;
+    let limit = 10_000_000 * SCALE / 1_400_000;
+    let id = s.v.place_stop_order(&s.xlm.address, &s.usdc.address, &(900 * U), &trigger, &limit, &(900 * U), &IMPACT, &(NOW + DAY), &300, &false);
+    assert_eq!(s.v.awaited(&s.usdc.address), 1);
+    // Not triggered yet: still waiting.
+    assert_eq!(s.v.try_execute(&s.filler, &id, &(900 * U), &None), Err(Ok(ce(Error::TriggerNotMet))));
+    assert_eq!(s.v.awaited(&s.usdc.address), 1);
+    s.oracle.set_price(&s.xlm.address, &1_500_000);
+    s.router.set_price(&s.xlm.address, &s.usdc.address, &1_480_000);
+    s.v.execute(&s.filler, &id, &(900 * U), &None);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Filled);
+    assert_eq!(s.v.awaited(&s.usdc.address), 0);
+}
+
+#[test]
+fn awaited_follows_a_scheduled_plan_until_it_ends() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    // Two parts: after the first the plan stays open (still counted once), after the second it ends.
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(100 * U), &2, &DAY, &2_100_000, &IMPACT, &0, &(NOW + 30 * DAY), &false);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.v.execute(&s.filler, &id, &(100 * U), &None);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Open);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.env.ledger().set_timestamp(NOW + DAY);
+    s.v.execute(&s.filler, &id, &(100 * U), &None);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Filled);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+
+    // A plan that runs out of funds ends by itself and releases the token too: 800 USDC left, parts of 400;
+    // after the first part the 400 left minus the rounding buffer cannot cover the next one.
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(400 * U), &0, &DAY, &2_100_000, &IMPACT, &0, &(NOW + 30 * DAY), &false);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.v.execute(&s.filler, &id, &(400 * U), &None);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Filled);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+
+    // A plan the owner cancels mid-way.
+    s.v.deposit(&s.usdc.address, &(100 * U));
+    let id = s.v.place_dca(&s.usdc.address, &s.xlm.address, &(40 * U), &0, &DAY, &2_100_000, &IMPACT, &0, &(NOW + 30 * DAY), &false);
+    s.v.execute(&s.filler, &id, &(40 * U), &None);
+    assert_eq!(s.v.get_order(&id).status, OrderStatus::Open);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    s.v.cancel_order(&id);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    s.v.forget(&s.xlm.address);
+}
+
+#[test]
+fn an_expired_order_holds_the_place_until_anyone_closes_it() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let id = s.v.place_order(&s.usdc.address, &s.xlm.address, &(100 * U), &2_000_000, &(100 * U), &IMPACT, &(NOW + DAY), &false);
+    s.env.ledger().set_timestamp(NOW + DAY + 1);
+    // Expired but not closed: it still counts.
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    assert_eq!(s.v.try_forget(&s.xlm.address), Err(Ok(ce(Error::TokenAwaited))));
+    // Anyone may close an expired order; that releases the token.
+    s.env.set_auths(&[]);
+    s.v.cancel_order(&id);
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    s.env.mock_all_auths();
+    s.v.forget(&s.xlm.address);
+}
+
+#[test]
+fn awaited_counts_the_reverse_leg_of_a_follow_up_order() {
+    let s = setup();
+    s.v.deposit(&s.usdc.address, &(1_000 * U));
+    let id = s.v.place_order_then(&s.usdc.address, &s.xlm.address, &(400 * U), &2_000_000, &(400 * U), &IMPACT, &(NOW + DAY), &(4 * U), &IMPACT, &DAY);
+    assert_eq!(s.v.awaited(&s.xlm.address), 1);
+    assert_eq!(s.v.awaited(&s.usdc.address), 0);
+    s.v.execute(&s.filler, &id, &(400 * U), &None);
+    // The buying leg closed; the reverse leg (sells XLM, buys USDC) is open.
+    assert_eq!(s.v.awaited(&s.xlm.address), 0);
+    assert_eq!(s.v.awaited(&s.usdc.address), 1);
+    s.router.set_price(&s.xlm.address, &s.usdc.address, &2_500_000);
+    let size = s.v.get_order(&1).amount_in;
+    s.v.execute(&s.filler, &1, &size, &None);
+    assert_eq!(s.v.get_order(&1).status, OrderStatus::Filled);
+    assert_eq!(s.v.awaited(&s.usdc.address), 0);
 }
