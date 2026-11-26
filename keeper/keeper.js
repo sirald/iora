@@ -10,6 +10,7 @@
 //   node keeper.js            runs continuously: scans on every new ledger (~5 s) (every INTERVAL_SEC with SCAN_MODE=interval)
 //   node keeper.js --once     scans once (a few rounds) and exits
 //   node keeper.js --ttl      also extends the lifetime of entries (in continuous mode on idle ledgers, bit by bit)
+import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -32,6 +33,21 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+import {
+  FailureGuard,
+  FeeBudget,
+  RpcPicker,
+  acquireLock,
+  forgetOrder,
+  inclusionFeeFrom,
+  isBadSeq,
+  pickSequence,
+  rpcFailReason,
+  rpcList,
+  transientRpc,
+  withinFeeCap,
+  xlmToStroops,
+} from "./lib.js";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -64,9 +80,9 @@ const cfg = {
 const PASSPHRASE = cfg.NETWORK_PASSPHRASE || Networks.TESTNET;
 // On testnet the fast public RPC comes first and Stellar's own RPC is the fallback (measured 8 Nov 2026: Gateway
 // ~0.15 s, soroban-testnet.stellar.org 1.5-5 s). On mainnet only RPC_URL / RPC_FALLBACK are used; it never falls
-// back to testnet addresses.
+// back to testnet addresses. RPC_FALLBACK may list several servers, comma separated (tried in that order).
 const TESTNET_RPCS = ["https://soroban-rpc.testnet.stellar.gateway.fm", "https://soroban-testnet.stellar.org"];
-const RPC_URLS = [...new Set([cfg.RPC_URL, cfg.RPC_FALLBACK, ...(PASSPHRASE === Networks.TESTNET ? TESTNET_RPCS : [])].filter(Boolean))];
+const RPC_URLS = rpcList(cfg.RPC_URL, cfg.RPC_FALLBACK, PASSPHRASE === Networks.TESTNET ? TESTNET_RPCS : []);
 if (RPC_URLS.length === 0) {
   console.error("Missing setting: RPC_URL");
   process.exit(1);
@@ -98,6 +114,23 @@ const RPC_TIMEOUT_MS = Number(cfg.RPC_TIMEOUT_MS || 12_000);
 const TX_TIMEOUT_SEC = 120;
 const TTL_EVERY_SEC = 24 * 3600;
 const LOW_BALANCE_XLM = 100;
+// After the first RPC server fails it is tried again after RPC_RETRY_BASE_SEC, doubling up to RPC_RETRY_MAX_SEC.
+const RPC_RETRY_BASE_SEC = Number(cfg.RPC_RETRY_BASE_SEC || 60);
+const RPC_RETRY_MAX_SEC = Number(cfg.RPC_RETRY_MAX_SEC || 1800);
+// ----- fee protection -----
+// An order (or a pair of crossing orders) whose transaction fails ON CHAIN (the fee is paid) FAIL_PAUSE_AFTER times
+// rests for FAIL_PAUSE_HOURS. Simulation failures cost nothing and are not counted here.
+const FAIL_PAUSE_AFTER = Math.max(1, Number(cfg.FAIL_PAUSE_AFTER || 3));
+const FAIL_PAUSE_HOURS = Number(cfg.FAIL_PAUSE_HOURS || 6);
+// Fee budgets (XLM, 0 = no limit): when one is used up no transaction is sent; the keeper keeps scanning.
+const MAX_FEE_XLM_PER_HOUR = Number(cfg.MAX_FEE_XLM_PER_HOUR || 50);
+const MAX_FEE_XLM_PER_ROUND = Number(cfg.MAX_FEE_XLM_PER_ROUND || 5);
+// The most one transaction may cost in total (inclusion + resource fee, XLM); a dearer one is not sent.
+const MAX_FEE_XLM = Number(cfg.MAX_FEE_XLM || 2);
+// The inclusion fee bid: this percentile of recent Soroban inclusion fees (getFeeStats), never below BASE_FEE.
+const FEE_PERCENTILE = String(cfg.FEE_PERCENTILE || "p70");
+// Only one keeper per key: a lock file holding the PID (taken over if that process is gone).
+const LOCK_FILE = cfg.KEEPER_LOCK_FILE || path.join(here, "keeper.lock");
 for (const k of ["FACTORY", "USDC", "XLM", "ROUTER", "KEEPER_SECRET"]) {
   if (!cfg[k]) {
     console.error(`Missing setting: ${k}`);
@@ -207,7 +240,8 @@ function log(...parts) {
 
 // ---------------------------------------------------------------------------
 // RPC: if the first server gives a network error/429/5xx or does not answer within RPC_TIMEOUT_MS, the same call is
-// repeated on the next one; a minute later the first server is tried again. Contract errors are real answers and are not repeated.
+// repeated on the next one (RPC_URL, then each RPC_FALLBACK). The first server is tried again after a back-off that
+// doubles while it keeps failing (RPC_RETRY_BASE_SEC .. RPC_RETRY_MAX_SEC). Contract errors are real answers and are not repeated.
 // ---------------------------------------------------------------------------
 
 // Node's "fetch failed" error keeps the real cause (DNS, connection refused, timeout, certificate...) in e.cause;
@@ -231,49 +265,59 @@ if (typeof globalThis.fetch === "function" && !globalThis.__ioraFetchCause) {
   };
 }
 
-function transientRpc(e) {
-  const status = e && e.response && e.response.status;
-  if (status === 429 || (status >= 500 && status < 600)) return true;
-  return /fetch failed|network|timeout|timed out|aborted|ECONN|socket|EAI_AGAIN|ENOTFOUND|did not answer/i.test(String((e && e.message) || e));
-}
-
 // The SDK's getAccount reports a network error as "Account not found" too; so when the first server went down there
 // was no falling back and no fill could be sent. The same read is done with getLedgerEntries (a network error is retried on the fallback).
 function accountKey(address) {
   return xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrPublicKey() }));
 }
 
+// Every RPC call gets its own AbortController: on timeout the HTTP request itself is cancelled (not just no longer
+// awaited). The SDK has no per-call signal, so the signal reaches its HTTP client through AsyncLocalStorage and a
+// request interceptor.
+const rpcCallCtx = new AsyncLocalStorage();
+const rpcPicker = new RpcPicker(RPC_URLS.length, { baseMs: RPC_RETRY_BASE_SEC * 1000, maxMs: RPC_RETRY_MAX_SEC * 1000 });
+
 function makeServer(urls) {
-  const servers = urls.map((u) => new rpc.Server(u, { allowHttp: u.startsWith("http://"), timeout: RPC_TIMEOUT_MS }));
-  let cur = 0;
-  let switchedAt = 0;
-  let loggedAt = 0;
+  const servers = urls.map((u) => {
+    const s = new rpc.Server(u, { allowHttp: u.startsWith("http://"), timeout: RPC_TIMEOUT_MS });
+    s.httpClient.interceptors.request.use((config) => {
+      const signal = rpcCallCtx.getStore();
+      if (signal) config.signal = signal;
+      return config;
+    });
+    return s;
+  });
 
   async function call(name, args) {
-    if (cur !== 0 && Date.now() - switchedAt > 60_000) cur = 0;
     let lastErr;
-    for (let i = 0; i < servers.length; i++) {
-      const idx = (cur + i) % servers.length;
+    for (const idx of rpcPicker.order()) {
+      const ac = new AbortController();
       let timer;
       try {
         const res = await Promise.race([
-          servers[idx][name](...args),
-          new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("the RPC did not answer")), RPC_TIMEOUT_MS))),
+          rpcCallCtx.run(ac.signal, () => servers[idx][name](...args)),
+          new Promise((_, rej) => {
+            timer = setTimeout(() => {
+              const e = new Error(`the RPC did not answer within ${RPC_TIMEOUT_MS} ms`);
+              ac.abort(e);
+              rej(e);
+            }, RPC_TIMEOUT_MS);
+          }),
         ]);
-        if (idx !== cur) {
-          cur = idx;
-          switchedAt = Date.now();
-          if (Date.now() - loggedAt > 10 * 60_000) {
-            loggedAt = Date.now();
-            log(`switched to the fallback RPC: ${urls[idx]} (the first server is not answering; it is retried once a minute)`);
-          }
+        const moved = rpcPicker.success(idx);
+        if (moved === "primary") log(`RPC: back on the first server ${urls[0]}`);
+        else if (moved === "switched") {
+          const wait = Math.max(0, Math.round((rpcPicker.retryAt - Date.now()) / 1000));
+          log(`RPC: switched to ${urls[idx]} (${rpcPicker.lastError || "the previous server failed"}); the first server is tried again in ${wait} s`);
         }
         return res;
       } catch (e) {
         lastErr = e;
         if (!transientRpc(e)) throw e;
+        rpcPicker.failure(idx, `${urls[idx]} ${rpcFailReason(e)}`);
       } finally {
         clearTimeout(timer);
+        ac.abort(); // nothing may stay in flight after the call is over
       }
     }
     throw lastErr;
@@ -362,10 +406,49 @@ function readTx(contractId, method, callArgs) {
     .build();
 }
 
-/** Transaction to be sent: with the current sequence number. */
+// ----- fee protection and sequence numbers -----
+const failGuard = new FailureGuard({ threshold: FAIL_PAUSE_AFTER, pauseMs: FAIL_PAUSE_HOURS * 3600_000 });
+const feeBudget = new FeeBudget({ perHour: xlmToStroops(MAX_FEE_XLM_PER_HOUR), perRound: xlmToStroops(MAX_FEE_XLM_PER_ROUND) });
+const MAX_FEE_STROOPS = xlmToStroops(MAX_FEE_XLM);
+let feeStatsCache = { at: 0, fee: Number(BASE_FEE) };
+
+/** The inclusion fee to bid now (stroops): from getFeeStats, kept for 30 s; BASE_FEE when the stats cannot be read. */
+async function inclusionFee() {
+  if (Date.now() - feeStatsCache.at < 30_000) return feeStatsCache.fee;
+  let fee = Number(BASE_FEE);
+  try {
+    fee = inclusionFeeFrom(await server.getFeeStats(), { base: Number(BASE_FEE), percentile: FEE_PERCENTILE, max: MAX_FEE_STROOPS });
+  } catch {}
+  feeStatsCache = { at: Date.now(), fee };
+  return fee;
+}
+
+let budgetSaidAt = 0;
+/** A fee budget is used up: said in the log at most every 10 minutes, on Telegram at most once an hour. */
+function budgetHit(why) {
+  if (Date.now() - budgetSaidAt < 10 * 60_000) return;
+  budgetSaidAt = Date.now();
+  const spent = fmt(BigInt(feeBudget.spentLastHour()));
+  log(
+    `WARNING ${why} used up (${spent} XLM in the last hour; MAX_FEE_XLM_PER_HOUR=${MAX_FEE_XLM_PER_HOUR}, ` +
+      `MAX_FEE_XLM_PER_ROUND=${MAX_FEE_XLM_PER_ROUND}): no transaction is sent, scanning goes on`,
+  );
+  notify(`Fee budget used up (${why}, ${spent} XLM in the last hour). No transactions are sent until it frees up.`, { topic: "budget", everySec: 3600 });
+}
+
+// The last sequence number each sending account used on chain (a transaction that SUCCEEDED or FAILED uses it up).
+// A lagging fallback RPC can report an older one; building on that would only give txBadSeq.
+const usedSeq = new Map();
+async function accountFor(signer) {
+  const pub = signer.publicKey();
+  const acc = await server.getAccount(pub);
+  return new Account(pub, pickSequence(acc.sequenceNumber(), usedSeq.get(pub)).toString());
+}
+
+/** Transaction to be sent: with the current sequence number and the current inclusion fee. */
 async function liveTx(contractId, method, callArgs, signer = kp) {
-  const account = await server.getAccount(signer.publicKey());
-  return new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
+  const account = await accountFor(signer);
+  return new TransactionBuilder(account, { fee: String(await inclusionFee()), networkPassphrase: PASSPHRASE })
     .addOperation(new Contract(contractId).call(method, ...callArgs))
     .setTimeout(TX_TIMEOUT_SEC)
     .build();
@@ -378,27 +461,58 @@ async function read(contractId, method, callArgs = []) {
   return { ok: true, value: sim.result ? scValToNative(sim.result.retval) : undefined };
 }
 
-/**
- * Signs, sends and waits for the result. The transaction is followed until its validity (TX_TIMEOUT_SEC) ends:
- * if it returns "timed out", the transaction was definitely not written to the chain and trying again is safe.
- * retry=true: the network did not accept the transaction at all (congestion, a pending transaction on the same account); it is tried on the next ledger.
- */
-async function submit(tx, signer = kp) {
-  tx.sign(signer);
-  let sent;
+/** The final result of a transaction found on chain, or null if it is not (yet) there. */
+function chainResult(r, hash, maxFee) {
+  if (!r || (r.status !== "SUCCESS" && r.status !== "FAILED")) return null;
+  let fee = null;
   try {
-    sent = await server.sendTransaction(tx);
-  } catch (e) {
-    return { ok: false, retry: true, error: `could not be sent: ${e.message}` };
+    fee = BigInt(get(r.resultXdr, "feeCharged"));
+  } catch {}
+  const charged = fee !== null ? Number(fee) : maxFee;
+  if (r.status === "SUCCESS") return { ok: true, hash, fee, charged, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
+  let why = "";
+  try {
+    why = get(get(r.resultXdr, "result"), "switch")?.name || "";
+  } catch {}
+  return { ok: false, onchain: true, hash, fee, charged, error: `the transaction failed on the network${why ? ` (${why})` : ""}` };
+}
+
+async function lookupTx(hash, maxFee) {
+  try {
+    return chainResult(await server.getTransaction(hash), hash, maxFee);
+  } catch {
+    return null;
   }
-  if (sent.status === "TRY_AGAIN_LATER") return { ok: false, retry: true, error: "the network did not take the transaction now (TRY_AGAIN_LATER)" };
+}
+
+/**
+ * Sends a signed transaction and follows it until its validity (TX_TIMEOUT_SEC) ends. If sending throws, the
+ * request may still have reached the network: the hash is looked up first, and only then is the SAME signed
+ * transaction sent once more (same hash, so it can never be applied twice).
+ */
+async function sendAndFollow(tx, hash, maxFee) {
+  let sent;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      sent = await server.sendTransaction(tx);
+      break;
+    } catch (e) {
+      await sleep(2000);
+      const seen = await lookupTx(hash, maxFee);
+      if (seen) return seen;
+      if (attempt >= 1) return { ok: false, retry: true, hash, charged: 0, error: `could not be sent: ${e.message}` };
+    }
+  }
+  if (sent.status === "TRY_AGAIN_LATER") return { ok: false, retry: true, charged: 0, error: "the network did not take the transaction now (TRY_AGAIN_LATER)" };
   if (sent.status === "ERROR") {
     let name = "";
     try {
       const res = get(get(sent, "errorResult"), "result");
       name = res.type || get(res, "switch")?.name || "";
     } catch {}
-    return { ok: false, error: `send error ${name}`.trim() };
+    // A rejected transaction is not charged. A bad sequence number is ours to fix, not the order's fault.
+    if (isBadSeq(name)) return { ok: false, retry: true, badSeq: true, charged: 0, error: `send error ${name}` };
+    return { ok: false, charged: 0, error: `send error ${name}`.trim() };
   }
   // PENDING or DUPLICATE: the transaction is queued
   const deadline = Date.now() + (TX_TIMEOUT_SEC + 15) * 1000;
@@ -410,16 +524,40 @@ async function submit(tx, signer = kp) {
     } catch {
       continue; // temporary RPC error: keep following the transaction
     }
-    if (r.status === "SUCCESS") {
-      let fee = null;
-      try {
-        fee = BigInt(get(r.resultXdr, "feeCharged"));
-      } catch {}
-      return { ok: true, hash: sent.hash, fee, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
-    }
-    if (r.status === "FAILED") return { ok: false, hash: sent.hash, error: "the transaction failed on the network" };
+    const done = chainResult(r, sent.hash, maxFee);
+    if (done) return done;
   }
-  return { ok: false, hash: sent.hash, error: "timed out (the transaction expired and was not written to the chain)" };
+  return { ok: false, hash: sent.hash, charged: 0, error: "timed out (the transaction expired and was not written to the chain)" };
+}
+
+/**
+ * Checks the fee cap and the fee budget, signs, sends and waits for the result.
+ * retry=true: nothing was paid and the order is not to blame (congestion, a pending transaction on the same account,
+ * a bad sequence number, the fee cap or the budget); it is tried again on a later ledger.
+ * onchain=true: the transaction got on chain and FAILED there: its fee was paid.
+ */
+async function submit(tx, signer = kp) {
+  const maxFee = Number(tx.fee);
+  if (!withinFeeCap(maxFee, MAX_FEE_STROOPS)) {
+    return {
+      ok: false,
+      retry: true,
+      feeCap: true,
+      error: `the transaction would cost up to ${fmt(BigInt(maxFee))} XLM, above MAX_FEE_XLM=${MAX_FEE_XLM}; not sent`,
+    };
+  }
+  const why = feeBudget.blockReason(maxFee);
+  if (why) {
+    budgetHit(why);
+    return { ok: false, retry: true, budget: true, error: `${why} used up; not sent` };
+  }
+  tx.sign(signer);
+  const hash = tx.hash().toString("hex");
+  const held = feeBudget.reserve(maxFee);
+  const res = await sendAndFollow(tx, hash, maxFee);
+  feeBudget.settle(held, res.charged ?? 0);
+  if (res.ok || res.onchain) usedSeq.set(signer.publicKey(), tx.sequence);
+  return res;
 }
 
 /**
@@ -464,10 +602,24 @@ const freeSigner = () => signers.reduce((a, b) => (b.queued < a.queued ? b : a))
 function write(contractId, method, callArgs, anySigner = false) {
   return serialized(
     async (signer) => {
-      const tx = await liveTx(contractId, method, callArgs, signer);
-      const sim = await server.simulateTransaction(tx);
-      if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
-      return submit(rpc.assembleTransaction(tx, padSim(sim)).build(), signer);
+      for (let attempt = 0; ; attempt++) {
+        const why = feeBudget.blockReason(0);
+        if (why) {
+          budgetHit(why);
+          return { ok: false, retry: true, budget: true, error: `${why} used up; not sent` };
+        }
+        const tx = await liveTx(contractId, method, callArgs, signer);
+        const sim = await server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
+        const r = await submit(rpc.assembleTransaction(tx, padSim(sim)).build(), signer);
+        if (r.badSeq && attempt === 0) {
+          // The sequence number was stale (e.g. a lagging fallback RPC): read it again and send once more.
+          usedSeq.delete(signer.publicKey());
+          log(`${short(signer.publicKey())}: ${r.error}; the sequence number is read again and the transaction rebuilt`);
+          continue;
+        }
+        return r;
+      }
     },
     anySigner ? freeSigner() : signers[0],
   );
@@ -483,8 +635,9 @@ let batchFills = 0;
  * alone (`single`). With one, it waits a moment for other fills and goes out with them in one transaction.
  * Resolves to the same shape as `write`.
  */
+let batchOffUntil = 0; // after a batch failed ON CHAIN, fills go out one by one for a while
 function fillOrder(vault, id, amount, via, single) {
-  if (!BATCH || BATCH_SIZE < 2) return single();
+  if (!BATCH || BATCH_SIZE < 2 || Date.now() < batchOffUntil) return single();
   return new Promise((resolve) => {
     pendingFills.push({ vault, id, amount, via, single, resolve });
     if (pendingFills.length >= BATCH_SIZE) flushFills();
@@ -527,6 +680,15 @@ async function sendBatch(items) {
     for (const it of items) it.resolve(r); // the network did not take it: nothing was paid, next ledger
     return;
   }
+  if (r.onchain) {
+    // The batch got on chain and failed (its fee is paid). The orders are NOT sent again one by one right away:
+    // each gets an on-chain failure, and batching is off for 10 minutes so the next tries go alone and show the
+    // real reason through their own (free) simulation first.
+    batchOffUntil = Date.now() + 10 * 60_000;
+    log(`batch fill (${items.length} orders) failed on chain: ${errText(r)} tx=${r.hash}; batching is off for 10 minutes`);
+    for (const it of items) it.resolve({ ...r, batch: true });
+    return;
+  }
   if (!r.ok || !Array.isArray(r.value)) {
     log(`batch fill (${items.length} orders) did not go through: ${errText(r)}; the orders will be tried one by one`);
     await Promise.all(items.map(alone));
@@ -565,7 +727,7 @@ async function ensureWorkers() {
           ? Operation.payment({ destination: pub, asset: Asset.native(), amount: WORKER_START_XLM })
           : Operation.createAccount({ destination: pub, startingBalance: WORKER_START_XLM });
         const r = await serialized(async (signer) => {
-          const account = await server.getAccount(signer.publicKey());
+          const account = await accountFor(signer);
           const tx = new TransactionBuilder(account, { fee: String(Number(BASE_FEE) * 10), networkPassphrase: PASSPHRASE })
             .addOperation(op)
             .setTimeout(TX_TIMEOUT_SEC)
@@ -603,7 +765,7 @@ async function ensureFeeTrustline() {
     if (!USDC_ISSUER) return log("WARNING: the keeper's account has no USDC trustline, so fills that pay their fee in USDC will fail. Add one (USDC_ISSUER is not set, so the keeper cannot do it itself).");
     log("the keeper's account has no USDC trustline (fills that pay their fee in USDC would fail); adding it");
     const sent = await serialized(async (signer) => {
-      const account = await server.getAccount(signer.publicKey());
+      const account = await accountFor(signer);
       const tx = new TransactionBuilder(account, { fee: String(Number(BASE_FEE) * 10), networkPassphrase: PASSPHRASE })
         .addOperation(Operation.changeTrust({ asset: new Asset("USDC", USDC_ISSUER) }))
         .setTimeout(TX_TIMEOUT_SEC)
@@ -899,7 +1061,7 @@ async function ordersToCheck(vault) {
     if (statusOf(r.value.status) === "Open") {
       fresh.set(st.next, r.value);
       st.open.push(st.next);
-    } else closed.add(`${vault}:${st.next}`);
+    } // an order found already closed is never tracked: nothing to remember about it
     st.next++;
   }
   for (const [id, o] of fresh) st.orders.set(id, { id, ...o });
@@ -929,6 +1091,9 @@ async function ordersToCheck(vault) {
   for (const o of orders) await scheduleOf(vault, o.id);
   st.open = st.open.filter((id) => !closed.has(`${vault}:${id}`));
   for (const id of st.orders.keys()) if (!st.open.includes(id)) st.orders.delete(id);
+  // Every closed order of this vault has now left its book: forget everything kept about it (closed, stuck,
+  // notes, schedule, failure count), so a long run does not keep growing in memory.
+  for (const k of [...closed]) if (k.startsWith(`${vault}:`)) forgetClosed(k);
   return orders;
 }
 
@@ -1578,6 +1743,44 @@ const lastNote = new Map();
 // doubles with each run of rejections (1, 2, 4 ... at most 60 rounds), so a stuck order does not waste RPC calls and log space.
 const stuck = new Map();
 let scanNo = 0;
+stats.onchainFailures = 0;
+stats.failedFeesStroop = 0n;
+
+/** Forgets everything kept about a closed order (memory stays flat on a long run). */
+function forgetClosed(key) {
+  forgetOrder(key, [closed, stuck, lastNote, schedules, failGuard.map]);
+}
+
+/**
+ * A transaction that FAILED ON CHAIN (its fee was paid). After FAIL_PAUSE_AFTER such failures the order (or the
+ * crossing pair) rests for FAIL_PAUSE_HOURS: said in the log and on Telegram.
+ */
+async function onchainFail(key, tag, r) {
+  stats.failures++;
+  stats.onchainFailures++;
+  stats.lastError = `${tag}: ${errText(r)}`;
+  if (r.charged) stats.failedFeesStroop += BigInt(r.charged);
+  const g = failGuard.record(key);
+  const paid = r.charged ? `${fmt(BigInt(r.charged))} XLM` : "?";
+  if (!g.paused) {
+    log(`${tag} failed ON CHAIN (${g.n}/${FAIL_PAUSE_AFTER}, fee paid ${paid}): ${errText(r)} tx=${r.hash || "?"}`);
+    return;
+  }
+  const until = new Date(g.until).toISOString();
+  log(`${tag} failed ON CHAIN ${FAIL_PAUSE_AFTER} times (last fee ${paid}, tx=${r.hash || "?"}): paused until ${until}`);
+  await notify(`Order ${tag} failed on chain ${FAIL_PAUSE_AFTER} times (${errText(r)}); it is paused until ${until}. Please check.`, {
+    topic: `pause:${key}`,
+    everySec: 3600,
+  });
+}
+
+/** The order (or crossing pair) rests for a while: 1, 2, 4 ... at most 60 rounds. */
+function restKey(key) {
+  const n = (stuck.get(key)?.n || 0) + 1;
+  const rounds = Math.min(2 ** (n - 1), 60);
+  stuck.set(key, { n, until: scanNo + rounds });
+  return rounds;
+}
 
 function waiting(vault, o, tag, remaining, tin, reason) {
   // The log file must not bloat when scanning on every ledger: it is written again only when the reason for waiting changes.
@@ -1627,6 +1830,8 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
   const held = stuck.get(key);
   if (held && scanNo < held.until) return "waiting";
+  const pausedTill = failGuard.pausedUntil(key);
+  if (pausedTill) return waiting(vault, o, tag, remaining, tin, `paused after ${FAIL_PAUSE_AFTER} on-chain failures, until ${new Date(pausedTill).toISOString()}`);
   const limit = BigInt(o.limit_price);
   const minFill = BigInt(o.min_fill);
   const maxImpact = BigInt(o.max_impact_bps);
@@ -1727,6 +1932,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         if (sch) schedules.delete(key);
         stats.fills++;
         stuck.delete(key);
+        failGuard.clear(key);
         if (ra.fee !== null) stats.feesStroop += ra.fee;
         log(`FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${fmt(ra.value)} ${sym(tout)} via ${alt.text} (built-in route: ${qSoro > 0n ? fmt(qSoro) : "none"}) fee=${ra.fee !== null ? fmt(ra.fee) : "?"} XLM tx=${ra.hash}`);
         const left = remaining - fill;
@@ -1738,9 +1944,17 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         );
         return "filled";
       }
+      if (ra.feeCap || ra.budget) return waiting(vault, o, tag, remaining, tin, ra.error);
       if (ra.retry) {
         log(`${tag}: ${ra.error}; it will be tried again on the next ledger`);
         return "busy";
+      }
+      if (ra.onchain) {
+        // The fee is paid already: no second transaction through the built-in route in the same round.
+        await onchainFail(key, tag, ra);
+        const rounds = restKey(key);
+        log(`${tag} the ${alt.text} fill is tried again in ${rounds} round(s) at the earliest`);
+        return "error";
       }
       // The router's route did not work out (the price moved, or it was refused): the vault's built-in route.
       const why = `${alt.text} route refused (${errText(ra)})`;
@@ -1773,6 +1987,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     if (r.ok) {
       stats.fills++;
       stuck.delete(key);
+      failGuard.clear(key);
       if (r.fee !== null) stats.feesStroop += r.fee;
       log(
         `FILLED ${tag} ${fmt(fill)} ${sym(tin)} -> ${via ? `${sym(via)} -> ` : ""}${fmt(r.value)} ${sym(tout)}` +
@@ -1787,6 +2002,8 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       );
       return "filled";
     }
+    // Above the per-transaction fee cap or out of fee budget: nothing was sent, the order just waits.
+    if (r.feeCap || r.budget) return waiting(vault, o, tag, remaining, tin, r.error);
     if (r.retry) {
       // The network did not accept the transaction: no fee was paid, it is tried again on the next ledger.
       log(`${tag}: ${r.error}; it will be tried again on the next ledger`);
@@ -1799,6 +2016,13 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       closed.add(key); // the order is no longer open, or has expired according to the chain
       return "closed";
     }
+    if (r.onchain) {
+      // The transaction got on chain and failed there (fee paid): counted towards the long pause and rested.
+      await onchainFail(key, tag, r);
+      const rounds = restKey(key);
+      log(`${tag} fill ${fmt(fill)} is tried again in ${rounds} round(s) at the earliest`);
+      return "error";
+    }
     stats.failures++;
     stats.lastError = `${tag}: ${errText(r)}`;
     if ([8, 10, 13, 20].includes(r.code)) {
@@ -1807,22 +2031,19 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       rejected = rejected || { fill, r };
       continue;
     }
-    // Unexpected error (e.g. the transaction got on-chain but failed): this order is rested too, so that it is not
-    // retried every round burning fees (1, 2, 4 ... at most 60 rounds).
-    const n = (held?.n || 0) + 1;
-    const rest = Math.min(2 ** (n - 1), 60);
-    stuck.set(key, { n, until: scanNo + rest });
-    log(`${tag} fill ${fmt(fill)} failed: ${errText(r)}; it will be tried again in ${rest} round(s)`);
+    // Unexpected error (e.g. a send error): this order is rested too, so that it is not retried every round
+    // (1, 2, 4 ... at most 60 rounds).
+    const rounds = restKey(key);
+    log(`${tag} fill ${fmt(fill)} failed: ${errText(r)}; it will be tried again in ${rounds} round(s)`);
     await notify(`Fill error ${tag}: ${errText(r)}`, { topic: `err:${tag}`, everySec: 3600 });
     return "error";
   }
   if (rejected) {
     // No size went through: the order is rested for a while. If it stays that way for long (e.g. the error comes from
     // another contract, the owner has no trustline) a notice is sent once.
-    const n = (held?.n || 0) + 1;
-    const rest = Math.min(2 ** (n - 1), 60);
-    stuck.set(key, { n, until: scanNo + rest });
-    log(`${tag} fill ${fmt(rejected.fill)} rejected by the contract: ${errText(rejected.r)}; it will be tried again in ${rest} round(s)`);
+    const rounds = restKey(key);
+    const n = stuck.get(key).n;
+    log(`${tag} fill ${fmt(rejected.fill)} rejected by the contract: ${errText(rejected.r)}; it will be tried again in ${rounds} round(s)`);
     if (n === 7) {
       await notify(
         `Order ${tag} passes the pre-checks but the contract keeps rejecting it (${errText(rejected.r)}). Please check: ` +
@@ -1933,6 +2154,7 @@ async function tryCross(a, b) {
     crossedNow.add(a.key);
     crossedNow.add(b.key);
     stuck.delete(`x:${a.key}|${b.key}`);
+    failGuard.clear(crossKey(a, b));
     log(
       `CROSSED ${tag}: ${fmt(amt.x)} ${sym(a.tin)} <-> ${fmt(amt.y)} ${sym(a.tout)}` +
         (qa !== null ? ` (the pool would give ${fmt(qa)} ${sym(a.tout)}${qb !== null ? ` / ${fmt(qb)} ${sym(a.tin)}` : ""})` : "") +
@@ -1944,21 +2166,28 @@ async function tryCross(a, b) {
     );
     return "crossed";
   }
+  if (r.feeCap || r.budget) return "busy"; // nothing was sent; said once by the budget notice / tried next ledger
   if (r.retry) {
     log(`cross ${tag}: ${r.error}; it will be tried again on the next ledger`);
     return "busy";
   }
   if (r.code === 4 || r.code === 5) return "no"; // one of the two orders is no longer open; both vaults are read again
-  stats.failures++;
-  stats.lastError = `cross ${tag}: ${errText(r)}`;
-  // Rested like a stuck order (1, 2, 4 ... at most 60 rounds), so a pair the contract keeps rejecting does not burn fees.
   const k = `x:${a.key}|${b.key}`;
-  const n = (stuck.get(k)?.n || 0) + 1;
-  const rest = Math.min(2 ** (n - 1), 60);
-  stuck.set(k, { n, until: scanNo + rest });
-  log(`cross ${tag} rejected: ${errText(r)}; this pair is tried again in ${rest} round(s)`);
+  if (r.onchain) {
+    // Failed on chain (fee paid): counted towards the long pause of this pair.
+    await onchainFail(crossKey(a, b), `cross ${tag}`, r);
+  } else {
+    stats.failures++;
+    stats.lastError = `cross ${tag}: ${errText(r)}`;
+  }
+  // Rested like a stuck order (1, 2, 4 ... at most 60 rounds), so a pair the contract keeps rejecting does not burn fees.
+  const rounds = restKey(k);
+  log(`cross ${tag} rejected: ${errText(r)}; this pair is tried again in ${rounds} round(s)`);
   return "error";
 }
+
+/** The failure-guard key of a crossing pair (same for both orders of the pair, in either order). */
+const crossKey = (a, b) => (a.key < b.key ? `x:${a.key}|${b.key}` : `x:${b.key}|${a.key}`);
 
 /** Looks for opposite orders that can fill each other and sends the crosses. Returns how many crosses went through. */
 async function crossPass(vaults) {
@@ -1980,6 +2209,7 @@ async function crossPass(vaults) {
       const o = st.orders.get(id);
       const key = `${v}:${id}`;
       if (!o || closed.has(key)) continue;
+      if (failGuard.pausedUntil(key)) continue; // paused after on-chain failures
       if (BigInt(o.trigger_price ?? 0) > 0n) continue; // stop orders are left to the pool pass
       if (pc.v11 && schedules.get(key) !== null) continue; // scheduled orders (or not known yet) are left to the pool pass
       if (now > Number(o.expiry)) continue;
@@ -2004,6 +2234,7 @@ async function crossPass(vaults) {
       tried.add(pk);
       const held = stuck.get(`x:${a.key}|${b.key}`) || stuck.get(`x:${b.key}|${a.key}`);
       if (held && scanNo < held.until) continue;
+      if (failGuard.pausedUntil(crossKey(a, b))) continue;
       let res;
       try {
         res = await tryCross(a, b);
@@ -2116,7 +2347,7 @@ async function runTtlJob(job) {
     const keys = [...seen.values()];
     if (keys.length === 0) return;
     const r = await serialized(async () => {
-      const account = await server.getAccount(kp.publicKey());
+      const account = await accountFor(kp);
       const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
         .setSorobanData(new SorobanDataBuilder().setReadOnly(keys).build())
         .addOperation(Operation.extendFootprintTtl({ extendTo: 30 * DAY_IN_LEDGERS }))
@@ -2176,16 +2407,20 @@ async function scan() {
     seenVaults.add(v);
     dirty.delete(v);
   });
+  // The fee budget: a new round starts; if the hourly budget is used up, this round only scans (no transactions).
+  feeBudget.startRound();
+  const budgetBlock = feeBudget.blockReason(0);
+  if (budgetBlock) budgetHit(budgetBlock);
   // 2) Opposite orders that can fill each other are crossed first (version 10 vaults), with no pool in between.
   try {
-    filled += 2 * (await crossPass(vaults));
+    if (!budgetBlock) filled += 2 * (await crossPass(vaults));
   } catch (e) {
     log(`ERROR crossing: ${e.message}`);
   }
   // 3) Check every open order against this scan's prices, from the cached copies. Fills run in parallel, one per
   //    sending account at a time.
   reservesNow.clear();
-  const active = vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0);
+  const active = budgetBlock ? [] : vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0);
   // With the batch filler each sending account carries BATCH_SIZE fills, so that many vaults are checked at once.
   const lanes = Math.min(Math.max(SCAN_CONCURRENCY, signers.length * (BATCH ? BATCH_SIZE : 1)), 40);
   await pool(active, lanes, async (v) => {
@@ -2235,20 +2470,48 @@ async function scan() {
     });
     if (sent) log(`WARNING the keeper balance is low: ${balance} XLM`);
   }
+  lastScanInfo = { at: new Date().toISOString(), vaults: vaults.length, open, filled, balance };
+  writeStatus();
+  return { vaults, filled, open };
+}
+
+let lastScanInfo = null; // the last scan that completed
+let failedScansInRow = 0;
+/**
+ * status.json, written after every scan attempt, failed ones too: `heartbeat` is the time of that write, so an
+ * outside check (keeper/monitor/) can tell a stuck or dead keeper from a quiet one. `last_scan` is the last scan
+ * that completed.
+ */
+function writeStatus() {
+  const s = lastScanInfo || {};
+  const now = Date.now();
   try {
     fs.writeFileSync(
       STATUS_FILE,
       JSON.stringify(
         {
-          last_scan: new Date().toISOString(),
-          vaults: vaults.length,
-          open_orders: open,
-          fills_this_round: filled,
+          heartbeat: new Date(now).toISOString(),
+          pid: process.pid,
+          last_scan: s.at || null,
+          failed_scans_in_row: failedScansInRow,
+          vaults: s.vaults ?? null,
+          open_orders: s.open ?? null,
+          fills_this_round: s.filled ?? null,
           total_fills: stats.fills,
           total_failures: stats.failures,
+          onchain_failures: stats.onchainFailures,
+          paused_orders: failGuard.pausedCount(now),
           total_fees_xlm: fmt(stats.feesStroop),
+          failed_fees_xlm: fmt(stats.failedFeesStroop),
+          fees_last_hour_xlm: fmt(BigInt(feeBudget.spentLastHour(now))),
+          fee_budget_per_hour_xlm: MAX_FEE_XLM_PER_HOUR || "off",
+          inclusion_fee_stroops: feeStatsCache.fee,
           last_error: stats.lastError,
-          keeper_balance_xlm: balance,
+          rpc_current: RPC_URLS[rpcPicker.cur],
+          rpc_consecutive_errors: rpcPicker.consecutiveErrors,
+          rpc_last_error: rpcPicker.lastError,
+          rpc_primary_retry_at: rpcPicker.cur !== 0 && rpcPicker.retryAt ? new Date(rpcPicker.retryAt).toISOString() : null,
+          keeper_balance_xlm: s.balance ?? null,
           sending_accounts: signers.length,
           batch_fills: BATCH ? `${batchFills} orders / ${batchTxs} transactions` : "off",
           crosses: CROSS ? crossFills : "off",
@@ -2260,7 +2523,6 @@ async function scan() {
       ),
     );
   } catch {}
-  return { vaults, filled, open };
 }
 
 /**
@@ -2333,7 +2595,23 @@ async function main() {
     await venueCheck();
     process.exit(0);
   }
+  // Only one keeper per key and folder: a second one would collide on sequence numbers and waste fees.
+  const lock = acquireLock(LOCK_FILE);
+  if (!lock.ok) {
+    const who = lock.pid ? `PID ${lock.pid}` : "another process";
+    console.error(`The keeper is already running (${who}, lock file ${LOCK_FILE}); this one is not started.`);
+    log(`not started: the keeper is already running (${who}, lock file ${LOCK_FILE})`);
+    process.exit(3);
+  }
+  process.on("exit", lock.release); // also on Ctrl+C / SIGTERM / fatal errors (they all end in process.exit)
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
+  log(
+    `fee protection: MAX_FEE_XLM=${MAX_FEE_XLM} per transaction, MAX_FEE_XLM_PER_HOUR=${MAX_FEE_XLM_PER_HOUR}, ` +
+      `MAX_FEE_XLM_PER_ROUND=${MAX_FEE_XLM_PER_ROUND}, pause after ${FAIL_PAUSE_AFTER} on-chain failures for ${FAIL_PAUSE_HOURS} h, inclusion fee ${FEE_PERCENTILE}`,
+  );
+  if (!TG_TOKEN || !TG_CHAT) {
+    log("WARNING Telegram is not set (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID): no alerts will be sent. Watch status.json (heartbeat) from outside.");
+  }
   if (ONCE) {
     let last;
     for (let round = 1; round <= 4; round++) {
@@ -2351,10 +2629,11 @@ async function main() {
     log(BATCH ? `batch fills on: at most ${BATCH_SIZE} orders per transaction, contract ${short(BATCH)}` : "batch fills off (no testnet/batch.env)");
   }
   let workersAt = Date.now();
-  const prevTtl = Date.parse(readStatus().last_ttl || "");
+  const prevStatus = readStatus();
+  const prevTtl = Date.parse(prevStatus.last_ttl || prevStatus.son_ttl || ""); // son_ttl: older status.json files
   if (Number.isFinite(prevTtl)) lastTtl = prevTtl;
   let ttlJobs = [];
-  let failedScans = 0;
+  let saidResetAt = Date.now();
   await notify(
     `Started. ${FACTORIES.length > 1 ? "Several factories" : "One factory"}, ` +
       (SCAN_MODE === "ledger" ? "scanning on every new ledger (~5 s)." : `scanning every ${INTERVAL_SEC} s.`),
@@ -2379,14 +2658,20 @@ async function main() {
           if (ttlJobs.length === 0) lastTtl = Date.now();
         }
       }
-      failedScans = 0;
+      failedScansInRow = 0;
     } catch (e) {
       stats.lastError = e.message;
-      failedScans++;
+      failedScansInRow++;
       log(`ERROR scan: ${e.message}`);
-      if (failedScans >= 3) {
-        await notify(`${failedScans} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
+      writeStatus(); // the heartbeat moves on even when scans fail; failed_scans_in_row shows it
+      if (failedScansInRow >= 3) {
+        await notify(`${failedScansInRow} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
       }
+    }
+    // One-time venue notes are said again once a day (and the set cannot grow without end).
+    if (Date.now() - saidResetAt > 24 * 3600_000) {
+      saidResetAt = Date.now();
+      venueState.said.clear();
     }
     if (SCAN_MODE !== "ledger") {
       await sleep(INTERVAL_SEC * 1000);

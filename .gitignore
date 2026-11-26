@@ -7,6 +7,7 @@ node_modules/
 *.local
 keeper/keeper.log
 keeper/status.json
+keeper/keeper.lock
 contracts/*/test_snapshots/
 
 # Local files in the project root (secrets, notes, command sheets, old outputs) are not published.

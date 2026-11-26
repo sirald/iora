@@ -1,0 +1,11 @@
+# Example only, NOT installed. Runs iora-keeper-heartbeat.service every 2 minutes.
+[Unit]
+Description=Iora keeper heartbeat check every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

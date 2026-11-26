@@ -1,0 +1,17 @@
+# Example only, NOT installed. One-shot heartbeat check for the Iora keeper, started by iora-keeper-heartbeat.timer.
+# Install (as root, paths adjusted to the server):
+#   cp keeper/monitor/iora-keeper-heartbeat.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now iora-keeper-heartbeat.timer
+# Without systemd, the same check from cron (every 2 minutes):
+#   */2 * * * * TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... /opt/iora/keeper/monitor/check-heartbeat.sh /opt/iora/keeper/status.json
+[Unit]
+Description=Iora keeper heartbeat check
+
+[Service]
+Type=oneshot
+# Change to the folder the keeper runs from on the server.
+WorkingDirectory=/opt/iora/keeper
+# A root-only file (chmod 600) with TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID and, optionally, MAX_AGE_SEC etc.
+EnvironmentFile=-/etc/iora/heartbeat.env
+# An alarm exits 1, so the unit shows as failed in `systemctl --failed` too (a second, visible signal).
+ExecStart=/usr/bin/env bash /opt/iora/keeper/monitor/check-heartbeat.sh /opt/iora/keeper/status.json

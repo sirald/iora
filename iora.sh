@@ -4,7 +4,9 @@
 cd "$(dirname "$0")" || exit 1
 
 # Two keepers with the same key break each other's transactions: if one is already running, no new one is started.
-if command -v flock > /dev/null && ! flock -n /tmp/iora-keeper.lock true 2> /dev/null; then
+# keeper.js keeps its PID in keeper/keeper.lock (and refuses to start a second copy itself).
+LOCK_PID=$(cat keeper/keeper.lock 2> /dev/null | tr -dc '0-9')
+if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2> /dev/null; then
   echo "The keeper is already running (in another window). A new one was not started."
   KEEPER_PID=""
 else

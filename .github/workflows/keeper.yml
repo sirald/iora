@@ -14,9 +14,11 @@ on:
         type: boolean
         default: false
 
-# Scans and the daily TTL run use separate groups, so a queued TTL run is not displaced by a scan.
+# Scans and the daily TTL run share ONE group: they use the same key, and two runs at once would collide on
+# sequence numbers. A queued TTL run can be displaced by a newer queued scan; that is why the scan that starts
+# between 03:15 and 03:19 UTC also extends TTL (see "Scan and fill").
 concurrency:
-  group: keeper-${{ (github.event.schedule == '17 3 * * *' || inputs.ttl) && 'ttl' || 'scan' }}
+  group: keeper
   cancel-in-progress: false
 
 permissions:
@@ -28,7 +30,7 @@ jobs:
     # That way it never runs alongside a keeper on a local machine, which would collide and waste Actions minutes.
     if: ${{ github.event_name == 'workflow_dispatch' || vars.KEEPER_CLOUD == '1' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: keeper
@@ -47,5 +49,6 @@ jobs:
         run: |
           if [ -z "$KEEPER_SECRET" ]; then echo "KEEPER_SECRET secret is not set"; exit 1; fi
           FLAGS="--once"
-          if [ "${{ github.event.schedule }}" = "17 3 * * *" ] || [ "${{ inputs.ttl }}" = "true" ]; then FLAGS="$FLAGS --ttl"; fi
+          HM=$(date -u +%H%M)
+          if [ "${{ github.event.schedule }}" = "17 3 * * *" ] || [ "${{ inputs.ttl }}" = "true" ] || { [ "$HM" -ge 0315 ] && [ "$HM" -lt 0320 ]; }; then FLAGS="$FLAGS --ttl"; fi
           node keeper.js $FLAGS

@@ -14,11 +14,8 @@ if [ ! -d node_modules/@stellar/stellar-sdk ]; then
     || { echo "npm install failed"; exit 1; }
 fi
 
-# Never start a second keeper with the same key (the lock is held until the keeper exits).
-if command -v flock > /dev/null; then
-  exec 9> /tmp/iora-keeper.lock
-  flock -n 9 || { echo "The keeper is already running; a second one was not started."; exit 1; }
-fi
+# A second keeper with the same key is refused by keeper.js itself (lock file keeper/keeper.lock holding its PID;
+# a stale lock from a dead process is taken over). No flock needed, so this works on Linux and Windows alike.
 
 SECRET=""
 for c in "stellar keys secret keeper" "stellar keys show keeper"; do
