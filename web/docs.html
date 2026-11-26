@@ -104,7 +104,7 @@
           <div class="cards">
             <div><h3>Your own vault</h3><p>Each user gets a separate smart contract. Only your wallet can deposit, withdraw, place or cancel orders.</p></div>
             <div><h3>Earning while waiting</h3><p>The assets you deposit go to Blend right away, including the part reserved for open orders. What your orders buy can stay in the vault and keep earning too.</p></div>
-            <div><h3>One-step fills</h3><p>Withdraw from Blend, swap at the trading venue that pays the most and put the coin you bought back to work in your vault (or send it to your wallet), all in one atomic transaction.</p></div>
+            <div><h3>One-step fills</h3><p>Withdraw from Blend, swap along the best route Iora's keeper finds among the venues it knows, and put the coin you bought back to work in your vault (or send it to your wallet), all in one atomic transaction.</p></div>
           </div>
           <h3>Who it is for</h3>
           <ul>
@@ -238,7 +238,7 @@
             <dt>Max price impact</dt><dd>How far a single fill may move the price of the pool it trades in (applies to the vault's built-in single-pool route). If the pool is thin, a large order is filled in smaller pieces instead. Default 3%.</dd>
             <dt>Duration</dt><dd>Orders stay open until they fill or you cancel them; they have no end date.</dd>
           </dl>
-          <h3>Price improvement</h3>
+          <h3 id="price-improvement">Price improvement</h3>
           <p>
             The contract computes the minimum amount you must receive from your limit (the coin for a buy order, USDC for a sell order),
             and checks it again after the swap. Your limit is a guarantee; a better price is not. When the market is better than your limit at the moment of the fill, the
@@ -357,7 +357,8 @@
           <ul class="checks">
             <li>Deposits, withdrawals, orders and cancellations require the vault owner's signature.</li>
             <li>No key can move your funds and there is no upgrade function. Nobody can change a deployed vault's code. The factory's guardian can only pause new vaults and new orders and edit the list of coins that new orders may use; withdrawals, cancellations and fills keep working.</li>
-            <li>What a fill buys always goes to the vault owner: it stays in the owner's vault or is sent to the owner's wallet, as the owner chose when placing the order. A keeper cannot redirect it; the only thing a keeper can receive is the capped fill fee, and only out of price improvement.</li>
+            <li>What a fill buys always goes to the vault owner: it stays in the owner's vault or is sent to the owner's wallet, as the owner chose when placing the order. A keeper cannot redirect it. The vault itself pays a filler at most the capped fill fee, and only out of output above your limit.</li>
+            <li>The contract guarantees your signed limit, not a better price. Whoever fills an order can arrange the trade so that it fills exactly at your limit and keep any price improvement beyond it. Passing price improvement on to you is how Iora's keeper behaves, not something the contract guarantees (see <a href="#price-improvement">Price improvement</a>).</li>
             <li>The minimum output is computed on-chain from your limit and checked again after the swap. If it is not met, the whole transaction reverts and your funds stay on Blend.</li>
             <li>The same balance cannot back two orders, or an order and a withdrawal.</li>
             <li>Swaps have a five-minute deadline, so a delayed transaction cannot execute at a stale price.</li>
@@ -383,7 +384,7 @@
             <dt>Smart contract risk</dt>
             <dd>All vaults run the same code, so a bug could affect every vault. The contracts have not yet been independently audited.</dd>
             <dt>Swap and price risk</dt>
-            <dd>Fills go through a trading venue's pool for the two tokens of the order (whichever venue pays the most at that moment), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#orders">Price improvement</a>).</dd>
+            <dd>Fills go through a trading venue's pool for the two tokens of the order (whichever venue pays the most at that moment), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#price-improvement">Price improvement</a>).</dd>
             <dt>Oracle risk (stop loss)</dt>
             <dd>Stop loss orders rely on the price oracle of the Blend pool. If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
             <dt>Keeper risk</dt>
