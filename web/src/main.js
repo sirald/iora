@@ -20,6 +20,9 @@ import {
 import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTransaction } from "@stellar/freighter-api";
 import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from "./rpc.js";
 import { COPY_LABEL, copied } from "./motion.js";
+import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
+import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
+import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
 import { StellarWalletsKit } from "swk-sdk";
 import { defaultModules } from "swk-modules";
 
@@ -382,16 +385,34 @@ function walletTimeout(p) {
 let atWallet = false; // a signing request is open in the wallet
 // Network fees the wallet has paid (the Summary tab): read once, then again only after this page sent something.
 const FEES = { who: null, at: 0, sum: null, stale: false, asking: null };
-async function signAndSend(tx) {
+async function signAndSend(tx, label = "Transaction") {
   atWallet = true;
   try {
-    return await signAndSendNow(tx);
+    return await signAndSendNow(tx, label);
   } finally {
     atWallet = false;
     FEES.stale = true;
   }
 }
-async function signAndSendNow(tx) {
+// Submitted transactions whose outcome is not known yet are kept in this browser (hash + what it was), so after a
+// timeout or a reload they are settled from the network instead of being called failed (audit IORA-03).
+const PENDING_KEY = "iora-pending-tx";
+const pendingLoad = () => {
+  try {
+    return pendingParse(localStorage.getItem(PENDING_KEY));
+  } catch {
+    return [];
+  }
+};
+const pendingSave = (list) => {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(list));
+  } catch {}
+};
+const pendingForget = (hash) => pendingSave(pendingDrop(pendingLoad(), hash));
+const txLink = (hash) => `<a href="${EXPLORER}/tx/${hash}" target="_blank" rel="noopener">${short(hash)}</a>`;
+const tracking = new Set(); // hashes signAndSendNow is following right now
+async function signAndSendNow(tx, label) {
   let signed;
   if (useKit) {
     try {
@@ -420,23 +441,78 @@ async function signAndSendNow(tx) {
   const sent = await server.sendTransaction(ready);
   if (sent.status === "TRY_AGAIN_LATER") throw new Error("The network is busy and did not accept the transaction. Nothing was sent; try again in a moment.");
   if (sent.status === "ERROR") throw new Error("Could not submit the transaction");
-  // The transaction is valid for 180 s: it is followed until that time is up. A temporary RPC error does not stop
-  // the tracking, so a user who sees "timed out" and tries again does not place the same order twice.
-  const link = `<a href="${EXPLORER}/tx/${sent.hash}" target="_blank" rel="noopener">${short(sent.hash)}</a>`;
-  const deadline = Date.now() + 195_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1000));
-    let r;
-    try {
-      r = await server.getTransaction(sent.hash);
-    } catch {
-      continue;
+  // The transaction is valid until its time bound (180 s): it is followed until the network shows that time has
+  // passed. A read error or "not found yet" proves nothing, so without a final answer the outcome is reported as
+  // unknown, never as "safe to try again"; the hash stays saved and is settled later (reconcilePending).
+  const link = txLink(sent.hash);
+  const at = Math.floor(Date.now() / 1000);
+  const maxTime = Number((ready.timeBounds && ready.timeBounds.maxTime) || 0);
+  pendingSave(pendingAdd(pendingLoad(), { hash: sent.hash, label: String(label), at, maxTime, wallet: me }));
+  tracking.add(sent.hash);
+  try {
+    const deadline = Date.now() + Math.min(15 * 60_000, Math.max(195_000, (maxTime - at + 30) * 1000));
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+      let r = null;
+      try {
+        r = await server.getTransaction(sent.hash);
+      } catch {}
+      const v = txVerdict(r, { at, maxTime });
+      if (v === "pending") continue;
+      pendingForget(sent.hash);
+      if (v === "success") return { hash: sent.hash, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
+      if (v === "failed") throw new Error(`Transaction failed on-chain (${link})`);
+      throw new Error(`The transaction expired without being applied (${link}). Nothing changed, so it is safe to try again.`);
     }
-    if (r.status === "SUCCESS") return { hash: sent.hash, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
-    if (r.status === "FAILED") throw new Error(`Transaction failed on-chain (${link})`);
+  } finally {
+    tracking.delete(sent.hash);
   }
-  throw new Error(`Not confirmed in time; the transaction was not applied, so it is safe to try again (${link})`);
+  throw new Error(
+    `Status unknown: the network has not confirmed this transaction yet (${link}). It may still have gone through, so do not send it again yet. Iora keeps checking and will report the result here; you can also open the link.`,
+  );
 }
+
+/** Settles saved transactions whose outcome was not known (after a timeout or a reload). */
+let reconciling = false;
+async function reconcilePending() {
+  if (reconciling) return;
+  reconciling = true;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    let settled = false;
+    for (const p of pendingLoad()) {
+      if (tracking.has(p.hash)) continue;
+      let r = null;
+      try {
+        r = await server.getTransaction(p.hash);
+      } catch {}
+      const v = txVerdict(r, p);
+      const what = esc(p.label);
+      if (v === "pending") {
+        if (!pendingTooOld(p, now)) continue;
+        log(`${what}: the result could not be confirmed automatically. Check it yourself: ${txLink(p.hash)}`, "err");
+      } else if (v === "success") log(`${what}: confirmed on-chain · ${txLink(p.hash)}`, "ok");
+      else if (v === "failed") log(`${what}: failed on-chain (${txLink(p.hash)}). Nothing changed; you can try again.`, "err");
+      else log(`${what}: expired without being applied (${txLink(p.hash)}). Nothing changed; it is safe to try again.`);
+      pendingForget(p.hash);
+      settled = true;
+    }
+    if (settled) {
+      flushReads();
+      if (me && !busy) refresh().catch((e) => console.warn("refresh after settling", e));
+    }
+  } finally {
+    reconciling = false;
+  }
+}
+setTimeout(() => {
+  const open = pendingLoad();
+  if (!open.length) return;
+  log(`${open.length === 1 ? "An earlier transaction is" : `${open.length} earlier transactions are`} not confirmed yet: ${open.map((p) => `${esc(p.label)} ${txLink(p.hash)}`).join(", ")}. Checking the network…`, "wait");
+  reconcilePending();
+}, 2000);
+setInterval(() => document.visibilityState === "visible" && pendingLoad().length && reconcilePending(), 20_000);
+let pendingWarnedAt = 0;
 
 /** Contract call: simulate, get approval, sign, send. */
 /**
@@ -539,6 +615,9 @@ function showStale() {
 setInterval(() => document.visibilityState === "visible" && staleBuild(), 60_000);
 document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && staleBuild());
 
+// The transaction link we generate ourselves is kept; everything else is escaped
+const safeErr = (msg) =>
+  esc(msg).replace(/&lt;a href=&quot;(https:\/\/stellar\.expert\/explorer\/[a-z]+\/tx\/[0-9a-f]{64})&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;([0-9a-f.…]+)&lt;\/a&gt;/g, '<a href="$1" target="_blank" rel="noopener">$2</a>');
 async function call(contractId, method, args, label, errors) {
   if (await staleBuild()) {
     log(`${label}: this page is out of date. Reload it first (button at the top).`, "err");
@@ -570,6 +649,15 @@ async function call(contractId, method, args, label, errors) {
     );
     return null;
   }
+  // An earlier transaction whose outcome is unknown may still have gone through: sending the same thing again could
+  // double it. The first press only warns; pressing again within two minutes sends anyway.
+  const open = pendingLoad().filter((p) => !tracking.has(p.hash) && (!p.wallet || p.wallet === me));
+  if (open.length && Date.now() - pendingWarnedAt > 120_000) {
+    pendingWarnedAt = Date.now();
+    reconcilePending();
+    log(`${label}: an earlier transaction is not confirmed yet and may still go through (${open.map((p) => `${esc(p.label)} ${txLink(p.hash)}`).join(", ")}). Wait until it is settled here, or press the button again to send this anyway.`, "err");
+    return null;
+  }
   busy = true;
   document.body.classList.add("busy");
   try {
@@ -588,7 +676,7 @@ async function call(contractId, method, args, label, errors) {
         .addOperation(Operation.restoreFootprint({}))
         .setTimeout(180)
         .build();
-      await signAndSend(rtx);
+      await signAndSend(rtx, `${label} (restore)`);
       tx = await buildCall(t.id, t.method, t.args);
       sim = await server.simulateTransaction(tx);
       if (rpc.Api.isSimulationError(sim)) throw new Error(explain(sim.error, errors));
@@ -596,15 +684,15 @@ async function call(contractId, method, args, label, errors) {
     log(`${label}: waiting for wallet approval…`, "wait");
     padSim(sim);
     if (method === "create_vault") padVaultSlots(sim);
-    const res = await signAndSend(rpc.assembleTransaction(tx, sim).build());
+    const res = await signAndSend(rpc.assembleTransaction(tx, sim).build(), label);
     if (method === "create_vault") flushReads(true);
     log(`${label}: done · <a href="${EXPLORER}/tx/${res.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
     return res;
   } catch (e) {
     const msg = String((e && e.message) || e);
     // The transaction link we generate ourselves is kept; everything else is escaped
-    const safe = esc(msg).replace(/&lt;a href=&quot;(https:\/\/stellar\.expert\/explorer\/[a-z]+\/tx\/[0-9a-f]{64})&quot; target=&quot;_blank&quot; rel=&quot;noopener&quot;&gt;([0-9a-f.…]+)&lt;\/a&gt;/g, '<a href="$1" target="_blank" rel="noopener">$2</a>');
-    const hint = method === "create_vault" && !/reject|declin|cancel|Connect your wallet|busy/i.test(msg) ? " If many people open a vault at the same moment, one attempt can fail. Press the button again." : "";
+    const safe = safeErr(msg);
+    const hint = method === "create_vault" && !/reject|declin|cancel|Connect your wallet|busy|Status unknown/i.test(msg) ? " If many people open a vault at the same moment, one attempt can fail. Press the button again." : "";
     log(`${label}: ${safe}${hint}`, "err");
     return null;
   } finally {
@@ -2687,10 +2775,10 @@ async function addTrustline() {
       .setTimeout(180)
       .build();
     log("USDC trustline: waiting for wallet approval…", "wait");
-    const r = await signAndSend(tx);
+    const r = await signAndSend(tx, "USDC trustline");
     log(`USDC trustline added · <a href="${EXPLORER}/tx/${r.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
   } catch (e) {
-    log(`Trustline: ${esc(e.message)}`, "err");
+    log(`Trustline: ${safeErr(e.message)}`, "err");
   } finally {
     busy = false;
     await refresh();
@@ -3085,7 +3173,7 @@ setInterval(() => {
 // Blend v2: request types 2 supply collateral, 3 withdraw collateral, 4 borrow, 5 repay.
 // Health: sum(collateral * price * c_factor) / sum(debt * price / l_factor). Liquidation below 1.
 // ---------------------------------------------------------------------------
-const LP = { reserves: [], oracle: null, pdec: 7, take: 0, mode: 2, wallet: {} };
+const LP = { reserves: [], oracle: null, pdec: 7, take: 0, mode: 2, wallet: {}, posOk: true, missing: 0 };
 const LP_VERB = { 2: "Supply", 3: "Withdraw", 4: "Borrow", 5: "Repay" };
 const LP_FINE = {
   2: "Supplied assets count as collateral, earn interest and can be withdrawn while your health factor stays above 1.",
@@ -3114,6 +3202,8 @@ async function loadLend() {
     const dec = LP.oracle ? await read(LP.oracle, "decimals") : { ok: false };
     LP.pdec = dec.ok ? Number(dec.value) : 7;
     const pos = await read(C.pool, "get_positions", [addr(me)]);
+    // A failed read is not "no position": the totals, health and Max are then shown as unknown (audit IORA-02).
+    LP.posOk = pos.ok;
     const P = pos.ok ? pos.value : { liabilities: {}, collateral: {}, supply: {} };
     const get = (m, i) => (m && (m[i] ?? m[String(i)]) !== undefined ? BigInt(m[i] ?? m[String(i)]) : 0n);
     LP.reserves = await Promise.all(
@@ -3154,6 +3244,7 @@ async function loadLend() {
         };
       }),
     );
+    LP.missing = LP.reserves.filter((r) => !r).length;
     LP.reserves = LP.reserves.filter(Boolean);
     renderLend();
   } catch (e) {
@@ -3161,27 +3252,9 @@ async function loadLend() {
   }
 }
 
-function lpTotals(rs, change) {
-  let col = 0, liab = 0, sup = 0, bor = 0;
-  for (const r of rs) {
-    if (r.price === null) continue;
-    let c = r.collat, d = r.debt;
-    if (change && change.asset === r.asset) {
-      if (change.mode === 2) c += change.amt;
-      if (change.mode === 3) c = Math.max(0, c - change.amt);
-      if (change.mode === 4) d += change.amt;
-      if (change.mode === 5) d = Math.max(0, d - change.amt);
-    }
-    col += c * r.price * r.cf;
-    liab += (d * r.price) / r.lf;
-    sup += (c + r.supplyNc) * r.price;
-    bor += d * r.price;
-  }
-  return { col, liab, sup, bor, hf: liab > 0 ? col / liab : Infinity, used: col > 0 ? liab / col : liab > 0 ? Infinity : 0 };
-}
-
-const hfText = (h) => (h === Infinity ? "No debt" : h.toFixed(2));
-const hfClass = (h) => (h === Infinity || h >= 1.5 ? "good" : h >= 1.1 ? "warn" : "bad");
+// The math is in lend.js; here it is bound to the loaded pool. Incomplete data (positions or a reserve unreadable)
+// makes the totals unknown instead of silently leaving a debt out.
+const lpTotals = (rs, change) => lpTotalsOf(rs, change, !LP.posOk || LP.missing > 0);
 const usd = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
 
@@ -3349,8 +3422,8 @@ setInterval(() => document.visibilityState === "visible" && loadPool(), 60000);
 
 function renderLend() {
   const t = lpTotals(LP.reserves);
-  $("lp-sup").textContent = usd(t.sup);
-  $("lp-bor").textContent = usd(t.bor);
+  $("lp-sup").textContent = t.known ? usd(t.sup) : "Unknown";
+  $("lp-bor").textContent = t.known ? usd(t.bor) : "Unknown";
   // A dollar total alone is not enough: each asset is also written in its own unit (e.g. "120.00 USDC · 850.00 XLM").
   const each = (pick) =>
     LP.reserves
@@ -3360,10 +3433,10 @@ function renderLend() {
       .join(" · ");
   $("lp-sup-list").textContent = each((r) => r.collat + r.supplyNc);
   $("lp-bor-list").textContent = each((r) => r.debt);
-  $("lp-used").textContent = t.used === Infinity ? "—" : `${(t.used * 100).toFixed(1)}%`;
+  $("lp-used").textContent = !t.known ? "Unknown" : t.used === Infinity ? "—" : `${(t.used * 100).toFixed(1)}%`;
   $("lp-hf").textContent = hfText(t.hf);
   $("lp-hf").className = `hf ${hfClass(t.hf)}`;
-  $("lp-used-bar").style.width = `${Math.min(100, (t.used === Infinity ? 1 : t.used) * 100)}%`;
+  $("lp-used-bar").style.width = `${!t.known ? 0 : Math.min(100, (t.used === Infinity ? 1 : t.used) * 100)}%`;
   $("lp-used-bar").className = hfClass(t.hf);
 
   $("lp-markets").innerHTML = `<table>
@@ -3371,7 +3444,7 @@ function renderLend() {
     <tbody>${LP.reserves
       .map(
         (r) => `<tr class="lp-row${r.asset === lpSel() ? " sel" : ""}" data-asset="${r.asset}" tabindex="0">
-        <td><b>${r.symbol}</b>${r.price !== null ? `<span class="muted">$${r.price.toLocaleString("en-US", { maximumFractionDigits: 4 })}</span>` : ""}</td>
+        <td><b>${r.symbol}</b>${r.price !== null ? `<span class="muted">$${r.price.toLocaleString("en-US", { maximumFractionDigits: 4 })}</span>` : `<span class="muted">price unavailable</span>`}</td>
         <td class="pos">${pct(r.rates.supply)}</td>
         <td>${pct(r.rates.borrow)}</td>
         <td>${(r.u * 100).toFixed(1)}%</td>
@@ -3381,6 +3454,9 @@ function renderLend() {
       </tr>`,
       )
       .join("")}</tbody></table>
+    ${!LP.posOk ? `<p class="lp-note bad">Your positions could not be read right now, so your amounts and health factor are unknown. Reload in a moment.</p>` : ""}
+    ${LP.missing > 0 ? `<p class="lp-note bad">${LP.missing} market${LP.missing > 1 ? "s" : ""} could not be read, so your totals and health factor are unknown.</p>` : ""}
+    ${LP.posOk && !LP.missing && !t.known ? `<p class="lp-note bad">An oracle price is missing for an asset you supplied or owe, so your dollar totals and health factor are unknown. The amounts in each asset are still shown.</p>` : ""}
     <p class="fine">Select a row to use that asset in the action card.</p>`;
   for (const row of document.querySelectorAll(".lp-row")) {
     const pick = () => {
@@ -3408,32 +3484,12 @@ function lpSel() {
   return $("lp-asset").value || (LP.reserves[0] && LP.reserves[0].asset);
 }
 
-function lpMax(r) {
-  const t = lpTotals(LP.reserves);
-  if (LP.mode === 2) return r.wallet ?? 0;
-  if (LP.mode === 3) {
-    if (t.liab === 0 || !r.price) return Math.min(r.collat, r.cash);
-    const spare = (t.col - t.liab * 1.05) / (r.price * r.cf);
-    return Math.max(0, Math.min(r.collat, spare, r.cash));
-  }
-  if (LP.mode === 4) {
-    if (!r.price) return 0;
-    return Math.max(0, Math.min(((t.col - t.liab) * r.lf * 0.95) / r.price, r.room));
-  }
-  return Math.min(r.debt * 1.001 + 1e-7, r.wallet ?? 0);
-}
+const lpMax = (r, keep = 0) => lpMaxOf(r, LP.mode, lpTotals(LP.reserves), { keep, posOk: LP.posOk });
 
 // What the Max button fills in. Borrowing or withdrawing up to the limit leaves the position about 5%
 // from liquidation, so Max stops where the health factor is still 1.2; a larger amount can be typed by hand.
 const LP_SAFE_HF = 1.2;
-function lpSafeMax(r) {
-  const max = lpMax(r);
-  if ((LP.mode !== 3 && LP.mode !== 4) || !r.price) return max;
-  const t = lpTotals(LP.reserves);
-  if (LP.mode === 4) return Math.max(0, Math.min(max, ((t.col / LP_SAFE_HF - t.liab) * r.lf) / r.price));
-  if (t.liab === 0) return max;
-  return Math.max(0, Math.min(max, (t.col - t.liab * LP_SAFE_HF) / (r.price * r.cf)));
-}
+const lpSafeMax = (r, keep = 0) => lpSafeMaxOf(r, LP.mode, lpTotals(LP.reserves), { keep, posOk: LP.posOk }, LP_SAFE_HF);
 
 function lpPreview() {
   const r = LP.reserves.find((x) => x.asset === lpSel());
@@ -3444,17 +3500,19 @@ function lpPreview() {
   $("lp-max-label").textContent = LP.mode === 2 ? "Wallet" : LP.mode === 3 ? "Can withdraw" : LP.mode === 4 ? "Can borrow" : "You owe";
   if (!r) return;
   const max = lpMax(r);
-  $("lp-max-v").textContent = LP.mode === 5 ? r.debt.toLocaleString("en-US", { maximumFractionDigits: 4 }) : max.toLocaleString("en-US", { maximumFractionDigits: 4 });
+  const unknownMax = (LP.mode !== 2 && !LP.posOk) || ((LP.mode === 3 || LP.mode === 4) && !lpTotals(LP.reserves).known);
+  $("lp-max-v").textContent = unknownMax ? "Unknown" : LP.mode === 5 ? r.debt.toLocaleString("en-US", { maximumFractionDigits: 4 }) : max.toLocaleString("en-US", { maximumFractionDigits: 4 });
   $("lp-rate-label").textContent = LP.mode >= 4 ? "Borrow rate" : "Supply rate";
   $("lp-rate").textContent = pct(LP.mode >= 4 ? r.rates.borrow : r.rates.supply);
   const amt = Number(String($("lp-amount").value).replace(",", ".")) || 0;
   const before = lpTotals(LP.reserves);
   const after = lpTotals(LP.reserves, { asset: r.asset, mode: LP.mode, amt });
   $("lp-hf-after").innerHTML = `${hfText(before.hf)} → <b class="hf ${hfClass(after.hf)}">${hfText(after.hf)}</b>`;
-  const u = (x) => (x === Infinity ? "—" : `${(x * 100).toFixed(1)}%`);
+  const u = (x) => (Number.isNaN(x) ? "Unknown" : x === Infinity ? "—" : `${(x * 100).toFixed(1)}%`);
   $("lp-used-after").innerHTML = `${u(before.used)} → <b>${u(after.used)}</b>`;
   let note = "";
   if (r.price === null) note = "No oracle price for this asset; health can't be estimated.";
+  else if (!before.known) note = "Some prices or positions could not be read, so health can't be estimated right now.";
   else if (amt > 0 && after.hf < 1) note = "This would put your health factor below 1. Blend will reject it.";
   else if (amt > 0 && after.hf < 1.2 && LP.mode >= 3 && LP.mode <= 4) note = "Risky: a small price move could get this position liquidated.";
   else if (LP.mode === 4 && before.col === 0) note = "Supply collateral first. You can't borrow without it.";
@@ -3467,7 +3525,7 @@ function lpPreview() {
     note = `Only about ${r.cash.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${r.symbol} can be withdrawn right now; the rest is out on loan until borrowers repay.`;
   else if (LP.mode === 2 && r.wallet === null) note = `Your wallet can't hold ${r.symbol} yet. Add a trustline first.`;
   $("lp-note").textContent = note;
-  $("lp-note").className = `lp-note${note && (after.hf < 1.2 || r.wallet === null || (LP.mode === 4 && (amt > r.room || r.room <= 0))) ? " bad" : ""}`;
+  $("lp-note").className = `lp-note${note && (!before.known || after.hf < 1.2 || r.wallet === null || (LP.mode === 4 && (amt > r.room || r.room <= 0))) ? " bad" : ""}`;
 }
 
 for (const b of document.querySelectorAll("[data-lp]")) {
@@ -3485,9 +3543,9 @@ $("lp-amount").addEventListener("input", lpPreview);
 $("lp-max").onclick = () => {
   const r = LP.reserves.find((x) => x.asset === lpSel());
   if (!r) return;
-  let m = lpSafeMax(r);
-  // When supplying/repaying XLM a little XLM stays in the wallet for transaction fees and the account reserve.
-  if (r.symbol === "XLM" && (LP.mode === 2 || LP.mode === 5)) m = Math.max(0, m - 2);
+  // When supplying/repaying XLM a little XLM stays in the wallet for transaction fees and the account reserve: it
+  // comes off the wallet budget, not off the debt, so a wallet that covers the debt still repays all of it (IORA-08).
+  const m = lpSafeMax(r, r.symbol === "XLM" && (LP.mode === 2 || LP.mode === 5) ? 2 : 0);
   const d = Math.max(0, Math.min(7, Number(r.decs ?? 7)));
   $("lp-amount").value = m > 0 ? (Math.floor(m * 10 ** d) / 10 ** d).toFixed(d).replace(/\.?0+$/, "") : "";
   lpPreview();
@@ -3501,6 +3559,7 @@ $("lp-go").onclick = async () => {
   if (b.length > r.decs) return log(`${r.symbol} supports at most ${r.decs} decimals.`, "err");
   const units = BigInt(a) * BigInt(r.scale) + BigInt(b.padEnd(r.decs, "0").slice(0, r.decs) || "0");
   const after = lpTotals(LP.reserves, { asset: r.asset, mode: LP.mode, amt: Number(raw) });
+  if ((LP.mode === 3 || LP.mode === 4) && !after.known) return log("Some prices or positions could not be read, so this can't be checked right now. Reload and try again.", "err");
   if ((LP.mode === 3 || LP.mode === 4) && after.hf < 1) return log("That would make your health factor drop below 1. Try a smaller amount.", "err");
   if (LP.mode === 4 && Number(raw) > r.room) {
     return log(
@@ -3592,7 +3651,9 @@ async function fundFriendbot() {
 // ---------------------------------------------------------------------------
 // Swap: XLM <-> USDC, Soroswap, with slippage protection
 // ---------------------------------------------------------------------------
-const SW = { dir: "xu", slip: 1, out: null, t: null };
+// q: the last quote, an immutable snapshot (swap-quote.js); req: the id of the newest quote request (older answers
+// are thrown away); preparing: the Swap button is getting a fresh quote, the inputs are locked meanwhile.
+const SW = { dir: "xu", slip: 1, out: null, t: null, q: null, req: 0, preparing: false };
 const swPath = () => (SW.dir === "xu" ? [BASE.addr, C.usdc] : [C.usdc, BASE.addr]);
 function swSyms() {
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
@@ -3611,6 +3672,8 @@ function swSyms() {
 }
 function quoteSwap() {
   clearTimeout(SW.t);
+  if (SW.preparing) return; // the Swap button's own quote is in flight; the inputs are locked
+
   SW.t = setTimeout(doQuote, 250);
 }
 // ----- Market swaps go to the venue that quotes the most: Soroswap's pool or an Aquarius pool -----
@@ -3906,70 +3969,89 @@ $("swap-route").onclick = () => {
 // The quote is asked again every 10 seconds while the Market tab is open with an amount in it.
 setInterval(() => {
   const input = $("swap-in");
-  if (document.hidden || busy || !me || !input.offsetParent || !String(input.value).trim()) return;
+  if (document.hidden || busy || SW.preparing || !me || !input.offsetParent || !String(input.value).trim()) return;
   doQuote();
 }, 10_000);
 
+/** What is on screen now, in the shape quoteMismatch() compares against. */
+function swCurrent() {
+  const raw = String($("swap-in").value).trim().replace(",", ".");
+  const [sell, buy] = swPath();
+  return { sell, buy, dir: SW.dir, amount: /^\d+(\.\d{0,7})?$/.test(raw) && Number(raw) > 0 ? toUnits(raw) : null, slip: SW.slip, wallet: me, requestId: SW.req };
+}
+/**
+ * Asks for a quote and returns it as an immutable snapshot (or null). Every call starts a new request; an answer
+ * that arrives after a newer request was started is ignored (audit IORA-01).
+ */
 async function doQuote() {
+  const id = ++SW.req;
+  SW.q = null;
   swSyms();
   const raw = String($("swap-in").value).trim().replace(",", ".");
   const note = $("swap-note");
   note.textContent = "";
   note.className = "lp-note";
   SW.out = null;
+  SW.venue = null;
   if (!/^\d+(\.\d{0,7})?$/.test(raw) || Number(raw) <= 0 || !me) {
     $("swap-out").textContent = "0";
     $("swap-rate").textContent = "—";
     $("swap-min").textContent = "—";
     showRoute(null);
     $("swap-impact").textContent = "";
-    return;
+    return null;
   }
   const amt = toUnits(raw);
+  const dir = SW.dir, slip = SW.slip, wallet = me;
   const [tin, tout] = swPath();
-  const [q, aq] = await Promise.all([read(C.router, "router_get_amounts_out", [i128(amt), addrVec(swPath())]), aquaBest(tin, tout, amt).catch(() => null)]);
+  const [q, aq] = await Promise.all([read(C.router, "router_get_amounts_out", [i128(amt), addrVec([tin, tout])]), aquaBest(tin, tout, amt).catch(() => null)]);
+  if (id !== SW.req) return null; // a newer request was started meanwhile
   const soro = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
   if (soro === null && !aq) {
     $("swap-out").textContent = "0";
     note.textContent = "No quote right now. The pool may be too small for this amount.";
     note.className = "lp-note bad";
-    SW.venue = null;
-    return;
+    return null;
   }
   // The venue that pays more gets the swap.
-  SW.venue = aq && (soro === null || aq.out > soro) ? { name: "Aquarius", hash: aq.hash } : { name: "Soroswap" };
-  let out = SW.venue.name === "Aquarius" ? aq.out : soro;
+  let route = aq && (soro === null || aq.out > soro) ? { name: "Aquarius", hash: aq.hash } : { name: "Soroswap" };
+  let out = route.name === "Aquarius" ? aq.out : soro;
   // A split over several pools is used only when it clearly beats the best single pool (it costs a little more network fee).
   const split = aq && soro !== null ? await bestSplit(tin, tout, amt).catch(() => null) : null;
+  if (id !== SW.req) return null;
   // Where the swap goes: one pool, or several in the shares that pay the most.
   if (split && split.out * 10000n > out * 10005n) {
-    SW.venue = { name: "split", parts: split.parts, text: split.text };
+    route = { name: "split", parts: split.parts, text: split.text };
     showRoute(split.parts.map((p) => ({ venue: p.src.venue, share: Number((p.amount * 1000n) / amt) / 10 })));
     out = split.out;
-  } else showRoute([{ venue: SW.venue.name, share: 100 }]);
+  } else showRoute([{ venue: route.name, share: 100 }]);
+  const snap = makeQuote({ sell: tin, buy: tout, dir, amount: amt, out, slip, route, wallet, requestId: id });
+  SW.q = snap;
+  SW.venue = snap.route;
   SW.out = out;
-  const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
+  const [a, b] = dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   $("swap-out").textContent = (Number(out) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 });
   const rate = Number(out) / Number(amt);
   SW.rate = { a, b, rate };
   showRate();
   // How far this trade's price is from the price of a small trade (the cost of the size itself).
-  const spot = SW.dir === "xu" ? SV.mkt || (marketPrice ? marketPrice : null) : marketPrice ? 1 / marketPrice : null;
+  const spot = dir === "xu" ? SV.mkt || (marketPrice ? marketPrice : null) : marketPrice ? 1 / marketPrice : null;
   const impact = spot ? (rate / spot - 1) * 100 : null;
   $("swap-impact").textContent = impact === null || !Number.isFinite(impact) ? "" : `Price impact ${impact > -0.005 ? "0.00" : impact.toFixed(2)}%`;
   $("swap-impact").classList.toggle("bad", impact !== null && impact < -3);
-  const min = (out * BigInt(Math.round((100 - SW.slip) * 100))) / 10000n;
+  const min = snap.minOut;
   $("swap-min").textContent = `${(Number(min) / 1e7).toLocaleString("en-US", { maximumFractionDigits: 4 })} ${b}`;
-  const bal = SW.dir === "xu" ? walletXlm : walletUsdc;
-  if (SW.dir === "xu" && walletUsdc === null) {
+  const bal = dir === "xu" ? walletXlm : walletUsdc;
+  if (dir === "xu" && walletUsdc === null) {
     note.innerHTML = 'Add a USDC trustline first on <a href="#faucet">Test funds</a>.';
     note.className = "lp-note bad";
   } else if (bal !== null && amt > bal) {
     note.textContent = `That's more than your ${fmt(bal, 2)} ${a}.`;
     note.className = "lp-note bad";
-  } else if (SW.dir === "xu" && walletXlm !== null && walletXlm - amt < BASE_KEEP) {
+  } else if (dir === "xu" && walletXlm !== null && walletXlm - amt < BASE_KEEP) {
     note.textContent = "Keep a few XLM for network fees and reserves.";
   }
+  return snap;
 }
 $("swap-in").addEventListener("input", quoteSwap);
 $("swap-flip").onclick = () => {
@@ -4054,45 +4136,60 @@ $("slip-own").addEventListener("keydown", (e) => {
   }
 });
 if (slipSaved() !== 1) queueMicrotask(() => setSlip(slipSaved(), { save: false }));
+// While the Swap button gets its fresh quote and the wallet is asked, the amount, slippage and Max controls are
+// locked; a direction change (Buy/Sell navigation) still cancels the quote, and nothing is signed then.
+const SW_LOCK = "#swap-in, #swap-max, #swap-flip, #slip-own, #slip-chips button, #swap-pct input, #swap-pct button, #swap-go";
+function swLock(on) {
+  for (const el of document.querySelectorAll(SW_LOCK)) el.disabled = on;
+}
 $("swap-go").onclick = async () => {
+  if (SW.preparing) return;
   if (!(await needWallet())) return;
   const raw = String($("swap-in").value).trim().replace(",", ".");
-  const amt = toUnitsSafe(raw);
-  if (amt === null) return;
-  await doQuote();
-  if (SW.out === null) return log("No quote available for this amount.", "err");
-  const min = (SW.out * BigInt(Math.round((100 - SW.slip) * 100))) / 10000n;
-  const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
-  const deadline = Math.floor(Date.now() / 1000) + 600;
-  const [tin, tout] = swPath();
-  const res =
-    SW.venue && SW.venue.name === "split"
-      ? await call(
-          FILLER,
-          "swap_from",
-          [addr(me), new Address(tin).toScVal(), new Address(tout).toScVal(), i128(amt), i128(min), xdr.ScVal.scvVec(SW.venue.parts.map((p) => p.src.step(p.amount)))],
-          `Swap ${fmt(amt, 2)} ${a} to ${b} (${SW.venue.text})`,
-          { 1: "The price moved more than your slippage setting allows. Nothing was swapped; try again." },
-        )
-      : SW.venue && SW.venue.name === "Aquarius"
-      ? await call(
-          AQUA_ROUTER,
-          "swap",
-          [addr(me), aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(SW.venue.hash), u128(amt), u128(min)],
-          `Swap ${fmt(amt, 2)} ${a} to ${b} on Aquarius`,
-          {},
-        )
-      : await call(
-          C.router,
-          "swap_exact_tokens_for_tokens",
-          [i128(amt), i128(min), addrVec(swPath()), addr(me), u64(deadline)],
-          `Swap ${fmt(amt, 2)} ${a} to ${b}`,
-          {},
-        );
-  if (res) {
-    $("swap-in").value = "";
-    doQuote();
+  if (toUnitsSafe(raw) === null) return;
+  SW.preparing = true;
+  swLock(true);
+  try {
+    const q = await doQuote();
+    if (!q) return log("No quote available for this amount.", "err");
+    // Everything that is signed comes from this one snapshot, and only while it still matches the screen.
+    const why = quoteMismatch(q, swCurrent());
+    if (why) return log(`The trade changed while the quote was loading (${why}). Nothing was sent; check the new quote and press the button again.`, "err");
+    const bad = routeProblem(q);
+    if (bad) return log(`This quote can't be used (${bad}). Nothing was sent; try again.`, "err");
+    const { sell: tin, buy: tout, amount: amt, minOut: min, route } = q;
+    const [a, b] = q.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
+    const deadline = Math.floor(Date.now() / 1000) + 600;
+    const res =
+      route.name === "split"
+        ? await call(
+            FILLER,
+            "swap_from",
+            [addr(q.wallet), new Address(tin).toScVal(), new Address(tout).toScVal(), i128(amt), i128(min), xdr.ScVal.scvVec(route.parts.map((p) => p.src.step(p.amount)))],
+            `Swap ${fmt(amt, 2)} ${a} to ${b} (${route.text})`,
+            { 1: "The price moved more than your slippage setting allows. Nothing was swapped; try again." },
+          )
+        : route.name === "Aquarius"
+        ? await call(
+            AQUA_ROUTER,
+            "swap",
+            [addr(q.wallet), aquaTokens(tin, tout), new Address(tin).toScVal(), new Address(tout).toScVal(), xdr.ScVal.scvBytes(route.hash), u128(amt), u128(min)],
+            `Swap ${fmt(amt, 2)} ${a} to ${b} on Aquarius`,
+            {},
+          )
+        : await call(
+            C.router,
+            "swap_exact_tokens_for_tokens",
+            [i128(amt), i128(min), addrVec([tin, tout]), addr(q.wallet), u64(deadline)],
+            `Swap ${fmt(amt, 2)} ${a} to ${b}`,
+            {},
+          );
+    if (res) $("swap-in").value = "";
+  } finally {
+    SW.preparing = false;
+    swLock(false);
   }
+  doQuote();
 };
 
 
@@ -4592,10 +4689,10 @@ async function checkOutTrust() {
       const account = await server.getAccount(me);
       const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASS }).addOperation(Operation.changeTrust({ asset: new Asset(sym, issuer) })).setTimeout(180).build();
       log(`${esc(sym)} trustline: waiting for wallet approval…`, "wait");
-      const r = await signAndSend(tx);
+      const r = await signAndSend(tx, `${sym} trustline`);
       log(`${esc(sym)} trustline added · <a href="${EXPLORER}/tx/${r.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
     } catch (e) {
-      log(`Trustline: ${esc(e.message)}`, "err");
+      log(`Trustline: ${safeErr(e.message)}`, "err");
     } finally {
       busy = false;
       await checkOutTrust();

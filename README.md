@@ -4,8 +4,9 @@
 
 Iora is a non-custodial limit order app on Stellar (Soroban). You place a limit order as you would on an exchange. Until
 the order fills, the funds behind it are supplied to a [Blend](https://blend.capital) lending pool and earn interest.
-When the price reaches your limit, your vault withdraws from Blend, swaps along the route that returns the most and
-keeps the result, all in one atomic transaction.
+When the price reaches your limit, your vault withdraws from Blend, swaps and keeps the result, all in one atomic
+transaction. Iora's keeper compares the routes it knows and takes the one that returns the most; the contract itself
+guarantees only your limit.
 
 - App (testnet): **https://iorafi.com/app.html**
 - Website and docs: https://iorafi.com · https://iorafi.com/docs.html
@@ -47,8 +48,10 @@ What the contract enforces on every fill:
   from and the address that receives the fill fee. The tokens, the recipient and the limit were fixed when the owner
   signed the order.
 - **A filler is trusted with nothing.** The most it ever holds is the amount being filled, inside one transaction.
-- **The fill fee comes from the surplus.** The executor receives at most a fixed cap per fill, and only out of output
-  above the owner's limit. At exactly the limit the fee is zero.
+- **The fill fee comes from the surplus.** The vault pays the executor at most a fixed cap per fill, and only out of
+  output above the owner's limit. At exactly the limit the fee is zero. This does not cap what a filler can gain: it
+  can fill exactly at the limit and keep the price improvement itself (see [Security](#security)). Passing price
+  improvement on to the owner is keeper behaviour, not a contract guarantee.
 - **Only allowed tokens.** Orders may only use tokens on the factory's allowed list, so nobody can be tricked into
   signing an order that buys a fake token.
 
