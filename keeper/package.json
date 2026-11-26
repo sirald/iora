@@ -9,6 +9,6 @@
     "@stellar/stellar-sdk": "^17.4.0"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test"
   }
 }
