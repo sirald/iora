@@ -474,3 +474,88 @@ export const isNear = (ratio, nearPct) => ratio === null || ratio >= 1 - nearPct
 export function scanIntervalMs({ near, eventsOk, idleMs }) {
   return near || !eventsOk ? 0 : idleMs;
 }
+
+// ---------------------------------------------------------------------------
+// Crossing: bounded work per scan (IORA-06)
+// ---------------------------------------------------------------------------
+
+/**
+ * Picks the crossing candidates for this scan: vaults in turn starting at `cursor`, at most `perVault` orders of
+ * each and at most `max` in all. `groups` is [[vault, orders[]], ...] (each vault's orders already in its own turn).
+ * Returns { list, nextCursor }; the cursor moves on by the vaults used, so a large book is covered over several scans.
+ */
+export function takeCandidates(groups, cursor = 0, { max = 200, perVault = 12 } = {}) {
+  const n = groups.length;
+  const list = [];
+  let used = 0;
+  for (let i = 0; i < n && list.length < max; i++) {
+    const orders = groups[(cursor + i) % n][1];
+    list.push(...orders.slice(0, Math.min(perVault, max - list.length)));
+    used = i + 1;
+  }
+  return { list, nextCursor: n ? (cursor + used) % n : 0 };
+}
+
+/**
+ * The crossing pairs to try, lazily: for each order a (starting at `offset` and wrapping), the opposite orders b in
+ * other vaults whose limits overlap, most generous first, at most `perOrder` per a; each pair once. Opposite orders
+ * are found through an index by direction, so the work is about list size x perOrder, not list size squared.
+ * `limitOf(x)` gives the order's limit (BigInt); two limits overlap when la * lb >= scale * scale.
+ * `isUsed(key)` is asked as pairs are produced (an order crossed earlier in the same pass is skipped).
+ * Yields { a, b, index } (index: a's position in `list`).
+ */
+export function* crossPairs(list, { offset = 0, perOrder = 2, scale = 10_000_000n, isUsed = () => false } = {}) {
+  const n = list.length;
+  if (n < 2) return;
+  const byDir = new Map();
+  for (const o of list) {
+    const k = `${o.tin}|${o.tout}`;
+    if (!byDir.has(k)) byDir.set(k, []);
+    byDir.get(k).push(o);
+  }
+  for (const g of byDir.values()) g.sort((p, q) => (q.limit > p.limit ? 1 : q.limit < p.limit ? -1 : 0));
+  const seen = new Set();
+  const need = scale * scale;
+  for (let i = 0; i < n; i++) {
+    const index = (((offset % n) + n) % n + i) % n;
+    const a = list[index];
+    if (isUsed(a.key)) continue;
+    const opp = byDir.get(`${a.tout}|${a.tin}`);
+    if (!opp) continue;
+    let given = 0;
+    for (const b of opp) {
+      if (given >= perOrder) break;
+      if (a.limit * b.limit < need) break; // sorted most generous first: no later b overlaps either
+      if (b.vault === a.vault || isUsed(b.key)) continue;
+      const pk = a.key < b.key ? `${a.key}|${b.key}` : `${b.key}|${a.key}`;
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      given++;
+      yield { a, b, index };
+      if (isUsed(a.key)) break; // a was just crossed
+    }
+  }
+}
+
+/** A work budget for one pass: pairs tried, price quotes and time. */
+export class WorkBudget {
+  constructor({ pairs = 10, quotes = 24, ms = 4000 } = {}, now = Date.now()) {
+    this.max = { pairs, quotes, ms };
+    this.start = now;
+    this.pairs = 0;
+    this.quotes = 0;
+  }
+
+  /** May one more pair (needing up to `quotes` price quotes) start now? */
+  canStart(quotes = 0, now = Date.now()) {
+    return this.pairs < this.max.pairs && this.quotes + quotes <= this.max.quotes && now - this.start < this.max.ms;
+  }
+
+  pair() {
+    this.pairs++;
+  }
+
+  quote(n = 1) {
+    this.quotes += n;
+  }
+}

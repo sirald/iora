@@ -6,7 +6,7 @@ name: keeper
 on:
   schedule:
     - cron: "*/5 * * * *"   # scan and fill (GitHub may delay scheduled runs by a few minutes)
-    - cron: "17 3 * * *"    # once a day: also extend storage TTL of vaults and orders
+    - cron: "17 3 * * *"    # an extra run at the daily TTL time (any run after 03:15 UTC can do the day's TTL)
   workflow_dispatch:
     inputs:
       ttl:
@@ -15,8 +15,10 @@ on:
         default: false
 
 # Scans and the daily TTL run share ONE group: they use the same key, and two runs at once would collide on
-# sequence numbers. A queued TTL run can be displaced by a newer queued scan; that is why the scan that starts
-# between 03:15 and 03:19 UTC also extends TTL (see "Scan and fill").
+# sequence numbers (IORA-07). In one group GitHub keeps one running and one waiting run and a newer waiting run
+# replaces an older one, so a waiting TTL run can be dropped. The day's TTL upkeep therefore does not depend on one
+# particular run: the first run after 03:15 UTC that finds no "done today" marker in the Actions cache does it, and
+# the marker is saved only when that run succeeds (a failed TTL round makes keeper.js exit 2: the next run tries again).
 concurrency:
   group: keeper
   cancel-in-progress: false
@@ -41,14 +43,27 @@ jobs:
           node-version: 22
       - name: Install
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Today (UTC)
+        id: day
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Was today's TTL upkeep done?
+        id: ttl
+        uses: actions/cache@v4
+        with:
+          path: keeper/.ttl-done
+          key: keeper-ttl-${{ steps.day.outputs.date }}
       - name: Scan and fill
         env:
           KEEPER_SECRET: ${{ secrets.KEEPER_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TTL_DONE_TODAY: ${{ steps.ttl.outputs.cache-hit }}
         run: |
           if [ -z "$KEEPER_SECRET" ]; then echo "KEEPER_SECRET secret is not set"; exit 1; fi
           FLAGS="--once"
           HM=$(date -u +%H%M)
-          if [ "${{ github.event.schedule }}" = "17 3 * * *" ] || [ "${{ inputs.ttl }}" = "true" ] || { [ "$HM" -ge 0315 ] && [ "$HM" -lt 0320 ]; }; then FLAGS="$FLAGS --ttl"; fi
+          if [ "${{ inputs.ttl }}" = "true" ] || { [ "$TTL_DONE_TODAY" != "true" ] && [ "$HM" -ge 0315 ]; }; then FLAGS="$FLAGS --ttl"; fi
+          echo "flags: $FLAGS (TTL done today: ${TTL_DONE_TODAY:-false})"
           node keeper.js $FLAGS
+          # reached only if keeper.js succeeded; the cache step saves this marker at the end of a successful job
+          case "$FLAGS" in *--ttl*) date -u > .ttl-done ;; esac

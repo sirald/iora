@@ -40,7 +40,9 @@ import {
   Aimd,
   RpcUsage,
   TokenBucket,
+  WorkBudget,
   acquireLock,
+  crossPairs,
   forgetOrder,
   inclusionFeeFrom,
   isBadSeq,
@@ -53,6 +55,7 @@ import {
   rpcList,
   rpsList,
   scanIntervalMs,
+  takeCandidates,
   transientRpc,
   withinFeeCap,
   xlmToStroops,
@@ -138,6 +141,17 @@ const RPC_429_SWITCH_AFTER = Math.max(1, Number(cfg.RPC_429_SWITCH_AFTER || 3));
 // or changed order starts a full scan at once. SCAN_IDLE_SEC=0 scans every ledger as before.
 const SCAN_IDLE_SEC = cfg.SCAN_IDLE_SEC === undefined || cfg.SCAN_IDLE_SEC === "" ? 30 : Math.max(0, Number(cfg.SCAN_IDLE_SEC) || 0);
 const SCAN_NEAR_PCT = Number(cfg.SCAN_NEAR_PCT || 2);
+// ----- crossing work limits (IORA-06) -----
+// Per scan: at most CROSS_MAX_CANDIDATES orders (CROSS_PER_VAULT per vault, vaults in turn), CROSS_PER_ORDER partners
+// for each, and at most CROSS_MAX_PAIRS pairs / CROSS_MAX_QUOTES price quotes / CROSS_MAX_MS in all. A pair costs up
+// to 4 quotes and 1 transaction; at the 4/s RPC limit 24 quotes are ~6 s, so a crowded book cannot hold up the pool
+// pass, the heartbeat or TTL upkeep. What does not fit goes on in the next scans.
+const CROSS_MAX_CANDIDATES = Math.max(2, Number(cfg.CROSS_MAX_CANDIDATES || 200));
+const CROSS_PER_VAULT = Math.max(1, Number(cfg.CROSS_PER_VAULT || MAX_ORDERS_PER_VAULT));
+const CROSS_PER_ORDER = Math.max(1, Number(cfg.CROSS_PER_ORDER || 2));
+const CROSS_MAX_PAIRS = Math.max(1, Number(cfg.CROSS_MAX_PAIRS || 10));
+const CROSS_MAX_QUOTES = Math.max(4, Number(cfg.CROSS_MAX_QUOTES || 24));
+const CROSS_MAX_MS = Math.max(500, Number(cfg.CROSS_MAX_MS || 4000));
 const RPC_TIMEOUT_MS = Number(cfg.RPC_TIMEOUT_MS || 12_000);
 const TX_TIMEOUT_SEC = 120;
 const TTL_EVERY_SEC = 24 * 3600;
@@ -2248,7 +2262,7 @@ function crossAmounts(a, b, p) {
   return null;
 }
 
-async function tryCross(a, b) {
+async function tryCross(a, b, budget = null) {
   const lo = (SCALE * SCALE + b.limit - 1n) / b.limit; // the least X per Y that b accepts
   const hi = a.limit; // the most X per Y that a pays
   if (lo > hi) return "no";
@@ -2257,6 +2271,7 @@ async function tryCross(a, b) {
   // What would the pool give each side for these amounts?
   let qa = await quote(amt.x, a.tin, a.tout);
   let qb = await quote(amt.y, b.tin, b.tout);
+  if (budget) budget.quote(2);
   if (qa !== null && qb !== null && qa > 0n && qb > 0n) {
     let mid = ((amt.x * SCALE) / qa + (qb * SCALE) / amt.y) / 2n; // the pool's middle price for these amounts
     if (mid < lo) mid = lo;
@@ -2266,6 +2281,7 @@ async function tryCross(a, b) {
       amt = again;
       qa = await quote(amt.x, a.tin, a.tout);
       qb = await quote(amt.y, b.tin, b.tout);
+      if (budget) budget.quote(2);
     }
     // Each side must do at least as well as in the pool; if not, the pool pass fills it at the better price.
     if ((qa !== null && amt.y < qa) || (qb !== null && amt.x < qb)) return "pool";
@@ -2333,11 +2349,16 @@ async function tryCross(a, b) {
 const crossKey = (a, b) => (a.key < b.key ? `x:${a.key}|${b.key}` : `x:${b.key}|${a.key}`);
 
 /** Looks for opposite orders that can fill each other and sends the crosses. Returns how many crosses went through. */
+// The work is bounded (IORA-06): at most CROSS_MAX_CANDIDATES orders (CROSS_PER_VAULT per vault, vaults in turn),
+// CROSS_PER_ORDER partners per order, and per scan at most CROSS_MAX_PAIRS pairs, CROSS_MAX_QUOTES price quotes and
+// CROSS_MAX_MS. Where it stops, the next scan goes on (rotating vault cursor and order offset), so the pool pass,
+// the heartbeat and TTL upkeep always get their turn.
+const crossState = { cursor: 0, offset: 0, lastCut: 0 };
 async function crossPass(vaults) {
   crossedNow.clear();
   if (!CROSS) return 0;
   const now = Math.floor(Date.now() / 1000);
-  const list = [];
+  const groups = [];
   for (const v of vaults) {
     const st = book.get(v);
     if (!st || !st.open.length || !st.orders) continue;
@@ -2348,7 +2369,11 @@ async function crossPass(vaults) {
       continue;
     }
     if (!pc.v10) continue;
-    for (const id of st.open) {
+    const mine = [];
+    // each vault's orders in turn, so a vault with more than CROSS_PER_VAULT orders is covered over several scans
+    const ids = st.open.length ? [...st.open.slice((st.crossTurn || 0) % st.open.length), ...st.open.slice(0, (st.crossTurn || 0) % st.open.length)] : [];
+    st.crossTurn = ((st.crossTurn || 0) + CROSS_PER_VAULT) % Math.max(1, st.open.length);
+    for (const id of ids) {
       const o = st.orders.get(id);
       const key = `${v}:${id}`;
       if (!o || closed.has(key)) continue;
@@ -2358,45 +2383,58 @@ async function crossPass(vaults) {
       if (now > Number(o.expiry)) continue;
       const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
       if (remaining <= 0n) continue;
-      list.push({ vault: v, o, key, tin: String(o.sell), tout: String(o.buy), remaining, limit: BigInt(o.limit_price), minFill: BigInt(o.min_fill), fees: pc.fees });
+      mine.push({ vault: v, o, key, tin: String(o.sell), tout: String(o.buy), remaining, limit: BigInt(o.limit_price), minFill: BigInt(o.min_fill), fees: pc.fees });
     }
+    if (mine.length) groups.push([v, mine]);
   }
+  const { list, nextCursor } = takeCandidates(groups, crossState.cursor, { max: CROSS_MAX_CANDIDATES, perVault: CROSS_PER_VAULT });
+  crossState.cursor = nextCursor;
   if (list.length < 2) return 0;
   const used = new Set();
-  const tried = new Set();
+  const skipA = new Set(); // the network did not take a cross for this order: its other partners wait for the next ledger
+  const budget = new WorkBudget({ pairs: CROSS_MAX_PAIRS, quotes: CROSS_MAX_QUOTES, ms: CROSS_MAX_MS });
   let done = 0;
-  for (const a of list) {
-    if (used.has(a.key)) continue;
-    // Opposite orders in other vaults whose limit overlaps a's (a.limit * b.limit >= 1 in 7-decimal units), the most generous first.
-    const opposite = list
-      .filter((b) => !used.has(b.key) && b.vault !== a.vault && b.tin === a.tout && b.tout === a.tin && a.limit * b.limit >= SCALE * SCALE)
-      .sort((p, q) => (q.limit > p.limit ? 1 : q.limit < p.limit ? -1 : 0));
-    if (opposite.length) proximity.near = true; // two orders could fill each other: keep scanning on every ledger
-    for (const b of opposite) {
-      const pk = a.key < b.key ? `${a.key}|${b.key}` : `${b.key}|${a.key}`;
-      if (tried.has(pk)) continue;
-      tried.add(pk);
-      const held = stuck.get(`x:${a.key}|${b.key}`) || stuck.get(`x:${b.key}|${a.key}`);
-      if (held && scanNo < held.until) continue;
-      if (failGuard.pausedUntil(crossKey(a, b))) continue;
-      let res;
-      try {
-        res = await tryCross(a, b);
-      } catch (e) {
-        log(`ERROR cross ${short(a.vault)} #${a.o.id} x ${short(b.vault)} #${b.o.id}: ${e.message}`);
-        continue;
-      }
-      if (res === "crossed") {
-        used.add(a.key);
-        used.add(b.key);
-        done++;
-        break;
-      }
-      if (res === "busy") break;
+  let lastIndex = null;
+  let cut = false;
+  for (const { a, b, index } of crossPairs(list, { offset: crossState.offset, perOrder: CROSS_PER_ORDER, scale: SCALE, isUsed: (k) => used.has(k) })) {
+    proximity.near = true; // two orders could fill each other: keep scanning on every ledger
+    if (skipA.has(a.key)) continue;
+    const held = stuck.get(`x:${a.key}|${b.key}`) || stuck.get(`x:${b.key}|${a.key}`);
+    if (held && scanNo < held.until) continue;
+    if (failGuard.pausedUntil(crossKey(a, b))) continue;
+    if (!budget.canStart(4)) {
+      cut = true;
+      break;
     }
+    budget.pair();
+    lastIndex = index;
+    let res;
+    try {
+      res = await tryCross(a, b, budget);
+    } catch (e) {
+      log(`ERROR cross ${short(a.vault)} #${a.o.id} x ${short(b.vault)} #${b.o.id}: ${e.message}`);
+      continue;
+    }
+    if (res === "crossed") {
+      used.add(a.key);
+      used.add(b.key);
+      done++;
+    }
+    if (res === "busy") skipA.add(a.key);
   }
+  // The next scan starts after the last order that got a try (all orders get their turn over several scans).
+  crossState.offset = lastIndex === null ? 0 : (lastIndex + 1) % list.length;
+  if (cut && Date.now() - crossState.lastCut > 10 * 60_000) {
+    crossState.lastCut = Date.now();
+    log(
+      `crossing: work limit reached (${budget.pairs} pairs, ${budget.quotes} quotes, ${Date.now() - budget.start} ms; ` +
+        `${list.length} candidates); the rest goes on in the next scans`,
+    );
+  }
+  crossStats = { candidates: list.length, pairs: budget.pairs, quotes: budget.quotes, cut };
   return done;
 }
+let crossStats = null;
 
 // ---------------------------------------------------------------------------
 // TTL upkeep: so that entries left untouched for a long time are not archived
@@ -2458,7 +2496,34 @@ async function factoryTtlJobs() {
   return jobs;
 }
 
+// TTL upkeep record for status.json and alerts (IORA-04): jobs done and failed, in the current round and in all.
+const ttlStats = { ok: 0, failed: 0, roundFailed: 0, lastError: null, lastFailAt: 0 };
+let ttlJobs = []; // the current round's jobs (continuous mode), one done per scan
+const ttlJobsLeft = () => ttlJobs.length;
+
+/** Runs one TTL job; returns true if the entries were extended. A failure is counted, logged and alerted. */
 async function runTtlJob(job) {
+  let ok = false;
+  let why = "";
+  try {
+    const r = await ttlJob(job);
+    ok = r.ok;
+    why = r.error || "";
+  } catch (e) {
+    why = e.message || String(e);
+  }
+  if (ok) ttlStats.ok++;
+  else {
+    ttlStats.failed++;
+    ttlStats.roundFailed++;
+    ttlStats.lastError = `${job.kind === "factory" ? `factory ${short(job.f)}` : `vault ${short(job.vault)}`}: ${why}`.slice(0, 300);
+    ttlStats.lastFailAt = Date.now();
+    await notify(`TTL extension failed (${ttlStats.lastError}). Entries left unextended can be archived.`, { topic: "ttl-fail", everySec: 6 * 3600 });
+  }
+  return ok;
+}
+
+async function ttlJob(job) {
   if (job.kind === "factory") {
     const args = job.chain
       ? [u32(job.bucket), optAddr(job.from), u32(40)]
@@ -2468,7 +2533,7 @@ async function runTtlJob(job) {
     const r = await write(job.f, "extend_ttl", args);
     const where = job.chain ? (job.from ? short(job.from) : "head") : job.start;
     log(`TTL factory ${short(job.f)} ${job.bucket === undefined ? "" : `bucket ${job.bucket} `}${where}..: ${r.ok ? "ok" : errText(r)}`);
-    return;
+    return { ok: !!r.ok, error: r.ok ? "" : errText(r) };
   }
   const v = job.vault;
   try {
@@ -2489,7 +2554,7 @@ async function runTtlJob(job) {
       for (const k of await footprintOf(v, m, a)) seen.set(keyId(k), k);
     }
     const keys = [...seen.values()];
-    if (keys.length === 0) return;
+    if (keys.length === 0) return { ok: false, error: "no entries found (the simulation of get_config failed)" };
     const r = await serialized(async () => {
       const account = await accountFor(kp);
       const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASSPHRASE })
@@ -2500,15 +2565,21 @@ async function runTtlJob(job) {
       return submit(await server.prepareTransaction(tx));
     });
     log(`TTL ${short(v)} (${keys.length} entries): ${r.ok ? `ok, fee ${r.fee !== null ? fmt(r.fee) : "?"} XLM` : r.error}`);
+    return { ok: !!r.ok, error: r.ok ? "" : r.error };
   } catch (e) {
     log(`TTL ${short(v)} error: ${e.message}`);
+    return { ok: false, error: e.message };
   }
 }
 
 /** --once mode (GitHub Actions): everything in one go. */
 async function extendTtlAll(vaults) {
+  ttlStats.roundFailed = 0;
   for (const job of await factoryTtlJobs()) await runTtlJob(job);
   for (const vault of vaults) await runTtlJob({ kind: "vault", vault });
+  if (ttlStats.roundFailed === 0) lastTtl = Date.now();
+  log(`TTL round done: ${ttlStats.roundFailed} failed`);
+  return ttlStats.roundFailed === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2683,6 +2754,14 @@ function writeStatus() {
           crosses: CROSS ? crossFills : "off",
           skipped_by_local_estimate: localSkips,
           last_ttl: lastTtl ? new Date(lastTtl).toISOString() : null,
+          // TTL upkeep (IORA-04): off when the keeper runs without --ttl; the age of the last full round without failures
+          ttl_enabled: DO_TTL,
+          last_ttl_age_h: lastTtl ? Math.round((now - lastTtl) / 360_000) / 10 : null,
+          ttl_jobs_left: ttlJobsLeft(),
+          ttl_ok_total: ttlStats.ok,
+          ttl_failed_total: ttlStats.failed,
+          ttl_failed_this_round: ttlStats.roundFailed,
+          ttl_last_error: ttlStats.lastError,
         },
         null,
         2,
@@ -2790,8 +2869,12 @@ async function main() {
       log(`round ${round}: ${last.vaults.length} vaults, ${last.open} open orders, ${last.filled} fills`);
       if (last.filled === 0) break;
     }
-    if (DO_TTL && last) await extendTtlAll(last.vaults);
+    if (DO_TTL && last && !(await extendTtlAll(last.vaults))) process.exitCode = 2; // the day's TTL is not done
+    writeStatus();
     return;
+  }
+  if (!DO_TTL) {
+    log("WARNING TTL upkeep is OFF (started without --ttl): quiet vaults and orders are not extended and can be archived. Start with: node keeper.js --ttl");
   }
   await ensureFeeTrustline();
   if (WORKERS > 0) {
@@ -2803,7 +2886,7 @@ async function main() {
   const prevStatus = readStatus();
   const prevTtl = Date.parse(prevStatus.last_ttl || prevStatus.son_ttl || ""); // son_ttl: older status.json files
   if (Number.isFinite(prevTtl)) lastTtl = prevTtl;
-  let ttlJobs = [];
+  ttlJobs = [];
   let saidResetAt = Date.now();
   await notify(
     `Started. ${FACTORIES.length > 1 ? "Several factories" : "One factory"}, ` +
@@ -2820,13 +2903,22 @@ async function main() {
       }
       // TTL upkeep must not hold up scanning: a job list is prepared once a day and worked through
       // one job at a time in rounds without a fill.
-      if (DO_TTL && s.filled === 0) {
+      // With the adaptive interval a job runs every SCAN_IDLE_SEC while idle (a round of ~25 jobs takes ~15 min)
+      // and on every ledger without a fill while an order is near its limit; all its requests go through the RPC
+      // rate limit like any other. If fills keep every round busy for a day, TTL runs anyway (overdue).
+      const ttlOverdue = Date.now() - lastTtl > 2 * TTL_EVERY_SEC * 1000;
+      if (DO_TTL && (s.filled === 0 || ttlOverdue)) {
         if (ttlJobs.length === 0 && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
           ttlJobs = [...(await factoryTtlJobs()), ...s.vaults.map((vault) => ({ kind: "vault", vault }))];
+          ttlStats.roundFailed = 0;
           if (ttlJobs.length === 0) lastTtl = Date.now();
         } else if (ttlJobs.length > 0) {
           await runTtlJob(ttlJobs.shift());
-          if (ttlJobs.length === 0) lastTtl = Date.now();
+          if (ttlJobs.length === 0) {
+            // A round with failures is tried again in an hour instead of a day.
+            lastTtl = ttlStats.roundFailed === 0 ? Date.now() : Date.now() - TTL_EVERY_SEC * 1000 + 3600_000;
+            log(`TTL round done: ${ttlStats.roundFailed} failed${ttlStats.roundFailed ? "; the round is repeated in 1 hour" : ""}`);
+          }
         }
       }
       failedScansInRow = 0;

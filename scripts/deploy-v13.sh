@@ -24,8 +24,9 @@ fi
 
 echo "===== 1) Build and tests (can take a few minutes) ====="
 bash scripts/test.sh > /dev/null 2>&1
+TEST_STATUS=$?
 grep -E "test result|Wasm Size|^error" test-result.txt
-if grep -qE "FAILED|^error|panicked" test-result.txt || [ "$(grep -c 'test result: ok' test-result.txt)" -lt 2 ]; then
+if [ "$TEST_STATUS" -ne 0 ] || grep -qE "FAILED|^error|panicked" test-result.txt || [ "$(grep -c 'test result: ok' test-result.txt)" -lt 2 ]; then
   echo
   echo "TESTS FAILED, nothing was deployed. See test-result.txt:"
   echo "  cat test-result.txt"

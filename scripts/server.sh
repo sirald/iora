@@ -37,11 +37,19 @@ cd /opt/iora/keeper && { npm ci --omit=dev --no-audit --no-fund >/dev/null 2>&1 
 chown -R iora:iora /opt/iora/keeper /opt/iora/testnet
 [ -f /opt/iora/keeper/.env ] && chmod 600 /opt/iora/keeper/.env
 systemctl restart iora-keeper
+# Deployment check (IORA-04): the service must run with --ttl. Only checked and reported, never changed here.
+if systemctl cat iora-keeper 2>/dev/null | grep -E '^ExecStart=.*keeper\.js' | grep -q -- '--ttl'; then
+  echo "service check: TTL upkeep is on (--ttl)"
+else
+  echo 'WARNING service check: iora-keeper runs WITHOUT --ttl: quiet vaults and orders are not extended and can be archived.'
+  echo '  Fix: add --ttl to the ExecStart line of /etc/systemd/system/iora-keeper.service, then: systemctl daemon-reload && systemctl restart iora-keeper'
+fi
 REMOTE
 }
 
 status() {
   $SSH 'printf "%-12s %s\n" iora-keeper "$(systemctl is-active iora-keeper 2>/dev/null)"
+        systemctl cat iora-keeper 2>/dev/null | grep -E "^ExecStart=" | sed "s/^/service     /"
         journalctl -u iora-keeper -n 12 --no-pager -o cat 2>/dev/null | cut -c1-200
         echo "--- memory"; free -m | sed -n 2,3p'
 }
@@ -105,7 +113,8 @@ ReadWritePaths=$3
 WantedBy=multi-user.target
 UNIT
 }
-unit iora-keeper "Iora keeper"      /opt/iora/keeper      /etc/iora/keeper.env keeper.js
+# --ttl: the keeper also extends the lifetime of quiet vault and order entries (without it they get archived).
+unit iora-keeper "Iora keeper"      /opt/iora/keeper      /etc/iora/keeper.env "keeper.js --ttl"
 systemctl daemon-reload
 systemctl enable -q iora-keeper
 echo "node $(node -v)"
