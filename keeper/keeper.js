@@ -517,6 +517,9 @@ function readTx(contractId, method, callArgs) {
 const failGuard = new FailureGuard({ threshold: FAIL_PAUSE_AFTER, pauseMs: FAIL_PAUSE_HOURS * 3600_000 });
 const feeBudget = new FeeBudget({ perHour: xlmToStroops(MAX_FEE_XLM_PER_HOUR), perRound: xlmToStroops(MAX_FEE_XLM_PER_ROUND) });
 const MAX_FEE_STROOPS = xlmToStroops(MAX_FEE_XLM);
+// TTL upkeep pays rent (a vault's code entry alone can cost a few XLM for 30 days), so it has its own, higher cap.
+const MAX_TTL_FEE_XLM = Number(cfg.MAX_TTL_FEE_XLM || 10);
+const MAX_TTL_FEE_STROOPS = xlmToStroops(MAX_TTL_FEE_XLM);
 let feeStatsCache = { at: 0, fee: Number(BASE_FEE) };
 
 /** The inclusion fee to bid now (stroops): from getFeeStats, kept for 30 s; BASE_FEE when the stats cannot be read. */
@@ -659,14 +662,15 @@ async function sendAndFollow(tx, hash, maxFee) {
  * a bad sequence number, the fee cap or the budget); it is tried again on a later ledger.
  * onchain=true: the transaction got on chain and FAILED there: its fee was paid.
  */
-async function submit(tx, signer = kp) {
+async function submit(tx, signer = kp, { ttl = false } = {}) {
   const maxFee = Number(tx.fee);
-  if (!withinFeeCap(maxFee, MAX_FEE_STROOPS)) {
+  if (!withinFeeCap(maxFee, ttl ? MAX_TTL_FEE_STROOPS : MAX_FEE_STROOPS)) {
+    const capName = ttl ? `MAX_TTL_FEE_XLM=${MAX_TTL_FEE_XLM}` : `MAX_FEE_XLM=${MAX_FEE_XLM}`;
     return {
       ok: false,
       retry: true,
       feeCap: true,
-      error: `the transaction would cost up to ${fmt(BigInt(maxFee))} XLM, above MAX_FEE_XLM=${MAX_FEE_XLM}; not sent`,
+      error: `the transaction would cost up to ${fmt(BigInt(maxFee))} XLM, above ${capName}; not sent`,
     };
   }
   const why = feeBudget.blockReason(maxFee);
@@ -2562,7 +2566,7 @@ async function ttlJob(job) {
         .addOperation(Operation.extendFootprintTtl({ extendTo: 30 * DAY_IN_LEDGERS }))
         .setTimeout(TX_TIMEOUT_SEC)
         .build();
-      return submit(await server.prepareTransaction(tx));
+      return submit(await server.prepareTransaction(tx), kp, { ttl: true });
     });
     log(`TTL ${short(v)} (${keys.length} entries): ${r.ok ? `ok, fee ${r.fee !== null ? fmt(r.fee) : "?"} XLM` : r.error}`);
     return { ok: !!r.ok, error: r.ok ? "" : r.error };
@@ -2856,7 +2860,7 @@ async function main() {
       `else every ${SCAN_IDLE_SEC} s; idle vaults re-read every ${SWEEP_EVERY_SEC} s`,
   );
   log(
-    `fee protection: MAX_FEE_XLM=${MAX_FEE_XLM} per transaction, MAX_FEE_XLM_PER_HOUR=${MAX_FEE_XLM_PER_HOUR}, ` +
+    `fee protection: MAX_FEE_XLM=${MAX_FEE_XLM} per transaction (TTL upkeep: MAX_TTL_FEE_XLM=${MAX_TTL_FEE_XLM}), MAX_FEE_XLM_PER_HOUR=${MAX_FEE_XLM_PER_HOUR}, ` +
       `MAX_FEE_XLM_PER_ROUND=${MAX_FEE_XLM_PER_ROUND}, pause after ${FAIL_PAUSE_AFTER} on-chain failures for ${FAIL_PAUSE_HOURS} h, inclusion fee ${FEE_PERCENTILE}`,
   );
   if (!TG_TOKEN || !TG_CHAT) {
