@@ -285,3 +285,192 @@ export function forgetOrder(key, maps) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// RPC rate limiting: token bucket per server, AIMD on HTTP 429, Retry-After
+// ---------------------------------------------------------------------------
+
+/** RPC_MAX_RPS: one number for every server, or a comma list in server order (the last value repeats). */
+export function rpsList(spec, n, fallback) {
+  const vals = String(spec ?? "")
+    .split(",")
+    .map((x) => Number(x.trim()))
+    .filter((x) => Number.isFinite(x) && x > 0);
+  if (!vals.length) return Array.from({ length: n }, () => fallback);
+  return Array.from({ length: n }, (_, i) => vals[Math.min(i, vals.length - 1)]);
+}
+
+/**
+ * A token bucket that also works as a FIFO queue: take() always takes a token and says how long the caller must
+ * wait before using it (0 = now). Tokens may go negative; each later caller waits its turn behind the earlier ones.
+ * The rate can change at any time (AIMD below).
+ */
+export class TokenBucket {
+  constructor(rate, burst = Math.max(1, rate), now = Date.now()) {
+    this.rate = rate; // tokens per second
+    this.burst = burst;
+    this.tokens = burst;
+    this.at = now;
+  }
+
+  _refill(now) {
+    if (now > this.at) {
+      this.tokens = Math.min(this.burst, this.tokens + ((now - this.at) / 1000) * this.rate);
+      this.at = now;
+    }
+  }
+
+  /** Takes one token; returns the wait in ms before the request may go out. */
+  take(now = Date.now()) {
+    this._refill(now);
+    this.tokens -= 1;
+    if (this.tokens >= 0 && this.at <= now) return 0;
+    // the moment the bucket is back at zero: from `at` (which is in the future after drain()), at `rate`
+    return Math.max(0, Math.ceil(this.at + (Math.max(0, -this.tokens) / this.rate) * 1000 - now));
+  }
+
+  /** Nothing goes out before `until`, and no tokens build up meanwhile (after a 429: no burst when it ends). */
+  drain(until) {
+    this.tokens = Math.min(this.tokens, 0);
+    this.at = Math.max(this.at, until);
+  }
+
+  setRate(rate, now = Date.now()) {
+    this._refill(now);
+    this.rate = rate;
+  }
+}
+
+/**
+ * Additive increase, multiplicative decrease: a 429 halves the rate (not below `min`); after `holdMs` without a 429
+ * the rate grows back by `stepPerSec` every second, up to `max`.
+ */
+export class Aimd {
+  constructor(max, { min = Math.min(0.5, max), stepPerSec = max / 60, holdMs = 30_000 } = {}) {
+    this.max = max;
+    this.min = min;
+    this.stepPerSec = stepPerSec;
+    this.holdMs = holdMs;
+    this.cur = max;
+    this.cutAt = -Infinity;
+    this.at = 0;
+  }
+
+  /** The rate allowed now. */
+  rate(now = Date.now()) {
+    if (this.cur < this.max) {
+      const from = Math.max(this.at, this.cutAt + this.holdMs);
+      if (now > from) {
+        this.cur = Math.min(this.max, this.cur + ((now - from) / 1000) * this.stepPerSec);
+        this.at = now;
+      }
+    }
+    return this.cur;
+  }
+
+  /** A 429 came back: halve the rate (several 429s within one second count once). */
+  cut(now = Date.now()) {
+    this.rate(now);
+    if (now - this.cutAt < 1000) return this.cur;
+    this.cur = Math.max(this.min, this.cur / 2);
+    this.cutAt = now;
+    this.at = now;
+    return this.cur;
+  }
+}
+
+/** The Retry-After of an HTTP error in ms (seconds or an HTTP date), capped at maxMs; null when absent/unreadable. */
+export function retryAfterMs(e, now = Date.now(), maxMs = 60_000) {
+  const h = e && e.response && e.response.headers;
+  if (!h) return null;
+  const raw = typeof h.get === "function" ? h.get("retry-after") : (h["retry-after"] ?? h["Retry-After"]);
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const s = String(raw).trim();
+  let ms;
+  if (/^\d+(\.\d+)?$/.test(s)) ms = Number(s) * 1000;
+  else {
+    const t = Date.parse(s);
+    if (!Number.isFinite(t)) return null;
+    ms = t - now;
+  }
+  return Math.max(0, Math.min(maxMs, Math.round(ms)));
+}
+
+export const isRateLimited = (e) => !!(e && e.response && e.response.status === 429);
+
+// ---------------------------------------------------------------------------
+// RPC usage counter: requests per server and per method over the last full minute
+// ---------------------------------------------------------------------------
+
+export class RpcUsage {
+  constructor(now = Date.now()) {
+    this.start = now;
+    this.cur = { servers: new Map(), methods: new Map(), rateLimited: 0, waitedMs: 0 };
+    this.last = null; // the last complete minute
+  }
+
+  _roll(now) {
+    if (now - this.start < 60_000) return;
+    // A gap of several idle minutes: the last complete minute is the empty one just before now.
+    this.last = now - this.start < 120_000 ? this.cur : { servers: new Map(), methods: new Map(), rateLimited: 0, waitedMs: 0 };
+    this.cur = { servers: new Map(), methods: new Map(), rateLimited: 0, waitedMs: 0 };
+    this.start = now - ((now - this.start) % 60_000);
+  }
+
+  count(server, method, now = Date.now()) {
+    this._roll(now);
+    this.cur.servers.set(server, (this.cur.servers.get(server) || 0) + 1);
+    this.cur.methods.set(method, (this.cur.methods.get(method) || 0) + 1);
+  }
+
+  rateLimited(now = Date.now()) {
+    this._roll(now);
+    this.cur.rateLimited++;
+  }
+
+  waited(ms, now = Date.now()) {
+    this._roll(now);
+    this.cur.waitedMs += ms;
+  }
+
+  /** The last complete minute: { per_server: {url: n}, top_methods: [[method, n] x5], total, rate_limited, waited_ms }. */
+  lastMinute(now = Date.now()) {
+    this._roll(now);
+    const m = this.last;
+    if (!m) return null;
+    const total = [...m.servers.values()].reduce((a, b) => a + b, 0);
+    return {
+      total,
+      per_server: Object.fromEntries(m.servers),
+      top_methods: [...m.methods].sort((a, b) => b[1] - a[1]).slice(0, 5),
+      rate_limited: m.rateLimited,
+      waited_ms: m.waitedMs,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive scan interval
+// ---------------------------------------------------------------------------
+
+/**
+ * How close an order is to filling: output it would get now / output its limit needs (1 = exactly at the limit).
+ * Null when either is unknown.
+ */
+export function limitRatio(q, need) {
+  if (q === null || q === undefined || need === null || need === undefined) return null;
+  const n = Number(need);
+  if (!(n > 0)) return null;
+  return Number(q) / n;
+}
+
+/** True when the order is within `nearPct` percent of its limit (or past it). An unknown ratio counts as near. */
+export const isNear = (ratio, nearPct) => ratio === null || ratio >= 1 - nearPct / 100;
+
+/**
+ * The time to wait between full scans: every ledger (0) while any order is near its limit (or could cross, or is
+ * due, or events cannot be read), `idleMs` otherwise.
+ */
+export function scanIntervalMs({ near, eventsOk, idleMs }) {
+  return near || !eventsOk ? 0 : idleMs;
+}

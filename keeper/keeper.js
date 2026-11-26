@@ -37,13 +37,22 @@ import {
   FailureGuard,
   FeeBudget,
   RpcPicker,
+  Aimd,
+  RpcUsage,
+  TokenBucket,
   acquireLock,
   forgetOrder,
   inclusionFeeFrom,
   isBadSeq,
+  isNear,
+  isRateLimited,
+  limitRatio,
   pickSequence,
+  retryAfterMs,
   rpcFailReason,
   rpcList,
+  rpsList,
+  scanIntervalMs,
   transientRpc,
   withinFeeCap,
   xlmToStroops,
@@ -108,8 +117,27 @@ const minFillFor = (token) => (!token || token === USDC || token === XLM ? MIN_F
 // At most this many vaults are read in parallel; transactions (sign + send) always go one at a time per account.
 const SCAN_CONCURRENCY = Math.max(1, Number(cfg.SCAN_CONCURRENCY || 4));
 // Vaults with no open order are not read on every scan (thousands of empty vaults would otherwise slow every
-// scan down). They are read when an order_placed event names them, and in a rotating sweep of this many per scan.
+// scan down). They are read when an order event names them, and in a slow sweep: while events can be read, each
+// idle vault is read again at most every SWEEP_EVERY_SEC (a safety net for a missed event), at most SWEEP_PER_SCAN
+// per scan. Without events the old rotating sweep of SWEEP_PER_SCAN vaults per scan is used.
 const SWEEP_PER_SCAN = Math.max(1, Number(cfg.SWEEP_PER_SCAN || 40));
+const SWEEP_EVERY_SEC = Number(cfg.SWEEP_EVERY_SEC || 300);
+// ----- RPC request rate -----
+// Requests per second per RPC server (token bucket; RPC_MAX_RPS is one number or a comma list in server order).
+// 4/s: a scan now needs about 1 request per second on average (see keeper-tur3-rpc notes), so 4/s leaves room for
+// bursts (a fill is 3-6 requests) while staying well under what public RPCs allow one IP; the gateway answered 429
+// at the old ~5/s average with 1-s bursts of 20+. A request over the limit waits in line; it never counts as a failure.
+const RPC_MAX_RPS = rpsList(cfg.RPC_MAX_RPS, RPC_URLS.length, 4);
+const RPC_BURST = Math.max(1, Number(cfg.RPC_BURST || 8));
+// An HTTP 429 halves that server's rate (AIMD) and waits (Retry-After if given); only after RPC_429_SWITCH_AFTER
+// 429s in a row does the keeper move to the next server.
+const RPC_429_SWITCH_AFTER = Math.max(1, Number(cfg.RPC_429_SWITCH_AFTER || 3));
+// ----- adaptive scan interval (SCAN_MODE=ledger) -----
+// While no open order is within SCAN_NEAR_PCT percent of its limit (and none can cross, none is due), a full scan
+// runs only every SCAN_IDLE_SEC; between them only the order events are read on each ledger (2 requests), and a new
+// or changed order starts a full scan at once. SCAN_IDLE_SEC=0 scans every ledger as before.
+const SCAN_IDLE_SEC = cfg.SCAN_IDLE_SEC === undefined || cfg.SCAN_IDLE_SEC === "" ? 30 : Math.max(0, Number(cfg.SCAN_IDLE_SEC) || 0);
+const SCAN_NEAR_PCT = Number(cfg.SCAN_NEAR_PCT || 2);
 const RPC_TIMEOUT_MS = Number(cfg.RPC_TIMEOUT_MS || 12_000);
 const TX_TIMEOUT_SEC = 120;
 const TTL_EVERY_SEC = 24 * 3600;
@@ -275,7 +303,31 @@ function accountKey(address) {
 // awaited). The SDK has no per-call signal, so the signal reaches its HTTP client through AsyncLocalStorage and a
 // request interceptor.
 const rpcCallCtx = new AsyncLocalStorage();
+// What a request is for, for the usage counter ("simulate:get_order" instead of just "simulateTransaction").
+const rpcLabelCtx = new AsyncLocalStorage();
 const rpcPicker = new RpcPicker(RPC_URLS.length, { baseMs: RPC_RETRY_BASE_SEC * 1000, maxMs: RPC_RETRY_MAX_SEC * 1000 });
+const rpcUsage = new RpcUsage();
+// Per server: a token bucket for the request rate, AIMD on 429s, and the count of 429s in a row.
+const rpcLimits = RPC_URLS.map((u, i) => ({
+  bucket: new TokenBucket(RPC_MAX_RPS[i], Math.max(RPC_BURST, 1)),
+  aimd: new Aimd(RPC_MAX_RPS[i], { min: Math.min(0.5, RPC_MAX_RPS[i]), stepPerSec: RPC_MAX_RPS[i] / 120, holdMs: 30_000 }),
+  in429: 0, // 429s in a row
+  blockedAt: 0, // when the last 429 pause began: 429s for requests sent before it do not count as "in a row"
+  saidAt: 0,
+}));
+
+/** Waits for this server's turn under its rate limit (time spent here never counts towards the RPC timeout). */
+async function rpcTurn(lim) {
+  for (let i = 0; i < 5; i++) {
+    const now = Date.now();
+    lim.bucket.setRate(lim.aimd.rate(now), now);
+    const wait = lim.bucket.take(now);
+    if (wait <= 0) return;
+    rpcUsage.waited(wait);
+    await sleep(wait);
+    if (Date.now() >= lim.bucket.at) return; // no 429 pause began while waiting
+  }
+}
 
 function makeServer(urls) {
   const servers = urls.map((u) => {
@@ -290,7 +342,26 @@ function makeServer(urls) {
 
   async function call(name, args) {
     let lastErr;
+    const label = rpcLabelCtx.getStore() || name;
     for (const idx of rpcPicker.order()) {
+      const r = await callOn(idx, name, args, label);
+      if (r.ok) return r.value;
+      lastErr = r.error;
+      if (!r.next) throw r.error;
+    }
+    throw lastErr;
+  }
+
+  /**
+   * One server: waits for its rate limit, sends, and on HTTP 429 slows down and waits on the SAME server (Retry-After
+   * when given). Returns { ok, value } or { ok: false, error, next } (next: try the next server).
+   */
+  async function callOn(idx, name, args, label) {
+    const lim = rpcLimits[idx];
+    for (;;) {
+      await rpcTurn(lim);
+      const sentAt = Date.now();
+      rpcUsage.count(urls[idx], label, sentAt);
       const ac = new AbortController();
       let timer;
       try {
@@ -304,23 +375,45 @@ function makeServer(urls) {
             }, RPC_TIMEOUT_MS);
           }),
         ]);
+        lim.in429 = 0;
         const moved = rpcPicker.success(idx);
         if (moved === "primary") log(`RPC: back on the first server ${urls[0]}`);
         else if (moved === "switched") {
           const wait = Math.max(0, Math.round((rpcPicker.retryAt - Date.now()) / 1000));
           log(`RPC: switched to ${urls[idx]} (${rpcPicker.lastError || "the previous server failed"}); the first server is tried again in ${wait} s`);
         }
-        return res;
+        return { ok: true, value: res };
       } catch (e) {
-        lastErr = e;
-        if (!transientRpc(e)) throw e;
+        if (isRateLimited(e)) {
+          // Too many requests: slow this server down and wait; this is not a reason to leave it.
+          const now = Date.now();
+          rpcUsage.rateLimited(now);
+          if (sentAt >= lim.blockedAt) lim.in429++; // 429s of requests already in flight count once
+          const rate = lim.aimd.cut(now);
+          const ra = retryAfterMs(e, now);
+          const pause = ra ?? Math.min(1000 * 2 ** (lim.in429 - 1), 10_000);
+          lim.blockedAt = now;
+          lim.bucket.drain(now + pause);
+          if (now - lim.saidAt > 60_000) {
+            lim.saidAt = now;
+            log(
+              `RPC: ${urls[idx]} answered HTTP 429 (too many requests): rate lowered to ${rate.toFixed(2)}/s, ` +
+                `waiting ${Math.round(pause / 1000)} s${ra !== null ? " (Retry-After)" : ""}; ${lim.in429}/${RPC_429_SWITCH_AFTER} in a row`,
+            );
+          }
+          if (lim.in429 < RPC_429_SWITCH_AFTER) continue; // same server, after the pause
+          lim.in429 = 0;
+          rpcPicker.failure(idx, `${urls[idx]} HTTP 429 ${RPC_429_SWITCH_AFTER} times in a row`);
+          return { ok: false, error: e, next: true };
+        }
+        if (!transientRpc(e)) return { ok: false, error: e, next: false };
         rpcPicker.failure(idx, `${urls[idx]} ${rpcFailReason(e)}`);
+        return { ok: false, error: e, next: true };
       } finally {
         clearTimeout(timer);
         ac.abort(); // nothing may stay in flight after the call is over
       }
     }
-    throw lastErr;
   }
 
   async function getAccount(address) {
@@ -455,10 +548,26 @@ async function liveTx(contractId, method, callArgs, signer = kp) {
 }
 
 /** Simulation only: a free read. */
+// The same read within one scan is asked of the network once (the chain only changes from ledger to ledger). The
+// memo is emptied at the start of every scan and after every transaction of ours that went through; a read that
+// throws (network error) is not kept.
+const readMemo = new Map();
+let readMemoHits = 0;
 async function read(contractId, method, callArgs = []) {
-  const sim = await server.simulateTransaction(readTx(contractId, method, callArgs));
-  if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
-  return { ok: true, value: sim.result ? scValToNative(sim.result.retval) : undefined };
+  const key = `${contractId}|${method}|${callArgs.map((a) => a.toXDR("base64")).join(",")}`;
+  const hit = readMemo.get(key);
+  if (hit) {
+    readMemoHits++;
+    return hit;
+  }
+  const p = rpcLabelCtx.run(`simulate:${method}`, async () => {
+    const sim = await server.simulateTransaction(readTx(contractId, method, callArgs));
+    if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
+    return { ok: true, value: sim.result ? scValToNative(sim.result.retval) : undefined };
+  });
+  readMemo.set(key, p);
+  p.catch(() => readMemo.delete(key));
+  return p;
 }
 
 /** The final result of a transaction found on chain, or null if it is not (yet) there. */
@@ -557,6 +666,7 @@ async function submit(tx, signer = kp) {
   const res = await sendAndFollow(tx, hash, maxFee);
   feeBudget.settle(held, res.charged ?? 0);
   if (res.ok || res.onchain) usedSeq.set(signer.publicKey(), tx.sequence);
+  if (res.ok || res.onchain) readMemo.clear(); // our own transaction changed the chain: no stale reads after it
   return res;
 }
 
@@ -983,10 +1093,19 @@ let eventLogAt = 0;
 const ORDER_TOPICS = ["order_placed", "order_filled", "order_cancelled"].map((n) => [xdr.ScVal.scvSymbol(n).toXDR("base64"), "*"]);
 let eventsOk = false; // true while the events of every ledger since the last scan have been read
 
+// The latest ledger, shared by the wait for the next ledger and the event reader (one request instead of two).
+let latestCache = { seq: 0, at: 0 };
+async function latestLedger(maxAgeMs = 0) {
+  if (latestCache.seq && Date.now() - latestCache.at <= maxAgeMs) return latestCache.seq;
+  const seq = (await server.getLatestLedger()).sequence;
+  latestCache = { seq, at: Date.now() };
+  return seq;
+}
+
 /** Marks the vaults that placed an order since the last scan. Any failure is harmless: the sweep finds them later. */
 async function collectPlaced(known) {
   try {
-    const latest = (await server.getLatestLedger()).sequence;
+    const latest = await latestLedger(2500);
     if (!eventLedger) {
       eventLedger = latest; // the first scan reads every vault anyway
       eventsOk = false;
@@ -1036,12 +1155,21 @@ async function vaultsToRead(all) {
     if (!seenVaults.has(v) || dirty.has(v) || (st && (st.more || (!eventsOk && st.open.length > 0)))) now.push(v);
     else idle.push(v);
   }
+  if (eventsOk) {
+    // Events tell us about every change: an untouched vault is only re-read as a safety net, every SWEEP_EVERY_SEC
+    // (oldest first). Before, every idle vault was read on every ledger (15 of the 17 vaults, ~3 requests/s).
+    const due = idle.filter((v) => Date.now() - (vaultReadAt.get(v) || 0) >= SWEEP_EVERY_SEC * 1000);
+    due.sort((a, b) => (vaultReadAt.get(a) || 0) - (vaultReadAt.get(b) || 0));
+    now.push(...due.slice(0, SWEEP_PER_SCAN));
+    return now;
+  }
   const n = Math.min(SWEEP_PER_SCAN, idle.length);
   if (sweepAt >= idle.length) sweepAt = 0;
   for (let i = 0; i < n; i++) now.push(idle[(sweepAt + i) % idle.length]);
   sweepAt = idle.length ? (sweepAt + n) % idle.length : 0;
   return now;
 }
+const vaultReadAt = new Map(); // vault -> when its orders were last read
 
 async function ordersToCheck(vault) {
   const st = book.get(vault) ?? { next: 0, open: [], cursor: 0 };
@@ -1738,6 +1866,13 @@ function candidates(remaining, floor, minFill = 0n) {
 }
 
 const stats = { fills: 0, failures: 0, lastError: null, feesStroop: 0n };
+// Per scan: which orders were checked and which are known to be far from filling (see SCAN_IDLE_SEC). An order
+// not marked far counts as near, so anything unsure keeps the keeper scanning on every ledger.
+const proximity = { checked: new Set(), far: new Set(), near: false };
+/** Marks the order far when the output it would get now is more than SCAN_NEAR_PCT below what its limit needs. */
+function noteDistance(key, q, need) {
+  if (!isNear(limitRatio(q, need), SCAN_NEAR_PCT)) proximity.far.add(key);
+}
 const lastNote = new Map();
 // "vault:id" -> { n, until }: an order that passes the pre-checks but keeps being rejected by the contract. The wait
 // doubles with each run of rejections (1, 2, 4 ... at most 60 rounds), so a stuck order does not waste RPC calls and log space.
@@ -1825,12 +1960,14 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   if (now > expiry) {
     // The computer's clock may be fast: an order is closed for good only after a 10-minute margin.
     if (now > expiry + 600) closed.add(key);
+    proximity.far.add(key);
     return waiting(vault, o, tag, BigInt(o.amount_in) - BigInt(o.filled_in), tin, "expired");
   }
   const remaining = BigInt(o.amount_in) - BigInt(o.filled_in);
   const held = stuck.get(key);
   if (held && scanNo < held.until) return "waiting";
   const pausedTill = failGuard.pausedUntil(key);
+  if (pausedTill) proximity.far.add(key);
   if (pausedTill) return waiting(vault, o, tag, remaining, tin, `paused after ${FAIL_PAUSE_AFTER} on-chain failures, until ${new Date(pausedTill).toISOString()}`);
   const limit = BigInt(o.limit_price);
   const minFill = BigInt(o.min_fill);
@@ -1839,6 +1976,8 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   // Scheduled order (DCA): nothing to do until the next part is due, and then exactly one part is filled.
   let sch = await scheduleOf(vault, o.id);
   if (sch && now >= sch.next + DCA_CLOCK_MARGIN_SEC) sch = await scheduleOf(vault, o.id, true); // someone else may have filled it
+  // A part due later than the idle interval does not need every-ledger scans; one due sooner does.
+  if (sch && sch.next + DCA_CLOCK_MARGIN_SEC - now > SCAN_IDLE_SEC) proximity.far.add(key);
   if (sch && now < sch.next + DCA_CLOCK_MARGIN_SEC) return waiting(vault, o, tag, remaining, tin, "scheduled order: the next part is not due yet");
   const part = remaining; // a scheduled order always holds exactly one part
   if (sch && part < minFillFor(tin)) return waiting(vault, o, tag, remaining, tin, "scheduled order: one part is below the smallest fill the keeper sends");
@@ -1858,6 +1997,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     const top = useVenues ? await venueEst(smallest, tin, tout) : null;
     if (top === null || (top * 1005n) / 1000n + 2n < minOut(smallest, limit)) {
       localSkips++;
+      noteDistance(key, top !== null && top > est ? top : est, minOut(smallest, limit));
       return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, top !== null && top > est ? top : est, limit));
     }
   }
@@ -1867,6 +2007,8 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   // with a single simulation; if it has not come ("no trigger" 16, "no oracle" 19), it waits without any price query.
   if (trigger > 0n) {
     const pre = await read(vault, "execute", execArgs(smallest));
+    // The oracle price changes every few minutes, not every ledger: a stop order waiting for it counts as far.
+    if (!pre.ok && (pre.code === 16 || pre.code === 19)) proximity.far.add(key);
     if (!pre.ok && pre.code === 16) return waiting(vault, o, tag, remaining, tin, "the trigger price (oracle) has not been reached yet");
     if (!pre.ok && pre.code === 19) return waiting(vault, o, tag, remaining, tin, "no oracle price available");
   }
@@ -1895,6 +2037,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     // so that an order waiting far from its limit does not cost a full route search on every ledger.
     const top = useVenues ? await venueEst(smallest, tin, tout) : null;
     const alt = top !== null && (top * 1005n) / 1000n + 2n >= minOut(smallest, limit) ? await venueRoute(smallest, tin, tout) : null;
+    if (!alt || alt.q < minOut(smallest, limit)) noteDistance(key, alt && alt.q > qSmall ? alt.q : qSmall, minOut(smallest, limit));
     if (!alt || alt.q < minOut(smallest, limit)) return waiting(vault, o, tag, remaining, tin, priceNoteFor(tin, tout, smallest, alt && alt.q > qSmall ? alt.q : qSmall, limit));
   }
 
@@ -2228,6 +2371,7 @@ async function crossPass(vaults) {
     const opposite = list
       .filter((b) => !used.has(b.key) && b.vault !== a.vault && b.tin === a.tout && b.tout === a.tin && a.limit * b.limit >= SCALE * SCALE)
       .sort((p, q) => (q.limit > p.limit ? 1 : q.limit < p.limit ? -1 : 0));
+    if (opposite.length) proximity.near = true; // two orders could fill each other: keep scanning on every ledger
     for (const b of opposite) {
       const pk = a.key < b.key ? `${a.key}|${b.key}` : `${b.key}|${a.key}`;
       if (tried.has(pk)) continue;
@@ -2371,10 +2515,15 @@ async function extendTtlAll(vaults) {
 // Main loop
 // ---------------------------------------------------------------------------
 
+// The keeper's own balance only matters for the low-balance alert: read once a minute, not on every scan.
+let balanceCache = { at: 0, value: null };
 async function keeperBalance() {
+  if (balanceCache.value !== null && Date.now() - balanceCache.at < 60_000) return balanceCache.value;
   try {
     const r = await read(XLM, "balance", [new Address(kp.publicKey()).toScVal()]);
-    return r.ok ? Number(BigInt(r.value)) / 1e7 : null;
+    const value = r.ok ? Number(BigInt(r.value)) / 1e7 : null;
+    balanceCache = { at: Date.now(), value };
+    return value;
   } catch {
     return null;
   }
@@ -2396,7 +2545,11 @@ async function scan() {
   const vaults = vaultCache.list;
   let open = 0;
   let filled = 0;
-  // 1) Refresh the order book of the vaults that need it (new, changed, or the rotating sweep).
+  readMemo.clear(); // reads are shared within a scan, never across scans
+  proximity.checked.clear();
+  proximity.far.clear();
+  proximity.near = false;
+  // 1) Refresh the order book of the vaults that need it (new, changed, or the slow sweep).
   await pool(await vaultsToRead(vaults), SCAN_CONCURRENCY, async (v) => {
     try {
       await ordersToCheck(v);
@@ -2405,6 +2558,7 @@ async function scan() {
       return;
     }
     seenVaults.add(v);
+    vaultReadAt.set(v, Date.now());
     dirty.delete(v);
   });
   // The fee budget: a new round starts; if the hourly budget is used up, this round only scans (no transactions).
@@ -2442,6 +2596,7 @@ async function scan() {
       }
       if (crossedNow.has(`${v}:${o.id}`)) return; // just filled by a cross; its cached copy is stale until the next scan
       if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // dust orders (not the last small piece of a larger order)
+      proximity.checked.add(`${v}:${o.id}`);
       try {
         const res = await tryOrder(v, o, ctx);
         if (res === "filled") filled++;
@@ -2453,6 +2608,7 @@ async function scan() {
       }
     };
     for (let i = 0; i < orders.length; i += width) {
+      if (ctx.net >= MAX_ORDERS_PER_VAULT || tries >= MAX_FILLS_PER_VAULT) proximity.near = true; // orders left unchecked
       if (ctx.net >= MAX_ORDERS_PER_VAULT) break; // network-checked orders per vault per scan
       if (tries >= MAX_FILLS_PER_VAULT) {
         log(`${short(v)}: ${MAX_FILLS_PER_VAULT} transactions tried in this round, the rest in the next one`);
@@ -2470,6 +2626,8 @@ async function scan() {
     });
     if (sent) log(`WARNING the keeper balance is low: ${balance} XLM`);
   }
+  // Is any order near enough to its limit to keep scanning on every ledger? (see SCAN_IDLE_SEC)
+  if (filled > 0 || [...proximity.checked].some((k) => !proximity.far.has(k))) proximity.near = true;
   lastScanInfo = { at: new Date().toISOString(), vaults: vaults.length, open, filled, balance };
   writeStatus();
   return { vaults, filled, open };
@@ -2485,6 +2643,7 @@ let failedScansInRow = 0;
 function writeStatus() {
   const s = lastScanInfo || {};
   const now = Date.now();
+  const usageNow = rpcUsage.lastMinute(now);
   try {
     fs.writeFileSync(
       STATUS_FILE,
@@ -2511,6 +2670,13 @@ function writeStatus() {
           rpc_consecutive_errors: rpcPicker.consecutiveErrors,
           rpc_last_error: rpcPicker.lastError,
           rpc_primary_retry_at: rpcPicker.cur !== 0 && rpcPicker.retryAt ? new Date(rpcPicker.retryAt).toISOString() : null,
+          // the last complete minute: total and per server, the 5 busiest methods, 429s, time waited for the limit
+          rpc_requests_per_min: usageNow ? { total: usageNow.total, ...usageNow.per_server } : null,
+          rpc_top_methods: usageNow ? usageNow.top_methods : null,
+          rpc_429_last_min: usageNow ? usageNow.rate_limited : null,
+          rpc_rate_wait_sec_last_min: usageNow ? Math.round(usageNow.waited_ms / 100) / 10 : null,
+          rpc_rate_per_sec: Object.fromEntries(RPC_URLS.map((u, i) => [u, `${rpcLimits[i].aimd.rate(now).toFixed(2)}/${RPC_MAX_RPS[i]}`])),
+          scan_interval: idleMode ? `${SCAN_IDLE_SEC} s` : "every ledger",
           keeper_balance_xlm: s.balance ?? null,
           sending_accounts: signers.length,
           batch_fills: BATCH ? `${batchFills} orders / ${batchTxs} transactions` : "off",
@@ -2606,6 +2772,11 @@ async function main() {
   process.on("exit", lock.release); // also on Ctrl+C / SIGTERM / fatal errors (they all end in process.exit)
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   log(
+    `RPC rate limit: ${RPC_URLS.map((u, i) => `${RPC_MAX_RPS[i]}/s`).join(", ")} (burst ${RPC_BURST}); a 429 halves the rate and waits, ` +
+      `${RPC_429_SWITCH_AFTER} in a row move to the next server. Scan: every ledger near a limit (${SCAN_NEAR_PCT}%), ` +
+      `else every ${SCAN_IDLE_SEC} s; idle vaults re-read every ${SWEEP_EVERY_SEC} s`,
+  );
+  log(
     `fee protection: MAX_FEE_XLM=${MAX_FEE_XLM} per transaction, MAX_FEE_XLM_PER_HOUR=${MAX_FEE_XLM_PER_HOUR}, ` +
       `MAX_FEE_XLM_PER_ROUND=${MAX_FEE_XLM_PER_ROUND}, pause after ${FAIL_PAUSE_AFTER} on-chain failures for ${FAIL_PAUSE_HOURS} h, inclusion fee ${FEE_PERCENTILE}`,
   );
@@ -2638,9 +2809,9 @@ async function main() {
     `Started. ${FACTORIES.length > 1 ? "Several factories" : "One factory"}, ` +
       (SCAN_MODE === "ledger" ? "scanning on every new ledger (~5 s)." : `scanning every ${INTERVAL_SEC} s.`),
   );
-  let lastLedger = 0;
   for (;;) {
     try {
+      lastScanStart = Date.now();
       const s = await scan();
       // Worker balances are checked once an hour.
       if (WORKERS > 0 && Date.now() - workersAt > 3600_000) {
@@ -2673,24 +2844,79 @@ async function main() {
       saidResetAt = Date.now();
       venueState.said.clear();
     }
+    if (Date.now() - usageLogAt >= 10 * 60_000) {
+      usageLogAt = Date.now();
+      logRpcUsage();
+    }
     if (SCAN_MODE !== "ledger") {
       await sleep(INTERVAL_SEC * 1000);
       continue;
     }
-    // Look once a second until a new ledger arrives (wait INTERVAL_SEC at most)
-    const t0 = Date.now();
+    // Every ledger while an order is near its limit; otherwise a full scan every SCAN_IDLE_SEC and, on each ledger
+    // in between, only the order events (a new or changed order starts a full scan at once).
+    const scanOk = failedScansInRow === 0;
+    const idleMs = scanIntervalMs({ near: !scanOk || proximity.near, eventsOk, idleMs: SCAN_IDLE_SEC * 1000 });
+    if ((idleMs > 0) !== idleMode) {
+      idleMode = idleMs > 0;
+      log(
+        idleMode
+          ? `scan interval: ${SCAN_IDLE_SEC} s (no open order within ${SCAN_NEAR_PCT}% of its limit); order events are still read on every ledger`
+          : `scan interval: every ledger (an order is within ${SCAN_NEAR_PCT}% of its limit, can cross, or is due)`,
+      );
+    }
+    const scanStarted = lastScanStart;
     for (;;) {
-      await sleep(1000);
-      try {
-        const l = await server.getLatestLedger();
-        if (l.sequence > lastLedger) {
-          lastLedger = l.sequence;
-          break;
-        }
-      } catch {}
-      if (Date.now() - t0 > INTERVAL_SEC * 1000) break;
+      await waitNextLedger(INTERVAL_SEC * 1000);
+      if (idleMs === 0 || Date.now() - scanStarted >= idleMs) break;
+      await collectPlaced(new Set(vaultCache.list));
+      if (dirty.size > 0 || !eventsOk) break; // something happened in a vault (or events failed): full scan now
     }
   }
+}
+
+let usageLogAt = Date.now();
+let idleMode = false;
+let lastScanStart = 0;
+let lastLedger = 0;
+let ledgerSeenAt = 0;
+const LEDGER_MS = 5000;
+
+/**
+ * Waits for the next ledger. It does not ask every second: it sleeps until the next ledger is due (~5 s after the
+ * last one was seen), then asks once a second until it is there (at most maxMs in all).
+ */
+async function waitNextLedger(maxMs) {
+  const t0 = Date.now();
+  const due = ledgerSeenAt ? ledgerSeenAt + LEDGER_MS : t0 + 1000;
+  await sleep(Math.max(250, Math.min(due - t0, maxMs)));
+  for (;;) {
+    try {
+      const seq = await latestLedger(0);
+      if (seq > lastLedger) {
+        lastLedger = seq;
+        ledgerSeenAt = Date.now();
+        return;
+      }
+    } catch {}
+    if (Date.now() - t0 > maxMs) return;
+    await sleep(1000);
+  }
+}
+
+/** One log line every 10 minutes: requests in the last minute per server, the busiest methods, 429s and waits. */
+function logRpcUsage() {
+  const u = rpcUsage.lastMinute();
+  if (!u) return;
+  const servers = Object.entries(u.per_server)
+    .map(([url, n]) => `${url.replace(/^https?:\/\//, "")}=${n}`)
+    .join(" ");
+  const top = u.top_methods.map(([m, n]) => `${m}=${n}`).join(" ");
+  const rates = RPC_URLS.map((url, i) => `${rpcLimits[i].aimd.rate().toFixed(1)}/${RPC_MAX_RPS[i]}`).join(" ");
+  log(
+    `RPC usage, last minute: ${u.total} requests (${servers || "none"}); top: ${top || "-"}; 429s: ${u.rate_limited}; ` +
+      `waited for the rate limit: ${(u.waited_ms / 1000).toFixed(1)} s; rate now/max per server: ${rates}; ` +
+      `reads served from the scan memo since start: ${readMemoHits}; scan interval: ${idleMode ? `${SCAN_IDLE_SEC} s` : "every ledger"}`,
+  );
 }
 
 // Say so once when stopped with Ctrl+C (the signal can come from both the window and iora.sh).
