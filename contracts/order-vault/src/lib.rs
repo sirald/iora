@@ -383,7 +383,8 @@ pub struct ExecFeePaid {
     pub amount: i128,
 }
 
-#[contractevent]
+// `sparse = false`: keep `feeder` in the event data when it is None (SDK 28+ would drop it; the event format stays as before).
+#[contractevent(sparse = false)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeederChanged {
     pub feeder: Option<Address>,

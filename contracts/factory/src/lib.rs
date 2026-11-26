@@ -13,7 +13,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, ContractExecutable,
     xdr::ToXdr, Address, BytesN, Env, Map, Vec,
 };
 
@@ -192,8 +192,8 @@ impl VaultFactory {
         let hkey = Key::Head(bucket);
         let head: Option<Head> = env.storage().persistent().get(&hkey);
         let me = env.current_contract_address();
-        let vault = env.deployer().with_current_contract(salt).deploy_v2(
-            cfg.vault_wasm_hash,
+        let vault = env.deployer().with_current_contract(salt).deploy_contract(
+            ContractExecutable::Wasm(cfg.vault_wasm_hash),
             (owner.clone(), cfg.pool, cfg.router, me, cfg.fees),
         );
 
