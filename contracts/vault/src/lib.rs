@@ -1,4 +1,14 @@
-//! Iora vault, version 13: ONE multi-asset vault per user.
+//! Iora vault, version 14: ONE multi-asset vault per user.
+//!
+//! New in version 14 (on top of version 13): the token list can no longer grow past MAX_TOKENS.
+//! - `forget` refuses a token that an open order buys (`TokenAwaited`). Before, the owner could take such a
+//!   token off the list, fill the free place with another token, and the old order's fill would then put the
+//!   first token back: 13 tokens. Now the token keeps its place until no open order buys it, so every fill of an
+//!   order that was valid when it was placed still has a place for its output.
+//! - The vault counts, per token, the open orders that buy it (`awaited`). The count rises when an order opens
+//!   (any kind, the reverse leg of a follow-up order included) and falls when it closes: filled, cancelled by the
+//!   owner, closed by anyone after its expiry, or a scheduled plan that ends. An expired order still counts until
+//!   it is closed with `cancel_order` (anyone may do that).
 //!
 //! New in version 13 (on top of version 12): an order can be filled through ANY trading venue, not only Soroswap.
 //! - `fill_via`: the vault sends the amount being filled to a separate "filler" contract, which sells it wherever
@@ -242,6 +252,8 @@ pub enum Error {
     TooEarly = 31,
     /// Scheduled order: the interval is outside the allowed range.
     InvalidSchedule = 33,
+    /// `forget`: an open order still buys the token (cancel or close the order first).
+    TokenAwaited = 34,
 }
 
 #[contracttype]
@@ -365,6 +377,8 @@ enum DataKey {
     FollowUp(u32),
     /// Schedule of a DCA order (by order id).
     Schedule(u32),
+    /// Number of open orders that buy this token (version 14). Removed when it drops to 0.
+    Awaited(Address),
 }
 
 #[contractevent]
@@ -710,6 +724,7 @@ impl Vault {
         order.status = OrderStatus::Cancelled;
         save_order(&env, order_id, &order);
         add_i128(&env, DataKey::Reserved(order.sell.clone()), -remaining);
+        add_awaited(&env, &order.buy, -1);
         bump_instance(&env);
         OrderCancelled { order_id, remaining }.publish(&env);
     }
@@ -953,12 +968,13 @@ impl Vault {
 
     /// Version of the vault code (keepers pick the `execute` signature from it).
     pub fn version(_env: Env) -> u32 {
-        13
+        14
     }
 
     /// The owner takes a token off the vault's list, freeing one of its MAX_TOKENS places. Only a token the
-    /// vault no longer holds (no balance, nothing reserved for an order) can be removed. If an open order later
-    /// delivers that token, it goes back on the list by itself.
+    /// vault no longer holds (no balance, nothing reserved for an order) and that no open order buys can be
+    /// removed (`TokenAwaited` otherwise; an expired order counts until it is closed with `cancel_order`).
+    /// So a token an open order will deliver always keeps its place, and the list never exceeds MAX_TOKENS.
     pub fn forget(env: Env, token: Address) {
         let cfg = config(&env);
         cfg.owner.require_auth();
@@ -972,6 +988,9 @@ impl Vault {
         if held > 0 || get_i128(&env, DataKey::Reserved(token.clone())) > 0 {
             panic_with_error!(&env, Error::TokenInUse);
         }
+        if awaited_of(&env, &token) > 0 {
+            panic_with_error!(&env, Error::TokenAwaited);
+        }
         list.remove(at);
         env.storage().instance().set(&DataKey::Tokens, &list);
         bump_instance(&env);
@@ -984,6 +1003,11 @@ impl Vault {
 
     pub fn reserved(env: Env, token: Address) -> i128 {
         get_i128(&env, DataKey::Reserved(token))
+    }
+
+    /// Number of open orders that buy `token` (while it is above 0, `forget` refuses the token).
+    pub fn awaited(env: Env, token: Address) -> u32 {
+        awaited_of(&env, &token)
     }
 
     /// Principal (deposited + received from orders, less withdrawn and spent).
@@ -1132,6 +1156,10 @@ fn settle(
                 add_i128(env, DataKey::Reserved(order.sell.clone()), s.part);
             }
         }
+        // The order (or the scheduled plan) has closed: it no longer buys its token.
+        if order.status != OrderStatus::Open {
+            add_awaited(env, &order.buy, -1);
+        }
     }
     save_order(env, order_id, &order);
     update_stats(env, &order.sell, |st| st.total_spent += fill_amount);
@@ -1146,7 +1174,8 @@ fn settle(
         Held { order_id, amount: out }.publish(env);
     }
     if kept {
-        // The owner may have taken the token off the list with `forget` while this order was open.
+        // Since version 14 the token is always on the list here (`forget` refuses a token an open order buys);
+        // this only guards the invariant that a held token is listed.
         ensure_listed(env, &order.buy);
         if reserve_of(env, cfg, &order.buy).is_some() {
             // If the supply fails (for example the reserve is disabled) the fill does not stop; the token waits idle in the vault.
@@ -1254,6 +1283,7 @@ fn write_order(
     save_order(env, id, &order);
     env.storage().instance().set(&DataKey::NextId, &(id + 1));
     add_i128(env, DataKey::Reserved(sell.clone()), amount_in);
+    add_awaited(env, buy, 1);
     bump_instance(env);
     OrderPlaced { order_id: id, sell: sell.clone(), buy: buy.clone(), amount_in, limit_price }.publish(env);
     id
@@ -1332,8 +1362,26 @@ fn touch(env: &Env, token: &Address) {
     env.storage().instance().set(&DataKey::Tokens, &list);
 }
 
-/// Puts a token back on the list without the count limit: an order delivers a token the owner removed with
-/// `forget`. Its decimals were checked when the order was placed.
+/// Number of open orders that buy `token`.
+fn awaited_of(env: &Env, token: &Address) -> u32 {
+    env.storage().instance().get(&DataKey::Awaited(token.clone())).unwrap_or(0)
+}
+
+/// Changes the count of open orders that buy `token` by +1 or -1; the entry is removed at 0 (keeps the
+/// vault's entry small).
+fn add_awaited(env: &Env, token: &Address, delta: i32) {
+    let key = DataKey::Awaited(token.clone());
+    let n = awaited_of(env, token) as i64 + delta as i64;
+    if n <= 0 {
+        env.storage().instance().remove(&key);
+    } else {
+        env.storage().instance().set(&key, &(n as u32));
+    }
+}
+
+/// Puts a token on the list without the count limit. Since version 14 a token an open order buys cannot be
+/// removed, so when a fill delivers it, it is already listed and this does nothing (before, `forget` could
+/// take it off and this put it back, past MAX_TOKENS).
 fn ensure_listed(env: &Env, token: &Address) {
     let mut list = token_list(env);
     if !list.contains(token) {
