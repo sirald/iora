@@ -26,7 +26,7 @@ source ../testnet/factory.env || { echo "testnet/factory.env not found"; exit 1;
 # The file says POOL and VENUE; it is read in a subshell so the Blend pool's POOL above is not overwritten.
 REF_POOL=""; REF_VENUE=""
 if [ -f ../testnet/ref-pool.env ]; then
-  REF_POOL=$( unset POOL; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${POOL:-}" )
+  REF_POOL=$( unset POOL REF_POOL; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${REF_POOL:-${POOL:-}}" )
   REF_VENUE=$( unset VENUE; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${VENUE:-}" )
 fi
 for v in FACTORY USDC XLM ROUTER POOL; do
