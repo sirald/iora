@@ -19,6 +19,13 @@ source ../testnet/factory.env
 [ -f ../testnet/filler.env ] && source ../testnet/filler.env
 # The one-approval vault move (iora-mover) and the testnet USDC exchange (old Blend test USDC -> Circle USDC)
 [ -f ../testnet/mover.env ] && source ../testnet/mover.env
+# Iora's reference pool (kept at the real price): the chart and "Best price" use it when the file is there.
+# The file says POOL and VENUE; it is read in a subshell so the Blend pool's POOL above is not overwritten.
+REF_POOL=""; REF_VENUE=""
+if [ -f ../testnet/ref-pool.env ]; then
+  REF_POOL=$( unset POOL; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${POOL:-}" )
+  REF_VENUE=$( unset VENUE; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${VENUE:-}" )
+fi
 cat > .env.local <<EOF
 VITE_RPC_URL=https://soroban-rpc.testnet.stellar.gateway.fm
 VITE_RPC_FALLBACK=https://soroban-testnet.stellar.org
@@ -38,6 +45,8 @@ VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_FILLER=${FILLER:-}
 VITE_MOVER=${MOVER:-}
 VITE_USDC_EXCHANGE=${USDC_EXCHANGE:-}
+VITE_REF_POOL=${REF_POOL}
+VITE_REF_VENUE=${REF_VENUE}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=${USDC_ISSUER:-GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5}
 EOF
@@ -49,8 +58,10 @@ if [ ! -d node_modules/vite ]; then
     || { tail -20 /tmp/gk-web-npm.log; echo "npm install failed"; exit 1; }
 fi
 
-if [ ! -d node_modules/@creit-tech/stellar-wallets-kit ]; then
-  npx --yes jsr add @creit-tech/stellar-wallets-kit >> /tmp/gk-web-npm.log 2>&1 || echo "Note: the multi-wallet library could not be installed (Freighter only)."
+# Multi-wallet support, as on the published site (IORA_KIT=0 turns it off); pinned to 2.7.1
+export IORA_KIT="${IORA_KIT:-1}"
+if [ "$IORA_KIT" = "1" ] && [ ! -d node_modules/@creit-tech/stellar-wallets-kit ]; then
+  npx --yes jsr add @creit-tech/stellar-wallets-kit@2.7.1 >> /tmp/gk-web-npm.log 2>&1 || echo "WARNING: the multi-wallet library could not be installed (Varial/Freighter only)."
 fi
 
 echo
