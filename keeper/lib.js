@@ -329,6 +329,14 @@ export class TokenBucket {
     return Math.max(0, Math.ceil(this.at + (Math.max(0, -this.tokens) / this.rate) * 1000 - now));
   }
 
+  /** The wait in ms a take() now would have to do, without taking anything. */
+  peek(now = Date.now()) {
+    const t = this.at <= now ? Math.min(this.burst, this.tokens + ((now - this.at) / 1000) * this.rate) : this.tokens;
+    const after = t - 1;
+    if (after >= 0 && this.at <= now) return 0;
+    return Math.max(0, Math.ceil(Math.max(this.at, now) + (Math.max(0, -after) / this.rate) * 1000 - now));
+  }
+
   /** Nothing goes out before `until`, and no tokens build up meanwhile (after a 429: no burst when it ends). */
   drain(until) {
     this.tokens = Math.min(this.tokens, 0);
@@ -623,3 +631,184 @@ export function cometMaxPrice(amountIn, minOut, factor, scale = 10_000_000n) {
  * misses in a row the fallback is used, so a venue that is broken for good cannot hold an order up.
  */
 export const retryRoute = (misses, max) => misses < max;
+
+// ---------------------------------------------------------------------------
+// Fill latency: timed stages per fill, and p50 / p90 over the last fills
+// ---------------------------------------------------------------------------
+
+/** The stages of one fill, in order. "ledger" is the moment the keeper saw the ledger that made the fill possible. */
+export const FILL_STAGES = ["event", "order", "quote", "sim", "sent", "included"];
+
+/**
+ * Times one fill from `t0` (when the keeper saw ledger `ledger` close: the ledger with the new order, or the one in
+ * which the price met the limit). Each stage keeps its first mark, in ms after t0.
+ */
+export class FillTimer {
+  constructor(t0, ledger) {
+    this.t0 = t0;
+    this.ledger = ledger;
+    this.marks = {};
+    this.includedLedger = null;
+  }
+
+  mark(stage, at = Date.now()) {
+    if (this.marks[stage] === undefined) this.marks[stage] = Math.max(0, Math.round(at - this.t0));
+  }
+
+  /** Ledgers between the trigger ledger and the one the fill was written in (1 = the next ledger, the target). */
+  ledgersLater() {
+    return this.includedLedger !== null && this.ledger ? this.includedLedger - this.ledger : null;
+  }
+
+  /** "fill timing: event+Xms order+..ms quote+Yms sim+Zms sent+Wms included L(N+k)" (stages that did not happen are left out). */
+  line() {
+    const parts = FILL_STAGES.filter((s) => this.marks[s] !== undefined && s !== "included").map((s) => `${s}+${this.marks[s]}ms`);
+    if (this.marks.included !== undefined) parts.push(`included+${this.marks.included}ms`);
+    const k = this.ledgersLater();
+    parts.push(k !== null ? `L(${this.ledger}+${k})` : "L(?)");
+    return `fill timing: ${parts.join(" ")}`;
+  }
+}
+
+/** Nearest-rank percentile of a list of numbers (p in 0..100); null for an empty list. */
+export function percentile(values, p) {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const rank = Math.max(1, Math.ceil((p / 100) * v.length));
+  return v[Math.min(rank, v.length) - 1];
+}
+
+/** The last `size` fills: total time (trigger ledger seen -> included) and ledgers later; p50 / p90 of each. */
+export class FillStats {
+  constructor(size = 20) {
+    this.size = size;
+    this.items = [];
+  }
+
+  add(totalMs, ledgers) {
+    this.items.push({ totalMs, ledgers });
+    if (this.items.length > this.size) this.items.shift();
+  }
+
+  summary() {
+    const ms = this.items.map((x) => x.totalMs);
+    const l = this.items.map((x) => x.ledgers).filter((x) => x !== null && x !== undefined);
+    return {
+      fills: this.items.length,
+      p50_ms: percentile(ms, 50),
+      p90_ms: percentile(ms, 90),
+      p50_ledgers: percentile(l, 50),
+      p90_ledgers: percentile(l, 90),
+      next_ledger_share: l.length ? Math.round((100 * l.filter((x) => x <= 1).length) / l.length) : null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reads spread over the RPC servers: the one that answers soonest
+// ---------------------------------------------------------------------------
+
+/** Exponentially weighted moving average (e.g. of an RPC server's answer time). */
+export class Ewma {
+  constructor(alpha = 0.2, initial = null) {
+    this.alpha = alpha;
+    this.value = initial;
+  }
+
+  add(x) {
+    this.value = this.value === null ? x : this.value + this.alpha * (x - this.value);
+    return this.value;
+  }
+}
+
+/**
+ * The server a read should go to: of the usable ones, the one expected to answer soonest (time waiting for its rate
+ * limit + its usual answer time). `servers`: [{ usable, waitMs, latencyMs }] (latencyMs null = not measured yet:
+ * counted as `unknownMs`). Ties go to the lower index (the preferred server). -1 if none is usable.
+ */
+export function pickReadServer(servers, unknownMs = 1000) {
+  let best = -1;
+  let bestT = Infinity;
+  servers.forEach((s, i) => {
+    if (!s.usable) return;
+    const t = Math.max(0, s.waitMs || 0) + (s.latencyMs ?? unknownMs);
+    if (t < bestT) {
+      bestT = t;
+      best = i;
+    }
+  });
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Horizon ledger stream (server-sent events)
+// ---------------------------------------------------------------------------
+
+/**
+ * Splits a server-sent-events text buffer into complete events. Returns { events: [{ id, event, data }], rest }
+ * (`rest`: an incomplete event to keep for the next chunk). Comment lines (":...") are ignored.
+ */
+export function parseSse(buffer) {
+  const text = buffer.replace(/\r\n/g, "\n");
+  const blocks = text.split("\n\n");
+  const rest = blocks.pop();
+  const events = [];
+  for (const b of blocks) {
+    const ev = { id: null, event: "message", data: "" };
+    let any = false;
+    for (const line of b.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      const i = line.indexOf(":");
+      const field = i < 0 ? line : line.slice(0, i);
+      const value = i < 0 ? "" : line.slice(i + 1).replace(/^ /, "");
+      if (field === "data") ev.data += (ev.data ? "\n" : "") + value;
+      else if (field === "id") ev.id = value;
+      else if (field === "event") ev.event = value;
+      else continue;
+      any = true;
+    }
+    if (any) events.push(ev);
+  }
+  return { events, rest };
+}
+
+/** The ledger sequence in a Horizon /ledgers stream event, or null (Horizon sends "hello" / keep-alive events too). */
+export function ledgerFromSse(ev) {
+  if (!ev || !ev.data || ev.data === '"hello"' || ev.data === "hello") return null;
+  try {
+    const j = JSON.parse(ev.data);
+    const n = Number(j && j.sequence);
+    return Number.isInteger(n) && n > 0 ? { sequence: n, closedAt: j.closed_at ? Date.parse(j.closed_at) : null } : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prepared routes: the shape of the best route for a pair, reused for a fill of a similar size
+// ---------------------------------------------------------------------------
+
+/** Cache key of a route shape: the pair and the size class of the fill (powers of two). */
+export function shapeKey(tin, tout, fill) {
+  const f = BigInt(fill);
+  return `${tin}|${tout}|${f > 0n ? f.toString(2).length : 0}`;
+}
+
+/** The amounts for `fill` split by the shares (basis points summing to 10000) of a prepared shape; the rest goes to the first part. */
+export function scaleShares(sharesBps, fill) {
+  const f = BigInt(fill);
+  const amounts = sharesBps.map((s) => (f * BigInt(s)) / 10_000n);
+  const used = amounts.reduce((a, b) => a + b, 0n);
+  if (amounts.length) amounts[0] += f - used;
+  return amounts;
+}
+
+/** Shares in basis points of each part's amount in a route of `total` (inverse of scaleShares, for the cache). */
+export function sharesOf(amounts, total) {
+  const t = BigInt(total);
+  if (t <= 0n) return amounts.map(() => 0);
+  const s = amounts.map((a) => Number((BigInt(a) * 10_000n) / t));
+  const used = s.reduce((a, b) => a + b, 0);
+  if (s.length) s[0] += 10_000 - used;
+  return s;
+}

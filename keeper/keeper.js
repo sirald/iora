@@ -38,6 +38,9 @@ import {
   FeeBudget,
   RpcPicker,
   Aimd,
+  Ewma,
+  FillStats,
+  FillTimer,
   RpcUsage,
   TokenBucket,
   WorkBudget,
@@ -49,15 +52,21 @@ import {
   isBadSeq,
   isNear,
   isRateLimited,
+  ledgerFromSse,
   legMinOut,
   limitRatio,
+  parseSse,
+  pickReadServer,
   pickSequence,
   retryAfterMs,
   retryRoute,
   rpcFailReason,
   rpcList,
   rpsList,
+  scaleShares,
   scanIntervalMs,
+  shapeKey,
+  sharesOf,
   splitMins,
   takeCandidates,
   transientRpc,
@@ -140,6 +149,19 @@ const RPC_BURST = Math.max(1, Number(cfg.RPC_BURST || 8));
 // An HTTP 429 halves that server's rate (AIMD) and waits (Retry-After if given); only after RPC_429_SWITCH_AFTER
 // 429s in a row does the keeper move to the next server.
 const RPC_429_SWITCH_AFTER = Math.max(1, Number(cfg.RPC_429_SWITCH_AFTER || 3));
+// ----- fill latency -----
+// Reads (simulations, account reads) go to whichever RPC server is expected to answer first (its wait for the rate
+// limit + its usual answer time), so both servers' limits are used; RPC_SPREAD_READS=off keeps them on one server.
+const RPC_SPREAD_READS = String(cfg.RPC_SPREAD_READS || "on").toLowerCase() !== "off";
+// A new ledger is seen the moment it closes from Horizon's ledger stream (server-sent events, outside the RPC rate
+// limit); if the stream is down the keeper asks the RPC as before. LEDGER_STREAM=off: RPC only.
+const HORIZON_URL = String(cfg.HORIZON_URL || (PASSPHRASE === Networks.TESTNET ? "https://horizon-testnet.stellar.org" : "")).replace(/\/+$/, "");
+const LEDGER_STREAM = !!HORIZON_URL && String(cfg.LEDGER_STREAM || "on").toLowerCase() !== "off";
+// After sending, the result is looked up right after the next ledger closes (stream), else every TX_POLL_MS.
+const TX_POLL_MS = Math.max(250, Number(cfg.TX_POLL_MS || 750));
+// The shape of the best filler route (which pools, which shares, or which intermediate token) is kept this long per
+// pair and fill size; a fill then needs only the quotes of its own legs instead of a full route search.
+const ROUTE_SHAPE_SEC = Number(cfg.ROUTE_SHAPE_SEC ?? 60) >= 0 && cfg.ROUTE_SHAPE_SEC !== "" ? Number(cfg.ROUTE_SHAPE_SEC ?? 60) : 60;
 // ----- adaptive scan interval (SCAN_MODE=ledger) -----
 // While no open order is within SCAN_NEAR_PCT percent of its limit (and none can cross, none is due), a full scan
 // runs only every SCAN_IDLE_SEC; between them only the order events are read on each ledger (2 requests), and a new
@@ -342,10 +364,21 @@ const rpcLimits = RPC_URLS.map((u, i) => ({
   in429: 0, // 429s in a row
   blockedAt: 0, // when the last 429 pause began: 429s for requests sent before it do not count as "in a row"
   saidAt: 0,
+  latency: new Ewma(0.2), // usual answer time (ms)
+  downUntil: 0, // a spread read failed here: not used for spread reads until then
 }));
+// Background work (sweep reads, balance, vault list, TTL, workers) runs under rpcLowCtx: while a fill-path request is
+// in flight it waits a moment, so fills never queue behind it for the rate limit.
+const rpcLowCtx = new AsyncLocalStorage();
+let rpcHighInFlight = 0;
+const SPREAD_METHODS = new Set(["simulateTransaction", "getLedgerEntries"]);
+const low = (fn) => rpcLowCtx.run(true, fn);
 
 /** Waits for this server's turn under its rate limit (time spent here never counts towards the RPC timeout). */
 async function rpcTurn(lim) {
+  if (rpcLowCtx.getStore()) {
+    for (let i = 0; i < 30 && rpcHighInFlight > 0; i++) await sleep(100); // at most 3 s behind the fill path
+  }
   for (let i = 0; i < 5; i++) {
     const now = Date.now();
     lim.bucket.setRate(lim.aimd.rate(now), now);
@@ -371,20 +404,41 @@ function makeServer(urls) {
   async function call(name, args) {
     let lastErr;
     const label = rpcLabelCtx.getStore() || name;
-    for (const idx of rpcPicker.order()) {
-      const r = await callOn(idx, name, args, label);
-      if (r.ok) return r.value;
-      lastErr = r.error;
-      if (!r.next) throw r.error;
+    const high = !rpcLowCtx.getStore();
+    if (high) rpcHighInFlight++;
+    try {
+      let order = rpcPicker.order();
+      let spreadIdx = -1;
+      if (RPC_SPREAD_READS && SPREAD_METHODS.has(name) && urls.length > 1) {
+        // the server expected to answer first; the current one if it is as good
+        const now = Date.now();
+        const cur = rpcPicker.cur;
+        spreadIdx = pickReadServer(
+          urls.map((_, i) => ({
+            usable: i === cur || (now >= rpcLimits[i].downUntil && (i !== 0 || now >= rpcPicker.retryAt)),
+            waitMs: rpcLimits[i].bucket.peek(now),
+            latencyMs: rpcLimits[i].latency.value,
+          })),
+        );
+        if (spreadIdx >= 0 && spreadIdx !== order[0]) order = [spreadIdx, ...order.filter((i) => i !== spreadIdx)];
+      }
+      for (const idx of order) {
+        const r = await callOn(idx, name, args, label, idx === spreadIdx && idx !== rpcPicker.cur);
+        if (r.ok) return r.value;
+        lastErr = r.error;
+        if (!r.next) throw r.error;
+      }
+      throw lastErr;
+    } finally {
+      if (high) rpcHighInFlight--;
     }
-    throw lastErr;
   }
 
   /**
    * One server: waits for its rate limit, sends, and on HTTP 429 slows down and waits on the SAME server (Retry-After
    * when given). Returns { ok, value } or { ok: false, error, next } (next: try the next server).
    */
-  async function callOn(idx, name, args, label) {
+  async function callOn(idx, name, args, label, spread = false) {
     const lim = rpcLimits[idx];
     for (;;) {
       await rpcTurn(lim);
@@ -404,6 +458,12 @@ function makeServer(urls) {
           }),
         ]);
         lim.in429 = 0;
+        lim.latency.add(Date.now() - sentAt);
+        if (spread) {
+          // a read sent to another server to use its capacity: the current server stays the current one
+          rpcPicker.consecutiveErrors = 0;
+          return { ok: true, value: res };
+        }
         const moved = rpcPicker.success(idx);
         if (moved === "primary") log(`RPC: back on the first server ${urls[0]}`);
         else if (moved === "switched") {
@@ -435,6 +495,10 @@ function makeServer(urls) {
           return { ok: false, error: e, next: true };
         }
         if (!transientRpc(e)) return { ok: false, error: e, next: false };
+        if (spread) {
+          lim.downUntil = Date.now() + 30_000; // not used for spread reads for a while; the current server takes over
+          return { ok: false, error: e, next: true };
+        }
         rpcPicker.failure(idx, `${urls[idx]} ${rpcFailReason(e)}`);
         return { ok: false, error: e, next: true };
       } finally {
@@ -565,6 +629,9 @@ function budgetHit(why) {
 const usedSeq = new Map();
 async function accountFor(signer) {
   const pub = signer.publicKey();
+  // The sequence this account last used on chain is known exactly (set on SUCCESS/FAILED, cleared on txBadSeq):
+  // no account read is needed for the next transaction (one request less on the fill path).
+  if (usedSeq.has(pub)) return new Account(pub, String(usedSeq.get(pub)));
   const acc = await server.getAccount(pub);
   return new Account(pub, pickSequence(acc.sequenceNumber(), usedSeq.get(pub)).toString());
 }
@@ -609,12 +676,13 @@ function chainResult(r, hash, maxFee) {
     fee = BigInt(get(r.resultXdr, "feeCharged"));
   } catch {}
   const charged = fee !== null ? Number(fee) : maxFee;
-  if (r.status === "SUCCESS") return { ok: true, hash, fee, charged, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
+  const ledger = Number(r.ledger) || null;
+  if (r.status === "SUCCESS") return { ok: true, hash, fee, charged, ledger, value: r.returnValue ? scValToNative(r.returnValue) : undefined };
   let why = "";
   try {
     why = get(get(r.resultXdr, "result"), "switch")?.name || "";
   } catch {}
-  return { ok: false, onchain: true, hash, fee, charged, error: `the transaction failed on the network${why ? ` (${why})` : ""}` };
+  return { ok: false, onchain: true, hash, fee, charged, ledger, error: `the transaction failed on the network${why ? ` (${why})` : ""}` };
 }
 
 async function lookupTx(hash, maxFee) {
@@ -654,18 +722,30 @@ async function sendAndFollow(tx, hash, maxFee) {
     if (isBadSeq(name)) return { ok: false, retry: true, badSeq: true, charged: 0, error: `send error ${name}` };
     return { ok: false, charged: 0, error: `send error ${name}`.trim() };
   }
-  // PENDING or DUPLICATE: the transaction is queued
+  // PENDING or DUPLICATE: the transaction is queued. It can only be written when the next ledger closes: the result
+  // is looked up right after that (ledger stream), or every TX_POLL_MS without the stream.
+  fillTraceCtx.getStore()?.mark("sent");
   const deadline = Date.now() + (TX_TIMEOUT_SEC + 15) * 1000;
+  let seenLedger = ledgerWatch.seq;
   while (Date.now() < deadline) {
-    await sleep(2000);
-    let r;
-    try {
-      r = await server.getTransaction(sent.hash);
-    } catch {
-      continue; // temporary RPC error: keep following the transaction
+    if (ledgerStreamUp()) {
+      await nextLedgerAfter(seenLedger, 7000);
+      seenLedger = ledgerWatch.seq;
+      await sleep(150); // the RPC needs a moment to take in the ledger Horizon just announced
+    } else await sleep(TX_POLL_MS);
+    // With the stream: up to 3 looks 400 ms apart (the RPC may be a moment behind Horizon), then the next ledger.
+    const looks = ledgerStreamUp() ? 3 : 1;
+    for (let k = 0; k < looks; k++) {
+      if (k) await sleep(400);
+      let r;
+      try {
+        r = await server.getTransaction(sent.hash);
+      } catch {
+        continue; // temporary RPC error: keep following the transaction
+      }
+      const done = chainResult(r, sent.hash, maxFee);
+      if (done) return done;
     }
-    const done = chainResult(r, sent.hash, maxFee);
-    if (done) return done;
   }
   return { ok: false, hash: sent.hash, charged: 0, error: "timed out (the transaction expired and was not written to the chain)" };
 }
@@ -696,8 +776,14 @@ async function submit(tx, signer = kp, { ttl = false } = {}) {
   const hash = tx.hash().toString("hex");
   const held = feeBudget.reserve(maxFee);
   const res = await sendAndFollow(tx, hash, maxFee);
+  const timer = fillTraceCtx.getStore();
+  if (timer && res.ok) {
+    timer.mark("included");
+    timer.includedLedger = res.ledger || null;
+  }
   feeBudget.settle(held, res.charged ?? 0);
   if (res.ok || res.onchain) usedSeq.set(signer.publicKey(), tx.sequence);
+  if (res.badSeq) usedSeq.delete(signer.publicKey()); // the known sequence was wrong: the next transaction reads it again
   if (res.ok || res.onchain) readMemo.clear(); // our own transaction changed the chain: no stale reads after it
   return res;
 }
@@ -752,6 +838,7 @@ function write(contractId, method, callArgs, anySigner = false) {
         }
         const tx = await liveTx(contractId, method, callArgs, signer);
         const sim = await server.simulateTransaction(tx);
+        fillTraceCtx.getStore()?.mark("sim");
         if (rpc.Api.isSimulationError(sim)) return { ok: false, error: sim.error, code: errCode(sim.error) };
         const r = await submit(rpc.assembleTransaction(tx, padSim(sim)).build(), signer);
         if (r.badSeq && attempt === 0) {
@@ -1135,7 +1222,9 @@ async function latestLedger(maxAgeMs = 0) {
 }
 
 /** Marks the vaults that placed an order since the last scan. Any failure is harmless: the sweep finds them later. */
-async function collectPlaced(known) {
+// When an order event names a vault: the ledger it is in and when the keeper read it (for the fill timing).
+const eventSeen = new Map(); // vault -> { ledger, at }
+async function collectPlaced(known, want = 0) {
   try {
     const latest = await latestLedger(2500);
     if (!eventLedger) {
@@ -1147,13 +1236,25 @@ async function collectPlaced(known) {
     const filters = [{ type: "contract", topics: ORDER_TOPICS }];
     let cursor = null;
     let complete = false;
+    let rpcLatest = 0; // the last ledger the RPC itself has taken in (Horizon can announce a ledger a moment earlier)
     for (let page = 0; page < 50; page++) {
-      const r = await server.getEvents(cursor ? { filters, cursor, limit: 200 } : { filters, startLedger: eventLedger + 1, limit: 200 });
+      let r;
+      try {
+        r = await server.getEvents(cursor ? { filters, cursor, limit: 200 } : { filters, startLedger: eventLedger + 1, limit: 200 });
+      } catch (e) {
+        // The ledger stream announced a ledger the RPC has not taken in yet: not an error, try again shortly.
+        if (!cursor && /start ?ledger|ledger range|must be (between|less)/i.test(String((e && e.message) || e))) return;
+        throw e;
+      }
+      rpcLatest = Math.max(rpcLatest, Number(r && r.latestLedger) || 0);
       const events = (r && r.events) || [];
       for (const ev of events) {
         const c = ev.contractId;
         const id = typeof c === "string" ? c : c && typeof c.contractId === "function" ? c.contractId() : String(c ?? "");
-        if (known.has(id)) dirty.add(id);
+        if (known.has(id)) {
+          dirty.add(id);
+          if (!eventSeen.has(id)) eventSeen.set(id, { ledger: Number(ev.ledger) || null, at: Date.now() });
+        }
       }
       if (events.length < 200) {
         complete = true;
@@ -1163,8 +1264,10 @@ async function collectPlaced(known) {
       cursor = r.cursor || last.pagingToken || last.id;
       if (!cursor) break;
     }
-    eventLedger = latest;
+    // Up to the ledger the RPC had when it answered (never past it: those events would be skipped for good).
+    eventLedger = rpcLatest > 0 ? Math.max(eventLedger, Math.min(latest, rpcLatest)) : latest;
     eventsOk = complete; // a flood beyond 10,000 events: fall back to reading vaults with open orders directly
+    if (want && eventLedger < want) return "behind";
   } catch (e) {
     eventLedger = 0;
     eventsOk = false;
@@ -1329,10 +1432,11 @@ const pathOf = (tin, tout, via) => (via ? [tin, via, tout] : [tin, tout]);
  */
 async function bestRoute(amount, tin, tout, vias) {
   let best = null;
-  for (const via of vias) {
-    const q = await quotePath(amount, pathOf(tin, tout, via));
+  const qs = await Promise.all(vias.map((via) => quotePath(amount, pathOf(tin, tout, via)))); // in parallel
+  vias.forEach((via, i) => {
+    const q = qs[i];
     if (q !== null && (best === null || q > best.q)) best = { q, via };
-  }
+  });
   return best;
 }
 
@@ -1827,6 +1931,12 @@ const partsText = (parts, total) =>
 // vault's limit requires for `fill`; 0 = no floor). A route whose quotes cannot cover `need` is not built.
 async function venueRoute(fill, tin, tout, forceShare = null, only = null, need = 0n) {
   if (!VENUES || Date.now() < venueState.offUntil) return null;
+  // A route of the same shape found in the last ROUTE_SHAPE_SEC: only its legs are quoted again (a few requests
+  // instead of a full search). Not for the check command (forceShare / only).
+  if (forceShare === null && !only && ROUTE_SHAPE_SEC > 0) {
+    const fast = await preparedRoute(fill, tin, tout, need);
+    if (fast) return fast;
+  }
   try {
     const sources = await sourcesFor(tin, tout, only);
     const others = sources.filter((s) => !s.soroswap);
@@ -1847,7 +1957,10 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null, need 
       if (sources.length) {
         const sp = await spread(sources, fill);
         const mins = sp ? splitMins(sp.parts.map((p) => p.q), need, SLIPPAGE_BPS) : null;
-        if (sp && mins) best = { q: sp.q, steps: sp.parts.map((p, i) => () => p.src.step(p.amount, mins[i])), text: partsText(sp.parts, fill) };
+        if (sp && mins) {
+          best = { q: sp.q, steps: sp.parts.map((p, i) => () => p.src.step(p.amount, mins[i])), text: partsText(sp.parts, fill) };
+          best.shape = { kind: "split", labels: sp.parts.map((p) => p.src.label), shares: sharesOf(sp.parts.map((p) => p.amount), fill) };
+        }
       }
       // through an intermediate token, each leg in its best pool
       if ((await fillerV()) >= 2) {
@@ -1869,6 +1982,7 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null, need 
               q: leg2.q,
               steps: [() => leg1.src.step(fill, plan.min1), () => leg2.src.step(plan.in2, min2[0]), async () => callVal(FILLER, "sweep", [addrVal(mid)], [])],
               text: `${leg1.src.label} to ${sym(mid)}, then ${leg2.src.label}`,
+              shape: { kind: "via", mid, l1: leg1.src.label, l2: leg2.src.label },
             };
           }
         }
@@ -1881,6 +1995,7 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null, need 
       if (!v) return null;
       steps.push(v);
     }
+    if (best.shape && forceShare === null && !only) routeShapes.set(shapeKey(tin, tout, fill), { ...best.shape, at: Date.now() });
     return { q: best.q, route: xdr.ScVal.scvVec(steps), text: best.text };
   } catch (e) {
     venueState.offUntil = Date.now() + 10 * 60_000;
@@ -1889,12 +2004,58 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null, need 
   }
 }
 
+// pair + fill size class -> the shape of the last best route: { kind: "split", labels, shares } | { kind: "via", mid, l1, l2 }
+const routeShapes = new Map();
+/**
+ * The last best route's shape for this pair and fill size, rebuilt for `fill` with fresh quotes of its own legs
+ * only (each leg's minimum from its own fresh quote, as in a full search). null when there is none, it is too old,
+ * or a leg cannot be quoted/built now: then the full search runs.
+ */
+async function preparedRoute(fill, tin, tout, need) {
+  const key = shapeKey(tin, tout, fill);
+  const sh = routeShapes.get(key);
+  if (!sh || Date.now() - sh.at > ROUTE_SHAPE_SEC * 1000) return null;
+  try {
+    if (sh.kind === "split") {
+      const sources = await sourcesFor(tin, tout);
+      const srcs = sh.labels.map((l) => sources.find((x) => x.label === l));
+      if (srcs.includes(undefined)) return null;
+      const amounts = scaleShares(sh.shares, fill);
+      const qs = await Promise.all(srcs.map((src, i) => src.quote(amounts[i])));
+      if (qs.some((q) => q === null || q <= 0n)) return null;
+      const mins = splitMins(qs, need, SLIPPAGE_BPS);
+      if (!mins) return null;
+      const steps = await Promise.all(srcs.map((src, i) => src.step(amounts[i], mins[i])));
+      if (steps.includes(null)) return null;
+      const parts = srcs.map((src, i) => ({ src, amount: amounts[i] }));
+      return { q: qs.reduce((a, b) => a + b, 0n), route: xdr.ScVal.scvVec(steps), text: `${partsText(parts, fill)} (prepared)` };
+    }
+    if (sh.kind === "via") {
+      const [s1, s2] = await Promise.all([sourcesFor(tin, sh.mid), sourcesFor(sh.mid, tout)]);
+      const a = s1.find((x) => x.label === sh.l1);
+      const b = s2.find((x) => x.label === sh.l2);
+      if (!a || !b) return null;
+      const q1 = await a.quote(fill);
+      if (q1 === null || q1 <= 0n) return null;
+      const plan = viaPlan(q1, SLIPPAGE_BPS);
+      const q2 = plan.in2 > 0n ? await b.quote(plan.in2) : null;
+      if (q2 === null || q2 <= 0n) return null;
+      const min2 = splitMins([q2], need, SLIPPAGE_BPS);
+      if (!min2) return null;
+      const steps = await Promise.all([a.step(fill, plan.min1), b.step(plan.in2, min2[0])]);
+      if (steps.includes(null)) return null;
+      steps.push(callVal(FILLER, "sweep", [addrVal(sh.mid)], []));
+      return { q: q2, route: xdr.ScVal.scvVec(steps), text: `${sh.l1} to ${sym(sh.mid)}, then ${sh.l2} (prepared)` };
+    }
+  } catch {}
+  return null;
+}
+
 /** Same as the contract's price impact calculation. */
 async function impactBps(fill, tin, tout, via = null) {
   const probe = fill / 100n;
   if (probe === 0n) return 0n;
-  const full = await quotePath(fill, pathOf(tin, tout, via));
-  const small = await quotePath(probe, pathOf(tin, tout, via));
+  const [full, small] = await Promise.all([quotePath(fill, pathOf(tin, tout, via)), quotePath(probe, pathOf(tin, tout, via))]);
   if (full === null || small === null) return null;
   const ideal = (small * fill) / probe;
   if (ideal <= 0n) return 0n;
@@ -2122,6 +2283,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       continue;
     }
     if (alt) {
+      fillTraceCtx.getStore()?.mark("quote");
       const ra = await write(vault, "fill_via", [new Address(kp.publicKey()).toScVal(), u32(o.id), i128(fill), addrVal(FILLER), alt.route], true);
       if (ra.ok) {
         dirty.add(vault);
@@ -2200,6 +2362,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         continue;
       }
     }
+    fillTraceCtx.getStore()?.mark("quote");
     const single = () => write(vault, "execute", execArgs(fill, via), true);
     const r = pc.v8 ? await fillOrder(vault, o.id, fill, via, single) : await single();
     dirty.add(vault); // whatever happened, read this vault's orders again on the next scan
@@ -2675,18 +2838,26 @@ let lastTtl = 0; // when the last full TTL round finished (ms); read from status
 let vaultCache = { at: 0, list: [] };
 async function scan() {
   scanNo++;
-  if (Date.now() - vaultCache.at > VAULT_LIST_TTL_MS || SCAN_MODE !== "ledger") vaultCache = { at: Date.now(), list: await listVaults() };
+  // The vault list is refreshed once a minute, but not in a scan that has a new or changed order to act on.
+  if (!vaultCache.list.length || ((Date.now() - vaultCache.at > VAULT_LIST_TTL_MS || SCAN_MODE !== "ledger") && dirty.size === 0)) {
+    vaultCache = { at: Date.now(), list: await low(() => listVaults()) };
+  }
   const vaults = vaultCache.list;
   let open = 0;
   let filled = 0;
   readMemo.clear(); // reads are shared within a scan, never across scans
+  scanLedger = { seq: lastLedger || latestCache.seq || 0, at: ledgerSeenAt || Date.now() };
   proximity.checked.clear();
   proximity.far.clear();
   proximity.near = false;
   // 1) Refresh the order book of the vaults that need it (new, changed, or the slow sweep).
-  await pool(await vaultsToRead(vaults), SCAN_CONCURRENCY, async (v) => {
+  const toRead = await vaultsToRead(vaults);
+  const urgent = new Set(dirty); // vaults an event named: their reads go first, at fill-path priority
+  await pool(toRead, SCAN_CONCURRENCY, async (v) => {
     try {
-      await ordersToCheck(v);
+      if (urgent.has(v) || !seenVaults.has(v)) await ordersToCheck(v);
+      else await low(() => ordersToCheck(v)); // the slow sweep
+      if (urgent.has(v)) orderReadAt.set(v, Date.now());
     } catch (e) {
       log(`ERROR ${e.message}`);
       return;
@@ -2708,7 +2879,8 @@ async function scan() {
   // 3) Check every open order against this scan's prices, from the cached copies. Fills run in parallel, one per
   //    sending account at a time.
   reservesNow.clear();
-  const active = budgetBlock ? [] : vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0);
+  // Vaults an event named come first: a new order is looked at before the waiting ones.
+  const active = budgetBlock ? [] : vaults.filter((v) => (book.get(v)?.open.length ?? 0) > 0).sort((a, b) => Number(urgent.has(b)) - Number(urgent.has(a)));
   // With the batch filler each sending account carries BATCH_SIZE fills, so that many vaults are checked at once.
   const lanes = Math.min(Math.max(SCAN_CONCURRENCY, signers.length * (BATCH ? BATCH_SIZE : 1)), 40);
   await pool(active, lanes, async (v) => {
@@ -2732,7 +2904,15 @@ async function scan() {
       if (BigInt(o.amount_in) < minFillFor(o.sell ? String(o.sell) : null)) return; // dust orders (not the last small piece of a larger order)
       proximity.checked.add(`${v}:${o.id}`);
       try {
-        const res = await tryOrder(v, o, ctx);
+        // Fill timing: from the moment the keeper saw the ledger that made this fill possible (the one with the
+        // order event, or the one this scan runs for).
+        const ev = eventSeen.get(v);
+        const t0Ledger = ev && ev.ledger ? ev.ledger : scanLedger.seq;
+        const timer = new FillTimer(ledgerSeenTime(t0Ledger) ?? scanLedger.at, t0Ledger);
+        if (ev) timer.mark("event", ev.at);
+        if (orderReadAt.has(v)) timer.mark("order", orderReadAt.get(v));
+        const res = await fillTraceCtx.run(timer, () => tryOrder(v, o, ctx));
+        if (res === "filled") noteFillTiming(timer);
         if (res === "filled") filled++;
         if (res === "filled" || res === "error" || res === "busy") tries++; // only real transaction attempts are counted
       } catch (e) {
@@ -2752,13 +2932,17 @@ async function scan() {
     }
   });
   for (const v of vaults) open += book.get(v)?.open.length ?? 0; // every vault, including the ones not read this scan
-  const balance = await keeperBalance();
+  const balance = await low(() => keeperBalance());
   if (balance !== null && balance < LOW_BALANCE_XLM) {
     const sent = await notify(`The keeper balance is low: ${balance.toFixed(2)} XLM. Add XLM for transaction fees.`, {
       topic: "low-balance",
       everySec: 6 * 3600,
     });
     if (sent) log(`WARNING the keeper balance is low: ${balance} XLM`);
+  }
+  for (const v of urgent) {
+    eventSeen.delete(v);
+    orderReadAt.delete(v);
   }
   // Is any order near enough to its limit to keep scanning on every ledger? (see SCAN_IDLE_SEC)
   if (filled > 0 || [...proximity.checked].some((k) => !proximity.far.has(k))) proximity.near = true;
@@ -2811,6 +2995,11 @@ function writeStatus() {
           rpc_rate_wait_sec_last_min: usageNow ? Math.round(usageNow.waited_ms / 100) / 10 : null,
           rpc_rate_per_sec: Object.fromEntries(RPC_URLS.map((u, i) => [u, `${rpcLimits[i].aimd.rate(now).toFixed(2)}/${RPC_MAX_RPS[i]}`])),
           scan_interval: idleMode ? `${SCAN_IDLE_SEC} s` : "every ledger",
+          // fill latency: from the moment the trigger ledger was seen to the moment the fill was seen on chain, over the
+          // last 20 fills; ledgers: how many ledgers after the trigger one the fill was written (1 = the next one)
+          fill_latency: fillStats.summary(),
+          last_fill_timing: lastFillTiming,
+          ledger_stream: LEDGER_STREAM ? (ledgerStreamUp() ? "up" : "down (asking the RPC)") : "off",
           keeper_balance_xlm: s.balance ?? null,
           sending_accounts: signers.length,
           batch_fills: BATCH ? `${batchFills} orders / ${batchTxs} transactions` : "off",
@@ -2914,6 +3103,11 @@ async function main() {
   process.on("exit", lock.release); // also on Ctrl+C / SIGTERM / fatal errors (they all end in process.exit)
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   log(
+    `fill latency: ledger stream ${LEDGER_STREAM ? HORIZON_URL : "off"}, reads spread over the RPC servers ${RPC_SPREAD_READS ? "on" : "off"}, ` +
+      `result looked up ${LEDGER_STREAM ? "after each ledger" : `every ${TX_POLL_MS} ms`}, prepared route shapes ${ROUTE_SHAPE_SEC} s; ` +
+      `each fill logs "fill timing: ..."`,
+  );
+  log(
     `filler routes: every leg has a minimum output ${SLIPPAGE_BPS} bps below its quote (never below the vault's limit), ` +
       `${ROUTE_RETRIES} free retries on a moved price, Comet max_price ${COMET_MAX_PRICE_FACTOR > 0 ? `${COMET_MAX_PRICE_FACTOR}x the worst allowed price` : "off"}`,
   );
@@ -2940,6 +3134,7 @@ async function main() {
     writeStatus();
     return;
   }
+  if (LEDGER_STREAM && SCAN_MODE === "ledger") ledgerStreamLoop(); // runs for good in the background
   if (!DO_TTL) {
     log("WARNING TTL upkeep is OFF (started without --ttl): quiet vaults and orders are not extended and can be archived. Start with: node keeper.js --ttl");
   }
@@ -2966,7 +3161,7 @@ async function main() {
       // Worker balances are checked once an hour.
       if (WORKERS > 0 && Date.now() - workersAt > 3600_000) {
         workersAt = Date.now();
-        await ensureWorkers();
+        await low(() => ensureWorkers());
       }
       // TTL upkeep must not hold up scanning: a job list is prepared once a day and worked through
       // one job at a time in rounds without a fill.
@@ -2975,17 +3170,26 @@ async function main() {
       // rate limit like any other. If fills keep every round busy for a day, TTL runs anyway (overdue).
       const ttlOverdue = Date.now() - lastTtl > 2 * TTL_EVERY_SEC * 1000;
       if (DO_TTL && (s.filled === 0 || ttlOverdue)) {
-        if (ttlJobs.length === 0 && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
-          ttlJobs = [...(await factoryTtlJobs()), ...s.vaults.map((vault) => ({ kind: "vault", vault }))];
+        if (ttlJobs.length === 0 && !ttlBusy && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
+          ttlJobs = [...(await low(() => factoryTtlJobs())), ...s.vaults.map((vault) => ({ kind: "vault", vault }))];
           ttlStats.roundFailed = 0;
           if (ttlJobs.length === 0) lastTtl = Date.now();
-        } else if (ttlJobs.length > 0) {
-          await runTtlJob(ttlJobs.shift());
-          if (ttlJobs.length === 0) {
-            // A round with failures is tried again in an hour instead of a day.
-            lastTtl = ttlStats.roundFailed === 0 ? Date.now() : Date.now() - TTL_EVERY_SEC * 1000 + 3600_000;
-            log(`TTL round done: ${ttlStats.roundFailed} failed${ttlStats.roundFailed ? "; the round is repeated in 1 hour" : ""}`);
-          }
+        } else if (ttlJobs.length > 0 && !ttlBusy) {
+          // In the background (one job at a time, main account): a TTL job waits ~5-10 s for its transaction, and the
+          // next scan (a new order) must not wait for it. Its requests are background priority.
+          ttlBusy = true;
+          const job = ttlJobs.shift();
+          const last = ttlJobs.length === 0;
+          low(() => runTtlJob(job))
+            .catch(() => {})
+            .finally(() => {
+              ttlBusy = false;
+              if (last && ttlJobs.length === 0) {
+                // A round with failures is tried again in an hour instead of a day.
+                lastTtl = ttlStats.roundFailed === 0 ? Date.now() : Date.now() - TTL_EVERY_SEC * 1000 + 3600_000;
+                log(`TTL round done: ${ttlStats.roundFailed} failed${ttlStats.roundFailed ? "; the round is repeated in 1 hour" : ""}`);
+              }
+            });
         }
       }
       failedScansInRow = 0;
@@ -3026,8 +3230,8 @@ async function main() {
     const scanStarted = lastScanStart;
     for (;;) {
       await waitNextLedger(INTERVAL_SEC * 1000);
+      await readEventsFor(lastLedger); // this ledger's new orders, as soon as the RPC has them
       if (idleMs === 0 || Date.now() - scanStarted >= idleMs) break;
-      await collectPlaced(new Set(vaultCache.list));
       if (dirty.size > 0 || !eventsOk) break; // something happened in a vault (or events failed): full scan now
     }
   }
@@ -3039,27 +3243,154 @@ let lastScanStart = 0;
 let lastLedger = 0;
 let ledgerSeenAt = 0;
 const LEDGER_MS = 5000;
+let ttlBusy = false; // a TTL job is running in the background
+
+// ----- seeing a ledger close -----
+// ledgerWatch: the newest ledger the keeper knows of, from Horizon's stream or from the RPC, and who waits for one.
+const ledgerWatch = { seq: 0, at: 0, waiters: new Set(), streamAt: 0, connected: false, failures: 0, saidAt: 0, since: 0 };
+const ledgerSeen = new Map(); // ledger -> when the keeper saw it (the last 60), for the fill timing
+function onLedger(seq, fromStream) {
+  if (!(seq > ledgerWatch.seq)) return;
+  const now = Date.now();
+  ledgerWatch.seq = seq;
+  ledgerWatch.at = now;
+  if (fromStream) ledgerWatch.streamAt = now;
+  ledgerSeen.set(seq, now);
+  if (ledgerSeen.size > 60) ledgerSeen.delete(ledgerSeen.keys().next().value);
+  if (seq > latestCache.seq) latestCache = { seq, at: now };
+  for (const w of [...ledgerWatch.waiters]) w();
+}
+const ledgerSeenTime = (seq) => (seq ? (ledgerSeen.get(seq) ?? null) : null);
+const ledgerStreamUp = () => LEDGER_STREAM && ledgerWatch.connected && Date.now() - ledgerWatch.streamAt < 15_000;
+/** Resolves true as soon as a ledger after `seq` is known, false after maxMs. */
+function nextLedgerAfter(seq, maxMs) {
+  return new Promise((resolve) => {
+    if (ledgerWatch.seq > seq) return resolve(true);
+    let timer;
+    const f = () => {
+      if (ledgerWatch.seq <= seq) return;
+      clearTimeout(timer);
+      ledgerWatch.waiters.delete(f);
+      resolve(true);
+    };
+    timer = setTimeout(() => {
+      ledgerWatch.waiters.delete(f);
+      resolve(false);
+    }, maxMs);
+    ledgerWatch.waiters.add(f);
+  });
+}
 
 /**
- * Waits for the next ledger. It does not ask every second: it sleeps until the next ledger is due (~5 s after the
- * last one was seen), then asks once a second until it is there (at most maxMs in all).
+ * Horizon's ledger stream (server-sent events, /ledgers?cursor=now): each closed ledger arrives about a second after
+ * it closes, with no request of ours and outside the RPC rate limit. Runs for good; reconnects with a back-off; while
+ * it is down, waitNextLedger asks the RPC as before.
+ */
+async function ledgerStreamLoop() {
+  for (;;) {
+    const ac = new AbortController();
+    let watchdog;
+    let connectedAt = 0;
+    try {
+      const res = await fetch(`${HORIZON_URL}/ledgers?cursor=now`, { headers: { accept: "text/event-stream" }, signal: ac.signal });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      connectedAt = Date.now();
+      ledgerWatch.connected = true;
+      ledgerWatch.streamAt = connectedAt;
+      if (ledgerWatch.failures || !ledgerWatch.since) log(`ledger stream: connected to ${HORIZON_URL}`);
+      ledgerWatch.since = ledgerWatch.since || connectedAt;
+      ledgerWatch.failures = 0;
+      const arm = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => ac.abort(new Error("no data for 20 s")), 20_000);
+      };
+      arm();
+      const dec = new TextDecoder();
+      let buf = "";
+      for await (const chunk of res.body) {
+        arm();
+        buf += dec.decode(chunk, { stream: true });
+        const { events, rest } = parseSse(buf);
+        buf = rest.length > 1_000_000 ? "" : rest;
+        for (const ev of events) {
+          const l = ledgerFromSse(ev);
+          if (l) onLedger(l.sequence, true);
+        }
+      }
+      throw new Error("the stream ended");
+    } catch (e) {
+      ledgerWatch.connected = false;
+      // a stream that ran for a while and was closed by Horizon is reopened at once
+      ledgerWatch.failures = connectedAt && Date.now() - connectedAt > 60_000 ? 0 : ledgerWatch.failures + 1;
+      if (ledgerWatch.failures > 0 && Date.now() - ledgerWatch.saidAt > 10 * 60_000) {
+        ledgerWatch.saidAt = Date.now();
+        log(`ledger stream: ${(e && e.message) || e}; new ledgers are asked of the RPC until it is back (reconnecting)`);
+      }
+    } finally {
+      clearTimeout(watchdog);
+      ac.abort();
+    }
+    await sleep(ledgerWatch.failures ? Math.min(60_000, 1000 * 2 ** Math.min(6, ledgerWatch.failures)) : 250);
+  }
+}
+
+/**
+ * Waits for the next ledger. With the stream: until Horizon announces it (no requests). Without: it sleeps until the
+ * next ledger is due (~5 s after the last one was seen), then asks the RPC once a second (at most maxMs in all).
  */
 async function waitNextLedger(maxMs) {
   const t0 = Date.now();
+  if (ledgerStreamUp()) {
+    await nextLedgerAfter(lastLedger, maxMs);
+    if (ledgerWatch.seq > lastLedger) {
+      lastLedger = ledgerWatch.seq;
+      ledgerSeenAt = ledgerWatch.at;
+      return;
+    }
+    if (ledgerStreamUp()) return; // no ledger within maxMs (the network is slow): scan anyway, as before
+  }
   const due = ledgerSeenAt ? ledgerSeenAt + LEDGER_MS : t0 + 1000;
   await sleep(Math.max(250, Math.min(due - t0, maxMs)));
   for (;;) {
     try {
       const seq = await latestLedger(0);
       if (seq > lastLedger) {
+        onLedger(seq, false);
         lastLedger = seq;
-        ledgerSeenAt = Date.now();
+        ledgerSeenAt = ledgerSeenTime(seq) ?? Date.now();
         return;
       }
     } catch {}
     if (Date.now() - t0 > maxMs) return;
+    if (ledgerStreamUp() && ledgerWatch.seq > lastLedger) continue; // the stream came back meanwhile
     await sleep(1000);
   }
+}
+
+/**
+ * Reads the order events of ledger `seq` as soon as the RPC has it (it can be a moment behind Horizon): a few tries,
+ * 250 ms apart, about 2 s at most. A new order is then handled in the scan that follows at once.
+ */
+async function readEventsFor(seq) {
+  const known = new Set(vaultCache.list);
+  for (let i = 0; i < 8; i++) {
+    await collectPlaced(known, seq);
+    if (!eventsOk || eventLedger >= seq) return;
+    await sleep(250);
+  }
+}
+
+// ----- fill timing -----
+const fillTraceCtx = new AsyncLocalStorage(); // the FillTimer of the fill being worked on
+const orderReadAt = new Map(); // vault -> when its orders were read in this scan (vaults an event named)
+const fillStats = new FillStats(20);
+let lastFillTiming = null;
+let scanLedger = { seq: 0, at: Date.now() };
+function noteFillTiming(timer) {
+  const line = timer.line();
+  lastFillTiming = `${new Date().toISOString()} ${line}`;
+  log(line);
+  if (timer.marks.included !== undefined) fillStats.add(timer.marks.included, timer.ledgersLater());
 }
 
 /** One log line every 10 minutes: requests in the last minute per server, the busiest methods, 429s and waits. */
