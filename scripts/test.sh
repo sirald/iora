@@ -12,8 +12,8 @@ set -o pipefail
 
 BUILD_LOG="${BUILD_LOG:-/tmp/gk-build.log}"
 TEST_LOG="${TEST_LOG:-/tmp/gk-test.log}"
-# wasm files the tests read from wasm/ (contracts/factory/src/test.rs: contractimport "../../wasm/iora_vault.wasm")
-REQUIRED_WASM="${REQUIRED_WASM:-iora_vault.wasm}"
+# wasm files the tests read from wasm/ (contractimport in contracts/factory and contracts/mover tests)
+REQUIRED_WASM="${REQUIRED_WASM:-iora_vault.wasm iora_factory.wasm iora_usdc_exchange.wasm}"
 
 sha() { if command -v sha256sum > /dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
