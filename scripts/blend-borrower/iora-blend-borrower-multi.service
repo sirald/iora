@@ -1,0 +1,18 @@
+[Unit]
+Description=Iora Blend borrower bot, other coins (testnet): XLM and the iCOINs at their target supply APR (targets.json)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=iora
+WorkingDirectory=/opt/iora/blend-borrower
+# A second account: BORROWER_SECRET, USDC_STEP=off (see borrower.env.example). root:iora, mode 0640.
+EnvironmentFile=/etc/iora/borrower-multi.env
+ExecStart=/usr/bin/node borrower.js
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/iora/blend-borrower

@@ -1,0 +1,12 @@
+{
+  "note": "Target supply APRs per coin (side-session note faiz-hedefleri.md, real-market rates of 2026-11-27 from DefiLlama). supplyApr / maxBorrowApr as fractions, USD amounts. USDC is not here: the USDC step (UTIL_TARGET) handles it.",
+  "collateral": { "coin": "iBTC", "targetUsd": 20000 },
+  "coins": {
+    "XLM":   { "token": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", "supplyApr": 0.0001, "maxBorrowApr": 0.01,  "maxDebtUsd": 1500, "supplyUsd": 0 },
+    "iBTC":  { "token": "CC6SYYJ74P6UD6HCYTVEPCZV7T5HXAMSBEMZG3JTILCCTGZBFU2RPPBJ",  "code": "iBTC",  "issuer": "GAPS7TWWFRWBX4TWBDTDCKGM4FFRXK6SGY7HBMVA47QWHGD6QHK42FLE", "supplyApr": 0.0001, "maxBorrowApr": 0.01,  "maxDebtUsd": 1000, "supplyUsd": 3000 },
+    "iETH":  { "token": "CBRS4TZIJFE33XFIRV2NGOVXQD4L2Y2BDD3LRFGDS35FRM243IZAV6T6",  "code": "iETH",  "issuer": "GAPS7TWWFRWBX4TWBDTDCKGM4FFRXK6SGY7HBMVA47QWHGD6QHK42FLE", "supplyApr": 0.01,   "maxBorrowApr": 0.035, "maxDebtUsd": 1500, "supplyUsd": 3000 },
+    "iSOL":  { "token": "CCFB2LNCAN23V7ECUHO7JFKVGR2BG6GAPF2EN6463NWRMK3CPP3IRSQG",  "code": "iSOL",  "issuer": "GAPS7TWWFRWBX4TWBDTDCKGM4FFRXK6SGY7HBMVA47QWHGD6QHK42FLE", "supplyApr": 0.02,   "maxBorrowApr": 0.065, "maxDebtUsd": 1500, "supplyUsd": 3000 },
+    "iAVAX": { "token": "CBGHC6QYWTTXILFOMFYAJVZL7RLVLKLE2GEHHGOAOQJXIBVUVLFZ5Q4H", "code": "iAVAX", "issuer": "GAPS7TWWFRWBX4TWBDTDCKGM4FFRXK6SGY7HBMVA47QWHGD6QHK42FLE", "supplyApr": 0.0085, "maxBorrowApr": 0.035, "maxDebtUsd": 1500, "supplyUsd": 3000 },
+    "iXRP":  { "token": "CAC5YS4LZQSUYAFSUCMKSSIBX6R5U427R77OSFT47T5477GCNRQH2YDI",  "code": "iXRP",  "issuer": "GAPS7TWWFRWBX4TWBDTDCKGM4FFRXK6SGY7HBMVA47QWHGD6QHK42FLE", "supplyApr": 0.0005, "maxBorrowApr": 0.02,  "maxDebtUsd": 1000, "supplyUsd": 3000 }
+  }
+}

@@ -43,3 +43,52 @@ Run as root on the server. The server layout is the keeper's (`scripts/server.sh
 
 To stop: `systemctl disable --now iora-blend-borrower.timer`. The open position stays; repay it by hand or set
 `UTIL_TARGET` low and let the bot repay.
+
+## Other coins: XLM and Iora's coins (multi.js, targets.json)
+
+The same program can also borrow XLM and Iora's coins iBTC, iETH, iSOL, iAVAX and iXRP, so that each of them earns
+interest.
+
+**Targets.** `targets.json` gives each coin a **target supply APR**. The values were chosen from real-market rates of
+2026-11-27 (see the side-session note `faiz-hedefleri.md`):
+
+| Coin | Target supply APR |
+|---|---|
+| XLM | 0.01% |
+| iBTC | 0.01% |
+| iETH | 1% |
+| iSOL | 2% |
+| iAVAX | 0.85% |
+| iXRP | 0.05% |
+
+**Why an APR and not a utilisation.** Blend v2 multiplies the rate curve by `ir_mod` and moves `ir_mod` up or down
+while utilisation sits above or below the curve's `util`, bounded to 0.1–10. A fixed utilisation therefore drifts the
+rate. Each run the bot instead:
+
+1. solves for the utilisation that pays the target at the current `ir_mod`, capped at `util + UTIL_OVERSHOOT` and at
+   the coin's `maxBorrowApr`;
+2. borrows or repays towards it, but only when the gap is bigger than `band` (default 2 points).
+
+It settles at `util`, with the `ir_mod` that pays the target. For very small targets it settles at the `ir_mod`
+floor of 0.1, below `util`.
+
+**Each run, per coin:**
+
+- **Lender supply.** The bot supplies the coin as a lender (Blend request 0) up to `supplyUsd`, from its wallet, so
+  there is something to borrow before Iora vaults bring their own.
+- **Collateral.** It keeps `collateral.targetUsd` of one coin (`iBTC`) posted. Iora's coins are minted by the issuer,
+  so this collateral grows neither the USDC nor the XLM supply (that is the loop that made XLM borrowing against
+  USDC/XLM collateral misbehave).
+- **Limits.** `maxDebtUsd` per coin; `MULTI_TARGET_HF` for new borrows. Below `MULTI_MIN_HF` the bot repays, largest
+  effective liability first. It never borrows a coin past its `max_util`. When a price is missing or stale it does
+  nothing.
+- **Inactive reserves.** A coin that is not an active reserve is skipped. Iora's coins become reserves after
+  2026-12-04T19:58Z (`scripts/apply-blend-rates.sh`), so until then only XLM is handled.
+
+**Run it as a second account.** Use `/etc/iora/borrower-multi.env` with `USDC_STEP=off`, and the units
+`iora-blend-borrower-multi.service` / `.timer`. This keeps the USDC bot's health factor and XLM collateral as they
+are. The USDC bot keeps `MULTI=off`, or runs without `targets.json`, so it behaves exactly as before.
+
+**Inventory.** It is minted on the development machine and the issuer's key never goes to the server:
+`bash scripts/blend-borrower/fund-multi.sh <ADDRESS>` mints `supplyUsd` plus 10% of each coin, and also
+`collateral.targetUsd` plus 10% of the collateral coin. XLM comes from friendbot.
