@@ -19,19 +19,32 @@ export function coinLabel(token, coins, short = (t) => t) {
 
 /**
  * Splits an earlier vault's content by the newest factory's allowed list (`allowed`: Set of token addresses).
- *   carry      coins moved into the new vault
- *   walletOnly coins only withdrawn to the wallet (not allowed in the new vault)
- *   keep       open orders that can be placed again (both of their coins allowed)
+ * `exchange` maps a retired coin to the coin it is exchanged for 1:1 on the way (Blend's old test USDC -> Circle's
+ * USDC); such a coin is carried too, marked with `convert`, as long as its new coin is allowed.
+ *   carry      coins moved into the new vault ({ ...coin, convert: newToken } for an exchanged coin)
+ *   convert    [{ from, to }]: the exchanges the move makes
+ *   walletOnly coins only withdrawn to the wallet (not allowed and not exchangeable)
+ *   keep       open orders that can be placed again, with exchanged coins already replaced (`from` = the original)
  *   cancelOnly open orders that are only cancelled
  */
-export function planMove(coins, orders, allowed) {
-  const ok = (t) => allowed.has(String(t));
-  return {
-    carry: coins.filter((c) => ok(c.token)),
-    walletOnly: coins.filter((c) => !ok(c.token)),
-    keep: orders.filter((o) => ok(o.sell) && ok(o.buy)),
-    cancelOnly: orders.filter((o) => !(ok(o.sell) && ok(o.buy))),
-  };
+export function planMove(coins, orders, allowed, exchange = {}) {
+  const to = (t) => (allowed.has(String(t)) ? String(t) : exchange[String(t)] && allowed.has(exchange[String(t)]) ? exchange[String(t)] : null);
+  const carry = [], walletOnly = [], convert = [], keep = [], cancelOnly = [];
+  for (const c of coins) {
+    const t = to(c.token);
+    if (!t) walletOnly.push(c);
+    else if (t === String(c.token)) carry.push(c);
+    else {
+      carry.push({ ...c, convert: t });
+      if (!convert.some((x) => x.from === String(c.token))) convert.push({ from: String(c.token), to: t });
+    }
+  }
+  for (const o of orders) {
+    const sell = to(o.sell), buy = to(o.buy);
+    if (sell && buy && sell !== buy) keep.push(sell === String(o.sell) && buy === String(o.buy) ? o : { ...o, sell, buy, from: o });
+    else cancelOnly.push(o);
+  }
+  return { carry, convert, walletOnly, keep, cancelOnly };
 }
 
 /** The app stays on the newest factory unless the build says VITE_STAY_NEWEST=0. */

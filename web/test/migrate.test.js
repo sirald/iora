@@ -51,3 +51,33 @@ test("stay on the newest factory unless the build says 0", () => {
   assert.equal(stayNewest("0"), false);
   assert.equal(stayNewest(" 0 "), false);
 });
+
+test("old Blend USDC is carried with an exchange to Circle USDC", () => {
+  const ex = { [OLD_BLEND_USDC]: USDC };
+  const p = planMove([{ token: OLD_BLEND_USDC, bal: 5n }, { token: XLM, bal: 7n }, { token: BTC, bal: 1n }], [], allowed, ex);
+  assert.deepEqual(p.carry, [{ token: OLD_BLEND_USDC, bal: 5n, convert: USDC }, { token: XLM, bal: 7n }]);
+  assert.deepEqual(p.convert, [{ from: OLD_BLEND_USDC, to: USDC }]);
+  assert.deepEqual(p.walletOnly.map((c) => c.token), [BTC]); // no exchange for other retired coins
+});
+
+test("orders in old Blend USDC are placed again in Circle USDC", () => {
+  const ex = { [OLD_BLEND_USDC]: USDC };
+  const orders = [
+    { id: 0, sell: OLD_BLEND_USDC, buy: XLM, limit: 5n },
+    { id: 1, sell: XLM, buy: OLD_BLEND_USDC, limit: 6n },
+    { id: 2, sell: AQUA, buy: USDC },
+    { id: 3, sell: BTC, buy: OLD_BLEND_USDC },
+  ];
+  const p = planMove([], orders, allowed, ex);
+  assert.deepEqual(p.keep.map((o) => [o.id, o.sell, o.buy]), [[0, USDC, XLM], [1, XLM, USDC], [2, AQUA, USDC]]);
+  assert.equal(p.keep[0].limit, 5n);
+  assert.equal(p.keep[0].from.sell, OLD_BLEND_USDC);
+  assert.equal(p.keep[2].from, undefined); // unchanged orders are passed as they are
+  assert.deepEqual(p.cancelOnly.map((o) => o.id), [3]);
+});
+
+test("no exchange when Circle USDC itself is not allowed", () => {
+  const p = planMove([{ token: OLD_BLEND_USDC, bal: 5n }], [], new Set([XLM]), { [OLD_BLEND_USDC]: USDC });
+  assert.equal(p.carry.length, 0);
+  assert.equal(p.walletOnly.length, 1);
+});

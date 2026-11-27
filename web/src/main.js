@@ -7,6 +7,7 @@ import {
   Address,
   Asset,
   BASE_FEE,
+  Memo,
   Contract,
   Networks,
   Operation,
@@ -1377,6 +1378,163 @@ async function newestAllowed() {
   allowedNow = { at: Date.now(), set: new Set(r.value.map(String)) };
   return allowedNow.set;
 }
+
+// ---- Blend's old test USDC -> Circle's test USDC, 1:1, when an earlier vault is moved ----
+// The wallet pays its old test USDC back to that token's issuer (which burns it), then api/convert.js checks the
+// burn and sends the same amount of Circle's test USDC. A burn that was not exchanged yet is kept in this browser
+// (iora-convert-pending), so the exchange can be finished later from the Portfolio page.
+const OLD_USDC_ISSUER = "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56";
+const EXCHANGE = () => ({ [OLD_BLEND_USDC]: C.usdc });
+const CONVERT_KEY = "iora-convert-pending";
+const convLoad = () => {
+  try {
+    const a = JSON.parse(localStorage.getItem(CONVERT_KEY) || "[]");
+    return Array.isArray(a) ? a.filter((p) => p && /^[0-9a-f]{64}$/.test(p.hash) && typeof p.wallet === "string") : [];
+  } catch {
+    return [];
+  }
+};
+const convSave = (list) => {
+  try {
+    localStorage.setItem(CONVERT_KEY, JSON.stringify(list));
+  } catch {}
+};
+const convDrop = (hash) => convSave(convLoad().filter((p) => p.hash !== hash));
+const CONVERT_ERRORS = {
+  no_access: "the exchange is part of the beta: open the app with your invite code or an allowed wallet",
+  no_trustline: "your wallet has no USDC trustline for Circle's USDC",
+  wallet_cap: "this wallet reached the exchange limit",
+  faucet_low: "Iora's exchange account is out of Circle USDC right now; try again later",
+  tx_not_yours: "the burn was not sent from this wallet",
+  tx_failed: "the burn transaction failed, so nothing was burned",
+  tx_too_old: "the burn is older than one hour",
+  no_burn: "that transaction does not return old test USDC to its issuer",
+  not_configured: "the exchange is not set up yet",
+  not_testnet: "the exchange only runs on testnet",
+};
+/** The wallet must hold Circle's USDC: adds the trustline if it is missing. */
+async function ensureUsdcTrust() {
+  flushReads();
+  const b = await read(C.usdc, "balance", [addr(me)]);
+  if (b.ok) return true;
+  try {
+    const account = await server.getAccount(me);
+    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASS })
+      .addOperation(Operation.changeTrust({ asset: new Asset("USDC", C.usdcIssuer) }))
+      .setTimeout(180)
+      .build();
+    log("USDC trustline (Circle's USDC): waiting for wallet approval…", "wait");
+    await signAndSend(tx, "USDC trustline");
+    log("USDC trustline added.", "ok");
+    flushReads();
+    return true;
+  } catch (e) {
+    log(`USDC trustline: ${safeErr(String((e && e.message) || e))}`, "err");
+    return false;
+  }
+}
+/** Asks api/convert.js to exchange a burn; retries while Horizon catches up or a payment is being settled. */
+async function convertCall(hash) {
+  let token = null;
+  try {
+    token = localStorage.getItem("iora-access");
+  } catch {}
+  let last = "network";
+  for (let i = 0; i < 8; i++) {
+    let j = {};
+    try {
+      const r = await fetch("/api/convert", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: me, hash, token }), cache: "no-store" });
+      j = await r.json().catch(() => ({}));
+    } catch {
+      j = { error: "network" };
+    }
+    if (j.ok && /^[0-9a-f]{64}$/.test(String(j.hash))) return { ok: true, hash: j.hash, amount: toUnits(String(j.amount)) };
+    last = j.error || "network";
+    if (!["tx_not_found", "in_progress", "store_busy", "network", "send_failed", "send_unknown"].includes(last)) break;
+    const wait = last === "in_progress" || last === "send_unknown" ? 30_000 : 4_000;
+    log(`Exchanging your old test USDC: ${last === "tx_not_found" ? "waiting for the network to show the burn" : "still working"}…`, "wait");
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  return { ok: false, error: last };
+}
+/**
+ * Exchanges `amount` (in the wallet) of Blend's old test USDC for Circle's test USDC: trustline if needed, burn
+ * (signed by the user), then api/convert.js. Returns the Circle USDC received, or null; says where it stopped.
+ */
+async function exchangeOldUsdc(amount) {
+  if (amount <= 0n) return 0n;
+  if (!(await ensureUsdcTrust())) {
+    log(`Stopped: your ${fmt(amount, 2)} old test USDC (Blend) is in your wallet, not exchanged yet. Add the USDC trustline on the Test funds page, then move again.`, "err");
+    return null;
+  }
+  const account = await server.getAccount(me);
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: PASS })
+    .addOperation(Operation.payment({ destination: OLD_USDC_ISSUER, asset: new Asset("USDC", OLD_USDC_ISSUER), amount: toPlain(amount) }))
+    .addMemo(Memo.text("Iora: old USDC to Circle"))
+    .setTimeout(180)
+    .build();
+  // tx.hash() is a Uint8Array in the browser build (its toString ignores "hex"), so the hex is made by hand
+  const hash = [...tx.hash()].map((b) => b.toString(16).padStart(2, "0")).join("");
+  // Kept before signing: if the answer is lost after the burn, the exchange can still be finished.
+  convSave([...convLoad().filter((p) => p.hash !== hash), { hash, amount: String(amount), wallet: me, at: Date.now(), burned: false }]);
+  try {
+    log("Return your old test USDC (Blend) to its issuer: waiting for wallet approval…", "wait");
+    await signAndSend(tx, "Return old test USDC");
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/Status unknown/i.test(msg)) {
+      log(`The return of your old test USDC is not confirmed yet (${safeErr(msg)}). When it is, finish the exchange from the Portfolio page.`, "err");
+    } else {
+      convDrop(hash);
+      log(`Stopped: your ${fmt(amount, 2)} old test USDC (Blend) is in your wallet, not exchanged (${safeErr(msg)}). You can move again later.`, "err");
+    }
+    return null;
+  }
+  convSave(convLoad().map((p) => (p.hash === hash ? { ...p, burned: true } : p)));
+  return finishExchange(hash, amount);
+}
+/** The api/convert.js step for a burn; on success the pending entry is removed. */
+async function finishExchange(hash, amount) {
+  const r = await convertCall(hash);
+  finishExchange.lastError = r.ok ? null : r.error;
+  if (!r.ok) {
+    log(`Your ${fmt(amount, 2)} old test USDC was returned to its issuer, but the exchange for Circle's USDC did not finish (${esc(CONVERT_ERRORS[r.error] || r.error)}). Nothing is lost: press "Finish the exchange" on the Portfolio page to try again.`, "err");
+    return null;
+  }
+  convDrop(hash);
+  flushReads();
+  log(`Exchanged ${fmt(r.amount, 2)} old test USDC (Blend) for ${fmt(r.amount, 2)} USDC (Circle) · <a href="${EXPLORER}/tx/${r.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
+  return r.amount;
+}
+/** Portfolio: a burn that was not exchanged yet can be finished here. */
+function convNote() {
+  const host = $("pfolio");
+  if (!host) return;
+  const list = me ? convLoad().filter((p) => p.wallet === me) : [];
+  let el = document.getElementById("pf-conv-note");
+  if (!list.length) return void (el && el.remove());
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "pf-conv-note";
+    el.className = "pf-movenote";
+    host.before(el);
+  }
+  const sum = list.reduce((a, p) => a + BigInt(p.amount || 0), 0n);
+  el.innerHTML = `<span><b>${fmt(sum, 2)} old test USDC</b> returned to its issuer and not yet exchanged for Circle's USDC.</span><button type="button" class="link" data-go>Finish the exchange</button>`;
+  el.querySelector("[data-go]").onclick = async (e) => {
+    e.target.disabled = true;
+    for (const p of list) {
+      const got = await finishExchange(p.hash, BigInt(p.amount || 0));
+      // A return that never reached the network burned nothing: the coin is still in the wallet.
+      if (got === null && !p.burned && Date.now() - p.at > 10 * 60_000 && finishExchange.lastError === "tx_not_found") {
+        convDrop(p.hash);
+        log("That return never reached the network, so nothing was burned: your old test USDC is still in your wallet. Move again from the Portfolio page.", "err");
+      }
+    }
+    convNote();
+    refresh().catch(() => {});
+  };
+}
 /** In version 7 the vault address read from the factory is turned into a handle for its side (older generations keep the plain address). */
 // Single-vault factory: the newest factory, or one in the generations list whose buy and sell address are the SAME
 // (if version 7 was deployed more than once, the earlier ones are single-vault too and are spoken to the same way).
@@ -1757,7 +1915,11 @@ async function renderLegacy() {
   );
   const items = found.filter(Boolean);
   const allowed = await newestAllowed().catch(() => null);
-  for (const i of items) i.movable = !!(allowed && i.token && allowed.has(i.token));
+  // Blend's old test USDC can be moved too: it is exchanged 1:1 for Circle's USDC on the way.
+  for (const i of items) {
+    i.exchange = !!(allowed && i.token === OLD_BLEND_USDC && allowed.has(C.usdc));
+    i.movable = !!(allowed && i.token && (allowed.has(i.token) || i.exchange));
+  }
   pfLegacyNote(items);
   if (!items.length) return ((box.innerHTML = ""), (box.hidden = true));
   const coin = (t) => `<i class="coin ${t.toLowerCase()}" aria-hidden="true"></i>`;
@@ -1775,10 +1937,10 @@ async function renderLegacy() {
         <div class="legacy-what">
           <span class="legacy-label">${i.tok === "XLM" ? "Old sell vault" : "Old buy vault"} · <a href="${EXPLORER}/contract/${i.v}" target="_blank" rel="noopener">${short(i.v)}</a></span>
           <b class="legacy-amt">${coin(i.tok)}${fmt(i.b, 2)} <small>${esc(i.name)}</small></b>
-          ${!i.movable ? `<span class="legacy-note">${esc(i.name)} is not used in the new Iora: withdraw it to your wallet${i.open ? `; the ${i.open} open order${i.open > 1 ? "s are" : " is"} cancelled` : ""}</span>` : i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: placed again at the same price</span>` : ""}
+          ${i.exchange ? `<span class="legacy-note">Exchanged 1:1 for Circle's test USDC on the way${i.open ? `; ${i.open} open order${i.open > 1 ? "s" : ""} placed again at the same price` : ""}</span>` : !i.movable ? `<span class="legacy-note">${esc(i.name)} is not used in the new Iora: withdraw it to your wallet${i.open ? `; the ${i.open} open order${i.open > 1 ? "s are" : " is"} cancelled` : ""}</span>` : i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: placed again at the same price</span>` : ""}
         </div>
         <div class="legacy-actions">
-          ${i.movable ? `<button class="btn primary" data-migrate="${i.v}" data-tok="${i.tok}">Move to new ${i.tok === "XLM" ? "sell" : "buy"} vault</button>` : ""}
+          ${i.movable ? `<button class="btn primary" data-migrate="${i.v}" data-tok="${i.tok}" data-token="${esc(i.token || "")}">Move to new ${i.tok === "XLM" ? "sell" : "buy"} vault</button>` : ""}
           <button class="${i.movable ? "link" : "btn primary"}" data-legacy="${i.v}" data-tok="${i.tok}" data-token="${esc(i.token || "")}" data-name="${esc(i.name)}">${i.movable ? "or withdraw to wallet" : "Withdraw to wallet"}</button>
         </div>
       </div>`,
@@ -1786,7 +1948,7 @@ async function renderLegacy() {
       .join("")}</div>`;
   syncLegacy();
   for (const b of box.querySelectorAll("[data-legacy]")) b.onclick = () => emptyLegacy(b.dataset.legacy, b.dataset.tok, b.dataset.token || null, b.dataset.name || b.dataset.tok);
-  for (const b of box.querySelectorAll("[data-migrate]")) b.onclick = () => migrateLegacy(b.dataset.migrate, b.dataset.tok);
+  for (const b of box.querySelectorAll("[data-migrate]")) b.onclick = () => migrateLegacy(b.dataset.migrate, b.dataset.tok, b.dataset.token || null);
 }
 
 /** The old buy vault shows only on the Buy vault tab, the old sell vault only on the Sell vault tab. */
@@ -1872,6 +2034,7 @@ async function olderVaults() {
 async function genNote() {
   const host = $("pfolio"), link = $("pf-move-link");
   if (!host || !link) return;
+  convNote();
   let list = [];
   try {
     list = await olderVaults();
@@ -1893,7 +2056,7 @@ async function genNote() {
   const parts = v.coins.map((c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`);
   const what = [...parts, v.orders.length ? `${v.orders.length} open order${v.orders.length > 1 ? "s" : ""}` : ""].filter(Boolean).join(", ");
   const allowed = await newestAllowed().catch(() => null);
-  const plan = allowed ? planMove(v.coins, v.orders, allowed) : null;
+  const plan = allowed ? planMove(v.coins, v.orders, allowed, EXCHANGE()) : null;
   const go = plan && !plan.carry.length && !plan.keep.length ? "Withdraw to your wallet" : "Move to the new vault";
   link.innerHTML = `${what} in an earlier version of your vault. <button type="button" class="link">${go}</button>`;
   link.querySelector("button").onclick = () => moveToLatest(v);
@@ -1984,11 +2147,12 @@ function pfChartDraw(hist) {
 /** Earlier single vault -> newest vault: cancel, withdraw every coin, open the new vault if needed, deposit, and
     (if the owner keeps the box ticked) place the open orders again with the same settings. Every step is signed. */
 async function moveToLatest(v) {
-  // Only coins the newest factory allows go into the new vault. Any other coin (Blend's old test USDC, earlier test
-  // coins) is withdrawn to the wallet only, and an order that uses one is cancelled, not placed again.
+  // Only coins the newest factory allows go into the new vault. Blend's old test USDC is exchanged 1:1 for Circle's
+  // USDC on the way (and its orders are placed again in Circle's USDC). Any other coin is withdrawn to the wallet
+  // only, and an order that uses one is cancelled, not placed again.
   const allowed = await newestAllowed().catch(() => null);
   if (!allowed) return log("Could not read which coins the new vault accepts. Nothing was moved; try again in a moment.", "err");
-  const plan = planMove(v.coins, v.orders, allowed);
+  const plan = planMove(v.coins, v.orders, allowed, EXCHANGE());
   const live = plan.keep; // these open orders can be carried; in the new vault an order has no end date
   const cur = await read(GEN_LATEST.buy, "vault_of", [addr(me)]);
   let dest = cur.ok && cur.value ? String(cur.value) : null;
@@ -1998,6 +2162,8 @@ async function moveToLatest(v) {
   const rows = [["From", `Earlier vault ${short(v.id)}`]];
   if (plan.carry.length || live.length) rows.push(["To", dest ? `Your newest vault ${short(dest)}` : "A new vault, opened for you"]);
   if (plan.carry.length) rows.push(["Coins", `${plan.carry.map(amt).join(", ")} (interest included)`]);
+  if (plan.convert.length)
+    rows.push(["Exchange", "Your old test USDC is exchanged 1:1 for Circle's test USDC (the USDC Iora uses now) and deposited in your new vault."]);
   if (plan.walletOnly.length)
     rows.push(["To your wallet only", `${plan.walletOnly.map(amt).join(", ")}: not used in the new Iora, so ${plan.walletOnly.length > 1 ? "they are" : "it is"} withdrawn to your wallet, not moved`]);
   if (live.length)
@@ -2007,9 +2173,9 @@ async function moveToLatest(v) {
     ]);
   if (plan.cancelOnly.length)
     rows.push(["Cancelled only", `${plan.cancelOnly.length} open order${plan.cancelOnly.length > 1 ? "s" : ""} (${plan.cancelOnly.map(side).join(", ")}): ${plan.cancelOnly.length > 1 ? "they use" : "it uses"} a coin the new Iora does not use, so ${plan.cancelOnly.length > 1 ? "they are" : "it is"} not placed again`]);
-  const base = v.orders.length + v.coins.length + plan.carry.length + (needVault ? 1 : 0);
+  const base = v.orders.length + v.coins.length + plan.carry.length + plan.convert.length + (needVault ? 1 : 0);
   const notes = [
-    `You'll approve about ${base}${live.length ? ` to ${base + live.length}` : ""} steps in your wallet: ${v.orders.length ? "cancel the orders, " : ""}withdraw each coin${needVault ? ", open the new vault" : ""}${plan.carry.length ? ", deposit" : ""}${live.length ? ", then place the orders again if you keep the box ticked" : ""}.`,
+    `You'll approve about ${base}${live.length ? ` to ${base + live.length}` : ""} steps in your wallet: ${v.orders.length ? "cancel the orders, " : ""}withdraw each coin${plan.convert.length ? ", return the old test USDC to its issuer (a USDC trustline first if your wallet has none)" : ""}${needVault ? ", open the new vault" : ""}${plan.carry.length ? ", deposit" : ""}${live.length ? ", then place the orders again if you keep the box ticked" : ""}.`,
     "The coins only ever move between your own vaults and your wallet. If you stop halfway, they stay safe in your wallet and you can deposit them on this page.",
   ];
   const title = plan.carry.length || live.length ? "Move to your newest vault" : "Withdraw to your wallet";
@@ -2028,6 +2194,7 @@ async function moveToLatest(v) {
   const moved = [];
   const toWallet = [];
   const carryTokens = new Set(plan.carry.map((c) => c.token));
+  const exchangeTo = new Map(plan.convert.map((x) => [x.from, x.to]));
   for (const c of v.coins) {
     const sym = coinSym(c.token);
     const [free, before] = await Promise.all([rawRead(v.id, "free_balance", [addr(c.token)]), read(c.token, "balance", [addr(me)])]);
@@ -2039,6 +2206,12 @@ async function moveToLatest(v) {
     if (!carryTokens.has(c.token)) {
       toWallet.push({ sym, got });
       log(`${fmt(got, 2)} ${esc(sym)} is not used in the new Iora, so it was withdrawn to your wallet.`, "ok");
+      continue;
+    }
+    if (exchangeTo.has(c.token)) {
+      const out = await exchangeOldUsdc(got);
+      if (out === null) return refresh();
+      if (out > 0n) moved.push({ token: exchangeTo.get(c.token), sym: coinSym(exchangeTo.get(c.token)), got: out, wallet: null });
       continue;
     }
     moved.push({ token: c.token, sym, got, wallet: after.ok ? BigInt(after.value) : null });
@@ -2095,8 +2268,9 @@ async function moveToLatest(v) {
 }
 
 /** From the old vault to the new one: cancel + withdraw + (open a new vault if needed) + deposit. */
-async function migrateLegacy(v, tok) {
+async function migrateLegacy(v, tok, coin = null) {
   const sell = tok === "XLM";
+  const exchange = coin === OLD_BLEND_USDC;
   const factory = sell ? SV.factory : C.factory;
   if (!factory) return log("The new vault is not available yet.", "err");
   const open = await openOrdersIn(v);
@@ -2107,7 +2281,7 @@ async function migrateLegacy(v, tok) {
   const steps = open.length + 1 + (target ? 0 : 1) + 1 + carry.length;
   const rows = [
     ["From", `Old ${sell ? "sell" : "buy"} vault ${short(v)}`],
-    ["Amount", `${fmt(amt, 2)} ${tok} (interest included)`],
+    ["Amount", `${fmt(amt, 2)} ${exchange ? "old test USDC (Blend)" : tok} (interest included)`],
     ["To", target ? `Your new ${sell ? "sell" : "buy"} vault ${short(target)}` : `A new ${sell ? "sell" : "buy"} vault, opened for you`],
   ];
   if (open.length) {
@@ -2117,14 +2291,19 @@ async function migrateLegacy(v, tok) {
       `${carry.length} placed again at the same price: ${carry.map((o) => `${fmt(o.leftU, 2)} ${tok} at ${px(o)}`).join(", ")}`,
     ]);
   }
+  if (exchange) rows.push(["Exchange", "Your old test USDC is exchanged 1:1 for Circle's test USDC (the USDC Iora uses now) and deposited in your new vault."]);
   const notes = [
-    `You'll approve ${steps} steps in your wallet: ${open.length ? "cancel the old orders, " : ""}withdraw${target ? "" : ", open the new vault"}, deposit${carry.length ? ", then place your orders again" : ""}.`,
+    `You'll approve ${steps + (exchange ? 1 : 0)} steps in your wallet: ${open.length ? "cancel the old orders, " : ""}withdraw${exchange ? ", return the old test USDC to its issuer" : ""}${target ? "" : ", open the new vault"}, deposit${carry.length ? ", then place your orders again" : ""}.`,
     "The money only ever moves between your own vaults and your wallet. If you stop halfway, it stays safe in your wallet.",
   ];
   if (!(await ask({ title: `Move to your new ${sell ? "sell" : "buy"} vault`, rows, notes, confirm: "Start" }))) return;
 
-  const got = await drainLegacy(v, tok);
+  let got = await drainLegacy(v, tok, coin, exchange ? "old test USDC (Blend)" : tok);
   if (got === null) return refresh();
+  if (exchange) {
+    got = await exchangeOldUsdc(got);
+    if (got === null) return refresh();
+  }
   let dest = target;
   if (!dest) {
     if (!(await call(factory, "create_vault", [addr(me)], `Open new ${sell ? "sell" : "buy"} vault`, FACTORY_ERRORS))) return refresh();
