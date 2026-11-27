@@ -1056,3 +1056,73 @@ export class LedgerRace {
     this.ledgers.clear();
   }
 }
+// ---------------------------------------------------------------------------
+// Oracle price band: a pool whose price is far from the oracle's (a testnet pool nobody arbitrages) is not used
+// ---------------------------------------------------------------------------
+
+/**
+ * The oracle's exchange rate in raw units: how many raw units of `tout` one raw unit of `tin` is worth.
+ * pIn, pOut: the oracle's prices of the two tokens (same oracle, so its own decimals cancel out); decIn, decOut:
+ * the tokens' decimals. Null if a price is missing or not positive.
+ */
+export function oracleRate(pIn, pOut, decIn = 7, decOut = 7) {
+  const a = Number(pIn);
+  const b = Number(pOut);
+  if (!(a > 0) || !(b > 0)) return null;
+  return (a / b) * 10 ** (Number(decOut) - Number(decIn));
+}
+
+/**
+ * Is a quote (amountIn of tin -> amountOut of tout, raw units) within maxBps of the oracle rate? The deviation is
+ * symmetric (max(pool/oracle, oracle/pool) - 1), so 0.60 vs 0.127 is 372% whichever way the pair is written.
+ * Returns { ok, implied, devBps }.
+ */
+export function bandCheck(amountIn, amountOut, rate, maxBps) {
+  const i = Number(amountIn);
+  const o = Number(amountOut);
+  if (!(i > 0) || !(o > 0) || !(rate > 0)) return { ok: false, implied: null, devBps: null };
+  const implied = o / i;
+  const dev = Math.max(implied / rate, rate / implied) - 1;
+  const devBps = Math.round(dev * 10_000);
+  return { ok: devBps <= maxBps, implied, devBps };
+}
+
+/**
+ * The price shown in a log line: the coin's price in USDC when one side is USDC, else tout per tin; from a raw rate
+ * (tout units per tin unit) and the decimals.
+ */
+export function shownPrice(rate, tinIsUsdc, decIn = 7, decOut = 7) {
+  if (!(rate > 0)) return null;
+  const human = rate * 10 ** (Number(decIn) - Number(decOut)); // whole tout per whole tin
+  return tinIsUsdc ? 1 / human : human;
+}
+
+/**
+ * Crossing two orders: the price range both limits allow ([lo, hi], X per 1 Y scaled by `scale`) cut to the oracle
+ * band around pOracle (same units). Returns { lo, hi, p } with p = the oracle price kept inside the range, or null
+ * when the limits and the band do not meet (no cross).
+ */
+export function crossBand(lo, hi, pOracle, maxBps) {
+  const p = BigInt(pOracle);
+  if (p <= 0n) return null;
+  const b = BigInt(Math.max(0, Math.round(maxBps)));
+  const bandLo = (p * 10_000n) / (10_000n + b);
+  const bandHi = (p * (10_000n + b)) / 10_000n;
+  const l = lo > bandLo ? lo : bandLo;
+  const h = hi < bandHi ? hi : bandHi;
+  if (l > h) return null;
+  return { lo: l, hi: h, p: p < l ? l : p > h ? h : p };
+}
+
+/**
+ * The best quote, with one preferred source (the reference pool kept at the oracle price): it is taken when it
+ * pays at most preferBps less than the best one. quotes: [[label, q|null], ...] -> { label, q } or null.
+ */
+export function preferQuote(quotes, prefer = null, preferBps = 0) {
+  const best = bestQuote(quotes);
+  if (!best || !prefer || best.label === prefer) return best;
+  const p = quotes.find(([l]) => l === prefer);
+  if (!p || p[1] === null || p[1] === undefined) return best;
+  const q = BigInt(p[1]);
+  return q > 0n && q * 10_000n >= best.q * (10_000n - BigInt(Math.max(0, Math.round(preferBps)))) ? { label: prefer, q } : best;
+}
