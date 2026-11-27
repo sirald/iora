@@ -21,6 +21,7 @@ import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTran
 import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from "./rpc.js";
 import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
+import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
 import { StellarWalletsKit } from "swk-sdk";
@@ -1363,6 +1364,19 @@ async function readPool() {
 // funds are: factory pairs with the same call signatures are listed in VITE_GENERATIONS (buy:sell,
 // newest first). A user with funds in no generation starts in the newest one.
 const GEN_LATEST = { buy: C.factory, sell: SV.factory };
+// VITE_STAY_NEWEST (default on): the app always uses the newest factory. Earlier vaults run on retired test coins
+// (Blend's old test USDC), so they are shown only in the Portfolio's "earlier vault" note, from which the user
+// withdraws or moves. VITE_STAY_NEWEST=0 brings back "use the generation where the funds are".
+const STAY_NEWEST = stayNewest(import.meta.env.VITE_STAY_NEWEST);
+let allowedNow = null; // { at, set }: the newest factory's allowed tokens
+/** The tokens the newest factory allows (Set of addresses), or null if it could not be read. */
+async function newestAllowed() {
+  if (allowedNow && Date.now() - allowedNow.at < 300_000) return allowedNow.set;
+  const r = await read(GEN_LATEST.buy, "allowed_tokens");
+  if (!r.ok || !Array.isArray(r.value)) return null;
+  allowedNow = { at: Date.now(), set: new Set(r.value.map(String)) };
+  return allowedNow.set;
+}
 /** In version 7 the vault address read from the factory is turned into a handle for its side (older generations keep the plain address). */
 // Single-vault factory: the newest factory, or one in the generations list whose buy and sell address are the SAME
 // (if version 7 was deployed more than once, the earlier ones are single-vault too and are spoken to the same way).
@@ -1413,7 +1427,7 @@ async function pickGeneration() {
   if (!me || genFor === me) return;
   const who = me;
   let pick = GEN_LATEST;
-  if (GENERATIONS.length > 1) {
+  if (GENERATIONS.length > 1 && !STAY_NEWEST) {
     try {
       // The newest generation with funds wins, so the answer is known as soon as every newer generation has said
       // "nothing here": the older ones are not waited for (firstTrue).
@@ -1716,7 +1730,7 @@ function pfLegacyNote(items) {
     el.className = "pf-old";
     host.before(el);
   }
-  const parts = items.filter((i) => i.b >= LEGACY_DUST).map((i) => `<b>${fmt(i.b, 2)} ${i.tok}</b>`);
+  const parts = items.filter((i) => i.b >= LEGACY_DUST).map((i) => `<b>${fmt(i.b, 2)} ${esc(i.name || i.tok)}</b>`);
   const what = parts.length ? `${parts.join(" and ")} ${parts.length > 1 ? "are" : "is"} still in your old vault${items.length > 1 ? "s" : ""}` : "You still have open orders in an old vault";
   el.innerHTML = `<span>${what}. It is safe and still earning, but it is not counted in the totals below.</span><button class="btn" type="button">Move or withdraw</button>`;
   el.querySelector("button").onclick = () => $("legacy").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1736,10 +1750,14 @@ async function renderLegacy() {
       // Dust interest accrued between withdrawing and execution (below 0.01) is not shown
       if (b < LEGACY_DUST && !open.length) return null;
       const tok = cf.ok && String(cf.value.usdc) === C.xlm ? "XLM" : "USDC";
-      return { v, b, open: open.length, tok };
+      // The coin this old vault really holds: buy vaults of that era hold Blend's old test USDC, not Circle's.
+      const token = cf.ok && cf.value.usdc ? String(cf.value.usdc) : tok === "XLM" ? C.xlm : null;
+      return { v, b, open: open.length, tok, token, name: tok === "XLM" ? "XLM" : token ? coinSym(token) : "old test USDC" };
     }),
   );
   const items = found.filter(Boolean);
+  const allowed = await newestAllowed().catch(() => null);
+  for (const i of items) i.movable = !!(allowed && i.token && allowed.has(i.token));
   pfLegacyNote(items);
   if (!items.length) return ((box.innerHTML = ""), (box.hidden = true));
   const coin = (t) => `<i class="coin ${t.toLowerCase()}" aria-hidden="true"></i>`;
@@ -1756,18 +1774,18 @@ async function renderLegacy() {
         (i) => `<div class="legacy-item" data-kind="${i.tok === "XLM" ? "sell" : "buy"}">
         <div class="legacy-what">
           <span class="legacy-label">${i.tok === "XLM" ? "Old sell vault" : "Old buy vault"} · <a href="${EXPLORER}/contract/${i.v}" target="_blank" rel="noopener">${short(i.v)}</a></span>
-          <b class="legacy-amt">${coin(i.tok)}${fmt(i.b, 2)} <small>${i.tok}</small></b>
-          ${i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: placed again at the same price</span>` : ""}
+          <b class="legacy-amt">${coin(i.tok)}${fmt(i.b, 2)} <small>${esc(i.name)}</small></b>
+          ${!i.movable ? `<span class="legacy-note">${esc(i.name)} is not used in the new Iora: withdraw it to your wallet${i.open ? `; the ${i.open} open order${i.open > 1 ? "s are" : " is"} cancelled` : ""}</span>` : i.open ? `<span class="legacy-note">${i.open} open order${i.open > 1 ? "s" : ""}: placed again at the same price</span>` : ""}
         </div>
         <div class="legacy-actions">
-          <button class="btn primary" data-migrate="${i.v}" data-tok="${i.tok}">Move to new ${i.tok === "XLM" ? "sell" : "buy"} vault</button>
-          <button class="link" data-legacy="${i.v}" data-tok="${i.tok}">or withdraw to wallet</button>
+          ${i.movable ? `<button class="btn primary" data-migrate="${i.v}" data-tok="${i.tok}">Move to new ${i.tok === "XLM" ? "sell" : "buy"} vault</button>` : ""}
+          <button class="${i.movable ? "link" : "btn primary"}" data-legacy="${i.v}" data-tok="${i.tok}" data-token="${esc(i.token || "")}" data-name="${esc(i.name)}">${i.movable ? "or withdraw to wallet" : "Withdraw to wallet"}</button>
         </div>
       </div>`,
       )
       .join("")}</div>`;
   syncLegacy();
-  for (const b of box.querySelectorAll("[data-legacy]")) b.onclick = () => emptyLegacy(b.dataset.legacy, b.dataset.tok);
+  for (const b of box.querySelectorAll("[data-legacy]")) b.onclick = () => emptyLegacy(b.dataset.legacy, b.dataset.tok, b.dataset.token || null, b.dataset.name || b.dataset.tok);
   for (const b of box.querySelectorAll("[data-migrate]")) b.onclick = () => migrateLegacy(b.dataset.migrate, b.dataset.tok);
 }
 
@@ -1785,18 +1803,19 @@ function syncLegacy() {
 }
 
 /** Old vault: cancel the orders + withdraw everything. Returns the amount that reached the wallet (null on failure). */
-async function drainLegacy(v, tok) {
+async function drainLegacy(v, tok, coin = null, name = tok) {
   for (const o of await openOrdersIn(v)) if (!(await call(v, "cancel_order", [u32(o.id)], `Cancel old order #${o.id}`, VAULT_ERRORS))) return null;
-  const token = tok === "XLM" ? C.xlm : C.usdc;
+  // The coin the old vault holds (for buy vaults of that era: Blend's old test USDC), so the amount is measured right
+  const token = coin || (tok === "XLM" ? C.xlm : C.usdc);
   const before = await read(token, "balance", [addr(me)]);
   const bal = await read(v, "balance");
   if (!bal.ok || BigInt(bal.value) <= 0n) return 0n;
-  if (!(await call(v, "withdraw", [i128(BigInt(bal.value))], `Withdraw ${fmt(bal.value, 2)} ${tok} from old vault`, VAULT_ERRORS))) return null;
+  if (!(await call(v, "withdraw", [i128(BigInt(bal.value))], `Withdraw ${fmt(bal.value, 2)} ${esc(name)} from old vault`, VAULT_ERRORS))) return null;
   const after = await read(token, "balance", [addr(me)]);
   return before.ok && after.ok ? BigInt(after.value) - BigInt(before.value) : BigInt(bal.value);
 }
 
-async function emptyLegacy(v, tok) {
+async function emptyLegacy(v, tok, coin = null, name = tok) {
   const open = await openOrdersIn(v);
   const steps = open.length + 1;
   if (
@@ -1808,14 +1827,15 @@ async function emptyLegacy(v, tok) {
     }))
   )
     return;
-  const got = await drainLegacy(v, tok);
-  if (got !== null) log(`Moved ${fmt(got, 2)} ${tok} from your old vault to your wallet.`, "ok");
+  const got = await drainLegacy(v, tok, coin, name);
+  if (got !== null) log(`Moved ${fmt(got, 2)} ${esc(name)} from your old vault to your wallet.${coin && coin !== C.usdc && coin !== C.xlm ? " It is not used in the new Iora." : ""}`, "ok");
   await refresh();
 }
 
 // ---- Single vaults (version 7 and later): every coin and every pair in one place ----
 const COINS = () => [{ sym: "USDC", token: C.usdc }, { sym: "XLM", token: C.xlm }, ...PAIRS];
-const coinSym = (t) => (COINS().find((c) => c.token === String(t)) || { sym: short(String(t)) }).sym;
+// Retired coins (Blend's old test USDC) get a name that cannot be mistaken for the app's USDC (Circle's).
+const coinSym = (t) => coinLabel(t, COINS(), short);
 /** Open orders of every pair in a single vault (plain vault address), with schedule and take-profit settings. */
 async function allOpenOrders(id) {
   const cnt = await rawRead(id, "order_count");
@@ -1872,7 +1892,10 @@ async function genNote() {
   } catch {}
   const parts = v.coins.map((c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`);
   const what = [...parts, v.orders.length ? `${v.orders.length} open order${v.orders.length > 1 ? "s" : ""}` : ""].filter(Boolean).join(", ");
-  link.innerHTML = `${what} in an earlier version of your vault. <button type="button" class="link">Move to the new vault</button>`;
+  const allowed = await newestAllowed().catch(() => null);
+  const plan = allowed ? planMove(v.coins, v.orders, allowed) : null;
+  const go = plan && !plan.carry.length && !plan.keep.length ? "Withdraw to your wallet" : "Move to the new vault";
+  link.innerHTML = `${what} in an earlier version of your vault. <button type="button" class="link">${go}</button>`;
   link.querySelector("button").onclick = () => moveToLatest(v);
   link.hidden = !closed;
   if (closed) return void (el && el.remove());
@@ -1882,7 +1905,7 @@ async function genNote() {
     el.className = "pf-movenote";
     host.before(el);
   }
-  el.innerHTML = `<span><b>${what}</b> in an earlier version of your vault.</span><button type="button" class="link" data-go>Move to the new vault</button><button type="button" class="link" data-x aria-label="Close" title="Close">✕</button>`;
+  el.innerHTML = `<span><b>${what}</b> in an earlier version of your vault.</span><button type="button" class="link" data-go>${go}</button><button type="button" class="link" data-x aria-label="Close" title="Close">✕</button>`;
   el.querySelector("[data-go]").onclick = () => moveToLatest(v);
   el.querySelector("[data-x]").onclick = () => {
     try {
@@ -1961,28 +1984,38 @@ function pfChartDraw(hist) {
 /** Earlier single vault -> newest vault: cancel, withdraw every coin, open the new vault if needed, deposit, and
     (if the owner keeps the box ticked) place the open orders again with the same settings. Every step is signed. */
 async function moveToLatest(v) {
-  const live = v.orders; // every open order is carried; in the new vault an order has no end date
+  // Only coins the newest factory allows go into the new vault. Any other coin (Blend's old test USDC, earlier test
+  // coins) is withdrawn to the wallet only, and an order that uses one is cancelled, not placed again.
+  const allowed = await newestAllowed().catch(() => null);
+  if (!allowed) return log("Could not read which coins the new vault accepts. Nothing was moved; try again in a moment.", "err");
+  const plan = planMove(v.coins, v.orders, allowed);
+  const live = plan.keep; // these open orders can be carried; in the new vault an order has no end date
   const cur = await read(GEN_LATEST.buy, "vault_of", [addr(me)]);
   let dest = cur.ok && cur.value ? String(cur.value) : null;
-  const side = (o) => (o.sell === C.usdc ? `buy ${esc(coinSym(o.buy))}` : `sell ${esc(coinSym(o.sell))}`);
-  const rows = [
-    ["From", `Earlier vault ${short(v.id)}`],
-    ["To", dest ? `Your newest vault ${short(dest)}` : "A new vault, opened for you"],
-    ["Coins", v.coins.length ? v.coins.map((c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`).join(", ") + " (interest included)" : "none"],
-  ];
-  if (v.orders.length)
+  const needVault = !dest && (plan.carry.length > 0 || live.length > 0);
+  const side = (o) => (o.sell === C.usdc || o.sell === OLD_BLEND_USDC ? `buy ${esc(coinSym(o.buy))}` : `sell ${esc(coinSym(o.sell))}`);
+  const amt = (c) => `${fmt(c.bal, c.token === C.usdc || c.token === C.xlm ? 2 : 7)} ${esc(coinSym(c.token))}`;
+  const rows = [["From", `Earlier vault ${short(v.id)}`]];
+  if (plan.carry.length || live.length) rows.push(["To", dest ? `Your newest vault ${short(dest)}` : "A new vault, opened for you"]);
+  if (plan.carry.length) rows.push(["Coins", `${plan.carry.map(amt).join(", ")} (interest included)`]);
+  if (plan.walletOnly.length)
+    rows.push(["To your wallet only", `${plan.walletOnly.map(amt).join(", ")}: not used in the new Iora, so ${plan.walletOnly.length > 1 ? "they are" : "it is"} withdrawn to your wallet, not moved`]);
+  if (live.length)
     rows.push([
       "Open orders",
       `<label class="mv-keep"><input type="checkbox" id="mv-keep" checked /> Keep my ${live.length} open order${live.length > 1 ? "s" : ""}: placed again in the new vault with the same prices (${live.map(side).join(", ")})</label>`,
     ]);
-  const base = v.orders.length + v.coins.length * 2 + (dest ? 0 : 1);
+  if (plan.cancelOnly.length)
+    rows.push(["Cancelled only", `${plan.cancelOnly.length} open order${plan.cancelOnly.length > 1 ? "s" : ""} (${plan.cancelOnly.map(side).join(", ")}): ${plan.cancelOnly.length > 1 ? "they use" : "it uses"} a coin the new Iora does not use, so ${plan.cancelOnly.length > 1 ? "they are" : "it is"} not placed again`]);
+  const base = v.orders.length + v.coins.length + plan.carry.length + (needVault ? 1 : 0);
   const notes = [
-    `You'll approve about ${base}${live.length ? ` to ${base + live.length}` : ""} steps in your wallet: ${v.orders.length ? "cancel the orders, " : ""}withdraw each coin${dest ? "" : ", open the new vault"}, deposit${live.length ? ", then place the orders again if you keep the box ticked" : ""}.`,
+    `You'll approve about ${base}${live.length ? ` to ${base + live.length}` : ""} steps in your wallet: ${v.orders.length ? "cancel the orders, " : ""}withdraw each coin${needVault ? ", open the new vault" : ""}${plan.carry.length ? ", deposit" : ""}${live.length ? ", then place the orders again if you keep the box ticked" : ""}.`,
     "The coins only ever move between your own vaults and your wallet. If you stop halfway, they stay safe in your wallet and you can deposit them on this page.",
   ];
-  if (!(await ask({ title: "Move to your newest vault", rows, notes, confirm: "Start" }))) return;
+  const title = plan.carry.length || live.length ? "Move to your newest vault" : "Withdraw to your wallet";
+  if (!(await ask({ title, rows, notes, confirm: "Start" }))) return;
   const keepBox = document.getElementById("mv-keep");
-  const keepOrders = !!(keepBox && keepBox.checked);
+  const keepOrders = live.length > 0 && !!(keepBox && keepBox.checked);
 
   // Settings that are stored beside an order (schedule, take profit) are read before the order is cancelled
   const extra = new Map();
@@ -1993,6 +2026,8 @@ async function moveToLatest(v) {
     }
   for (const o of v.orders) if (!(await call(v.id, "cancel_order", [u32(o.id)], `Cancel order #${o.id} in the earlier vault`, VAULT_ERRORS))) return refresh();
   const moved = [];
+  const toWallet = [];
+  const carryTokens = new Set(plan.carry.map((c) => c.token));
   for (const c of v.coins) {
     const sym = coinSym(c.token);
     const [free, before] = await Promise.all([rawRead(v.id, "free_balance", [addr(c.token)]), read(c.token, "balance", [addr(me)])]);
@@ -2000,7 +2035,18 @@ async function moveToLatest(v) {
     if (amt <= 0n) continue;
     if (!(await call(v.id, "withdraw", [addr(c.token), i128(amt)], `Withdraw ${fmt(amt, 2)} ${sym} from the earlier vault`, VAULT_ERRORS))) return refresh();
     const after = await read(c.token, "balance", [addr(me)]);
-    moved.push({ token: c.token, sym, got: before.ok && after.ok ? BigInt(after.value) - BigInt(before.value) : amt, wallet: after.ok ? BigInt(after.value) : null });
+    const got = before.ok && after.ok ? BigInt(after.value) - BigInt(before.value) : amt;
+    if (!carryTokens.has(c.token)) {
+      toWallet.push({ sym, got });
+      log(`${fmt(got, 2)} ${esc(sym)} is not used in the new Iora, so it was withdrawn to your wallet.`, "ok");
+      continue;
+    }
+    moved.push({ token: c.token, sym, got, wallet: after.ok ? BigInt(after.value) : null });
+  }
+  const walletText = toWallet.length ? `${toWallet.map((m) => `${fmt(m.got, 2)} ${esc(m.sym)}`).join(", ")} ${toWallet.length > 1 ? "are" : "is"} in your wallet (not used in the new Iora)` : "";
+  if (!moved.length && !(keepOrders && live.length)) {
+    log(`Done: ${walletText || "the earlier vault is empty"}${plan.cancelOnly.length ? `; ${plan.cancelOnly.length} order${plan.cancelOnly.length > 1 ? "s were" : " was"} cancelled` : ""}. Reloading…`, "ok");
+    return void setTimeout(() => location.reload(), 2500);
   }
   if (!dest) {
     if (!(await call(GEN_LATEST.buy, "create_vault", [addr(me)], "Open your new vault", FACTORY_ERRORS))) return refresh();
@@ -2044,7 +2090,7 @@ async function moveToLatest(v) {
       placed++;
     }
   }
-  log(`Done: your coins are in your newest vault${keepOrders && live.length ? `; ${placed} of ${live.length} order${live.length > 1 ? "s" : ""} placed again` : live.length ? "; the open orders were cancelled, not placed again" : ""}. Reloading…`, !keepOrders || placed === live.length ? "ok" : "err");
+  log(`Done: your coins are in your newest vault${walletText ? `; ${walletText}` : ""}${plan.cancelOnly.length ? `; ${plan.cancelOnly.length} order${plan.cancelOnly.length > 1 ? "s" : ""} with a retired coin cancelled` : ""}${keepOrders && live.length ? `; ${placed} of ${live.length} order${live.length > 1 ? "s" : ""} placed again` : live.length ? "; the open orders were cancelled, not placed again" : ""}. Reloading…`, !keepOrders || placed === live.length ? "ok" : "err");
   setTimeout(() => location.reload(), 2500);
 }
 
