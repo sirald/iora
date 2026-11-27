@@ -582,12 +582,13 @@ body.xmarket .keeprow { display: none; }
 :root:root .appbody .alloc-bar .a-free, :root:root .appbody .alloc-legend .a-free { background: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 
 /* 13) The app's surfaces. The page keeps the site's own ground (base.css --bg, light and dark); the app's panels
-   are neutral: white with grey fields on the light ground, charcoal on the dark one (the tones of the home
-   page's dark window: panels #242830, fields #1b2029, raised rows #2a2e37, lines #30343d). */
+   are white with grey fields on the light ground; on the dark one they are navy tints of the site's own ground
+   (#080d1a), a step or two lighter, so the panels sit on the page instead of standing out as grey blocks
+   (panels #0f1729, fields #0b1222, raised rows #141e33, lines #1c2840). */
 :root:root body.appbody { --bg-2: #eceef2; --line: #d9dce3; --card: #ffffff; --inset: #f1f2f5; }
-:root[data-theme="dark"]:root:root body.appbody { --bg-2: #1e222a; --surface: #242830; --surface-2: #2a2e37; --line: #30343d; --line-2: #4a4f5a; --text: #f1f3f8; --text-2: #cdd2dc; --muted: #9aa1ad; --card: #242830; --inset: #1b2029; }
+:root[data-theme="dark"]:root:root body.appbody { --bg-2: #0b1222; --surface: #0f1729; --surface-2: #141e33; --line: #1c2840; --line-2: #33415e; --text: #eef2f9; --text-2: #c6d0e1; --muted: #93a2bb; --card: #0f1729; --inset: #0b1222; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):root:root body.appbody { --bg-2: #1e222a; --surface: #242830; --surface-2: #2a2e37; --line: #30343d; --line-2: #4a4f5a; --text: #f1f3f8; --text-2: #cdd2dc; --muted: #9aa1ad; --card: #242830; --inset: #1b2029; }
+  :root:not([data-theme="light"]):root:root body.appbody { --bg-2: #0b1222; --surface: #0f1729; --surface-2: #141e33; --line: #1c2840; --line-2: #33415e; --text: #eef2f9; --text-2: #c6d0e1; --muted: #93a2bb; --card: #0f1729; --inset: #0b1222; }
 }
 
 /* 14) Trade layout: the price chart on the left with the order list under it, the order form on the right over
