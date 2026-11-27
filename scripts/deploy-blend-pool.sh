@@ -55,14 +55,8 @@ ORACLE_MAX_AGE=900
 POOL_NAME=IoraCircle
 BSTOP_RATE=1000000             # 10% of interest to the backstop
 MAX_POSITIONS=6
-I128MAX=170141183460469231731687303715884105727
-# ReserveConfig (rates 1e7). See the notes (blend-havuz.md, Aşama 1) for the reasons.
-rcfg() { # c_factor l_factor util max_util r_base r_one r_two r_three reactivity
-  printf '{"index":0,"decimals":7,"c_factor":%s,"l_factor":%s,"util":%s,"max_util":%s,"r_base":%s,"r_one":%s,"r_two":%s,"r_three":%s,"reactivity":%s,"supply_cap":"%s","enabled":true}' "$@" "$I128MAX"
-}
-CFG_USDC=$(rcfg 9500000 9500000 7000000 9500000 5000 300000 1000000 10000000 20)
-CFG_XLM=$(rcfg 7500000 7500000 5000000 9500000 5000 300000 2000000 10000000 50)
-CFG_WETH=$(rcfg 8500000 8000000 6000000 9500000 7000 500000 3000000 15000000 200)
+# ReserveConfig of each coin (CFG_USDC, CFG_XLM, CFG_WETH): one place for this script and the rate scripts.
+source scripts/blend-rates.sh
 
 ME=$(stellar keys address dev) || { echo "no stellar identity 'dev'"; exit 1; }
 touch "$ENVF"
