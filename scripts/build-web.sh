@@ -22,6 +22,13 @@ source ../testnet/factory.env || { echo "testnet/factory.env not found"; exit 1;
 [ -f ../testnet/filler.env ] && source ../testnet/filler.env
 # The one-approval vault move (iora-mover) and the testnet USDC exchange (old Blend test USDC -> Circle USDC)
 [ -f ../testnet/mover.env ] && source ../testnet/mover.env
+# Iora's reference pool (kept at the real price): the chart and "Best price" use it when the file is there.
+# The file says POOL and VENUE; it is read in a subshell so the Blend pool's POOL above is not overwritten.
+REF_POOL=""; REF_VENUE=""
+if [ -f ../testnet/ref-pool.env ]; then
+  REF_POOL=$( unset POOL; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${POOL:-}" )
+  REF_VENUE=$( unset VENUE; . ../testnet/ref-pool.env >/dev/null 2>&1; echo "${VENUE:-}" )
+fi
 for v in FACTORY USDC XLM ROUTER POOL; do
   [ -n "${!v}" ] || { echo "Missing setting: $v (testnet/*.env). The site was not built."; exit 1; }
 done
@@ -46,6 +53,8 @@ VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_FILLER=${FILLER:-}
 VITE_MOVER=${MOVER:-}
 VITE_USDC_EXCHANGE=${USDC_EXCHANGE:-}
+VITE_REF_POOL=${REF_POOL}
+VITE_REF_VENUE=${REF_VENUE}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=${USDC_ISSUER:-GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5}
 EOF
@@ -56,17 +65,39 @@ if [ ! -d node_modules/vite ]; then
     && npm install --no-audit --no-fund -D vite@latest >> /tmp/gk-web-npm.log 2>&1 \
     || { tail -20 /tmp/gk-web-npm.log; echo "npm install failed"; exit 1; }
 fi
-# Multi-wallet support (Stellar Wallets Kit, from JSR). If it cannot be installed the site builds with Freighter only.
-if [ ! -d node_modules/@creit-tech/stellar-wallets-kit ]; then
-  npx --yes jsr add @creit-tech/stellar-wallets-kit >> /tmp/gk-web-npm.log 2>&1 \
+# Multi-wallet support (Stellar Wallets Kit 2.7.1, from JSR; 2.8.0 brought a base-x advisory, so it stays pinned).
+# On by default (IORA_KIT=0 turns it off). REQUIRE_KIT=1: stop instead of building without it.
+export IORA_KIT="${IORA_KIT:-1}"
+if [ "$IORA_KIT" = "1" ] && [ ! -d node_modules/@creit-tech/stellar-wallets-kit ]; then
+  npx --yes jsr add @creit-tech/stellar-wallets-kit@2.7.1 >> /tmp/gk-web-npm.log 2>&1 \
     && echo "Multi-wallet support installed." \
-    || echo "Note: the multi-wallet library could not be installed; continuing with Freighter only."
+    || echo "WARNING: the multi-wallet library (Stellar Wallets Kit) could not be installed."
+fi
+kit_off_loud() {
+  echo
+  echo "=========================================================================="
+  echo " WARNING: building WITHOUT multi-wallet support (Varial/Freighter only)."
+  echo " Reason: $1"
+  echo "=========================================================================="
+  echo
+  if [ "${REQUIRE_KIT:-0}" = "1" ]; then echo "REQUIRE_KIT=1: stopping."; exit 1; fi
+}
+if [ "$IORA_KIT" = "1" ] && [ ! -d node_modules/@creit-tech/stellar-wallets-kit ]; then
+  kit_off_loud "the library is not installed (see /tmp/gk-web-npm.log)"
+  export IORA_KIT=0
 fi
 echo "Building..."
 if ! npx vite build > /tmp/gk-build-web.log 2>&1; then
-  echo "Build failed; retrying with multi-wallet support off..."
-  BERTHLY_NO_KIT=1 npx vite build > /tmp/gk-build-web.log 2>&1 || { tail -30 /tmp/gk-build-web.log; echo "BUILD FAILED"; exit 1; }
+  if [ "$IORA_KIT" = "1" ]; then
+    tail -15 /tmp/gk-build-web.log
+    kit_off_loud "the build with it failed (log above; on WSL this was a missing rolldown native binding)"
+    export IORA_KIT=0
+    npx vite build > /tmp/gk-build-web.log 2>&1 || { tail -30 /tmp/gk-build-web.log; echo "BUILD FAILED"; exit 1; }
+  else
+    tail -30 /tmp/gk-build-web.log; echo "BUILD FAILED"; exit 1
+  fi
 fi
+echo "Multi-wallet support: $([ "$IORA_KIT" = "1" ] && echo ON || echo off)"
 echo "Build done: $(du -sh dist | cut -f1)"
 [ "$1" = "--build-only" ] && exit 0
 

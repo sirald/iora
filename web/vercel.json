@@ -5,7 +5,7 @@
       "headers": [
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://soroban-rpc.testnet.stellar.gateway.fm https://soroban-testnet.stellar.org https://horizon-testnet.stellar.org https://friendbot.stellar.org; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://stellar.creit.tech https://uni.onekey-asset.com https://scopuly.com; connect-src 'self' https://soroban-rpc.testnet.stellar.gateway.fm https://soroban-testnet.stellar.org https://horizon-testnet.stellar.org https://friendbot.stellar.org; frame-src https://albedo.link; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
         },
         {
           "key": "X-Frame-Options",

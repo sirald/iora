@@ -95,8 +95,10 @@ the app offers their owners a move to the newest vault.
 
 Every market is a coin against USDC. On testnet USDC is Circle's test USDC, and the app's Test funds page hands out
 100 of it per wallet per day (`web/api/faucet.js`). USDC and XLM are reserves of Iora's own testnet Blend pool and earn
-interest. The other
-test coins are not listed by the pool: they wait in the vault without earning, and their test pools are small.
+interest. The other coins are **Iora's own testnet tokens**, named "i" + the coin they follow (iBTC, iETH, iSOL, iAVAX,
+iXRP): Iora issues them, they have no value, and a bot keeps their pools at the real price of that coin from the
+Reflector oracle. Until the Blend pool lists them they wait in the vault without earning; the app reads the pool's
+reserve list and says "earns no interest yet" until then.
 
 ## Factory interface
 
