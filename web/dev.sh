@@ -17,6 +17,8 @@ source ../testnet/factory.env
 [ -f ../testnet/pairs.env ] && source ../testnet/pairs.env
 # Other trading venues (the Aquarius router) and the filler contract, as on the published site
 [ -f ../testnet/filler.env ] && source ../testnet/filler.env
+# The one-approval vault move (iora-mover) and the testnet USDC exchange (old Blend test USDC -> Circle USDC)
+[ -f ../testnet/mover.env ] && source ../testnet/mover.env
 cat > .env.local <<EOF
 VITE_RPC_URL=https://soroban-rpc.testnet.stellar.gateway.fm
 VITE_RPC_FALLBACK=https://soroban-testnet.stellar.org
@@ -34,6 +36,8 @@ VITE_XLM=$XLM
 VITE_ROUTER=$ROUTER
 VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_FILLER=${FILLER:-}
+VITE_MOVER=${MOVER:-}
+VITE_USDC_EXCHANGE=${USDC_EXCHANGE:-}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=${USDC_ISSUER:-GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5}
 EOF

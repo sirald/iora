@@ -23,6 +23,7 @@ import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from
 import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
 import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
+import { PART, planMove as planMoverCall, sortCoins, splitPlan } from "./mover.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
 import { StellarWalletsKit } from "swk-sdk";
@@ -2144,9 +2145,186 @@ function pfChartDraw(hist) {
   for (const b of el.querySelectorAll("[data-pfc]")) b.onclick = () => ((pfChart = b.dataset.pfc), pfChartDraw(hist));
   for (const b of el.querySelectorAll("[data-pfr]")) b.onclick = () => ((pfRange = b.dataset.pfr), pfChartDraw(hist));
 }
-/** Earlier single vault -> newest vault: cancel, withdraw every coin, open the new vault if needed, deposit, and
-    (if the owner keeps the box ticked) place the open orders again with the same settings. Every step is signed. */
+// ---- One-approval move (iora-mover): coins and open orders of an earlier single vault (version 8+) move to the
+// newest vault in ONE transaction; Blend's old test USDC is exchanged 1:1 for Circle's USDC on-chain
+// (iora-usdc-exchange) on the way. Built as scripts/move-vault.mjs does; the planning is in mover.js. The step-by-step
+// move below stays as the fallback (older vaults, no mover configured, or a move that cannot be simulated).
+const MOVER = (import.meta.env.VITE_MOVER || "").trim();
+const USDC_EXCHANGE = (import.meta.env.VITE_USDC_EXCHANGE || "").trim();
+const MOVER_ERRORS = { 1: "The move contains a call the mover does not allow.", 2: "The earlier vault and the new vault are the same.", 3: "A coin amount is not positive." };
+/** Everything the move needs from the earlier vault, read now (a failed read stops the move: nothing is guessed). */
+async function readForMove(id) {
+  const need = async (fn, args = []) => {
+    const r = await rawRead(id, fn, args);
+    if (!r.ok) throw new Error(`could not read ${fn} of the earlier vault`);
+    return r.value;
+  };
+  const version = Number(await need("version"));
+  if (!(version >= 8)) return { version };
+  const balances = {};
+  for (const t of (await need("tokens")) || []) {
+    const b = BigInt((await need("balance", [addr(String(t))])) ?? 0);
+    if (b > 0n) balances[String(t)] = b;
+  }
+  const n = Number(await need("order_count"));
+  const orders = [];
+  for (let i = 0; i < n; i++) {
+    const o = await need("get_order", [u32(i)]);
+    if (!o || orderStatus(o) !== "Open") continue;
+    const schedule = version >= 11 ? await need("get_schedule", [u32(i)]) : null;
+    const followUp = await need("get_follow_up", [u32(i)]);
+    orders.push({ id: i, order: { ...o, status: ["Open"] }, schedule: schedule || null, followUp: followUp || null });
+  }
+  let exchange = null;
+  if (balances[OLD_BLEND_USDC] && USDC_EXCHANGE) {
+    const [mock, usdc, left] = await Promise.all([rawRead(USDC_EXCHANGE, "mock"), rawRead(USDC_EXCHANGE, "usdc"), rawRead(USDC_EXCHANGE, "left", [addr(me)])]);
+    if (!mock.ok || !usdc.ok || !left.ok) throw new Error("could not read the USDC exchange");
+    if (String(mock.value) === OLD_BLEND_USDC && String(usdc.value) === C.usdc) exchange = { mock: OLD_BLEND_USDC, usdc: C.usdc, left: BigInt(left.value) };
+  }
+  return { version, balances, orders, exchange };
+}
+const scArg = ([t, v]) => (t === "addr" ? addr(v) : t === "i128" ? i128(v) : t === "u32" ? u32(Number(v)) : t === "u64" ? u64(v) : nativeToScVal(!!v, { type: "bool" }));
+/** The arguments of one move_vault call. Coin amounts are fixed: the signature covers every argument of the call tree. */
+function moverArgs(oldId, part, exchange) {
+  const place = part.place.map((p) =>
+    // PlaceCall { func, args }: a contracttype struct is a map with its field names sorted
+    xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("args"), val: xdr.ScVal.scvVec(p.args.map(scArg)) }), new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("func"), val: xdr.ScVal.scvSymbol(p.func) })]),
+  );
+  const coins = xdr.ScVal.scvMap(sortCoins(part.coins, (t) => StrKey.decodeContract(t)).map(([t, n]) => new xdr.ScMapEntry({ key: addr(t), val: i128(n) })));
+  return [addr(me), addr(oldId), addr(GEN_LATEST.buy), coins, xdr.ScVal.scvVec(part.cancel.map((i) => u32(i))), xdr.ScVal.scvVec(place), exchange ? addr(USDC_EXCHANGE) : xdr.ScVal.scvVoid()];
+}
+/** Simulates one move_vault call (nothing is signed). Returns null if it would go through, else the error. */
+async function simulateMove(args) {
+  try {
+    const sim = await server.simulateTransaction(await buildCall(MOVER, "move_vault", args));
+    return rpc.Api.isSimulationError(sim) ? String(sim.error || "simulation failed").split("\n")[0].slice(0, 160) : null;
+  } catch (e) {
+    return String((e && e.message) || e).slice(0, 160);
+  }
+}
+/** Parts for a plan: as few transactions as the simulation allows (4 coins + 6 orders, then smaller). */
+async function partsThatSimulate(id, plan, exchange) {
+  const inNew = (t) => (exchange && t === exchange.mock ? exchange.usdc : t);
+  let why = null;
+  for (const max of [PART, { coins: 2, orders: 3 }, { coins: 1, orders: 1 }]) {
+    const parts = splitPlan(plan, max, inNew);
+    why = await simulateMove(moverArgs(id, parts[0], exchange));
+    if (!why) return { parts };
+    if (parts[0].coins.length <= 1 && parts[0].place.length <= 1) break;
+  }
+  return { parts: null, why };
+}
+
 async function moveToLatest(v) {
+  const fallback = (why) => {
+    if (why) log(`Moving step by step instead (several approvals): ${esc(why)}.`);
+    return moveStepByStep(v);
+  };
+  if (!MOVER || !me) return moveStepByStep(v);
+  log("Preparing the move…", "wait");
+  let info;
+  try {
+    info = await readForMove(v.id);
+  } catch (e) {
+    return log(`Could not read your earlier vault (${esc(String((e && e.message) || e))}). Nothing was moved; try again in a moment.`, "err");
+  }
+  if (!(info.version >= 8)) return fallback(`this earlier vault (version ${info.version}) predates the one-approval move`);
+  if (info.balances[OLD_BLEND_USDC] && !info.exchange) return fallback("the on-chain USDC exchange is not available");
+  const now = Math.floor(Date.now() / 1000);
+  const withPlan = planMoverCall({ ...info, now, withOrders: true });
+  const bare = planMoverCall({ ...info, now, withOrders: false });
+  if (!withPlan.coins.length && !withPlan.cancel.length) return log("Your earlier vault is already empty.", "ok");
+  // Both choices are simulated before asking, so the dialog can say how many approvals each takes.
+  const [w, b] = [await partsThatSimulate(v.id, withPlan, info.exchange), await partsThatSimulate(v.id, bare, info.exchange)];
+  if (!w.parts && !b.parts) return fallback(`the move could not be prepared (${w.why || b.why})`);
+  // Circle's USDC arrives in the wallet before it is deposited, so the wallet needs its trustline (a separate approval).
+  const needsUsdc = withPlan.coins.some(([t]) => t === C.usdc || t === OLD_BLEND_USDC);
+  const trustOk = !needsUsdc || (flushReads(), (await read(C.usdc, "balance", [addr(me)])).ok);
+
+  const cur = await read(GEN_LATEST.buy, "vault_of", [addr(me)]);
+  const dest = cur.ok && cur.value ? String(cur.value) : null;
+  const dp = (t) => (t === C.usdc || t === C.xlm || t === OLD_BLEND_USDC ? 2 : 7);
+  const coinRow = withPlan.coins
+    .map(([t, n]) => (t === OLD_BLEND_USDC ? `${fmt(n, 2)} old test USDC (Blend) → ${fmt(n - withPlan.mockLeftInWallet, 2)} USDC (Circle), exchanged 1:1` : `${fmt(n, dp(t))} ${esc(coinSym(t))}`))
+    .join("<br>");
+  const price = (p) => (p.limit >= DCA_NO_LIMIT ? "at the market (DCA)" : p.sell === C.usdc ? `≤ ${fmt(p.limit)} USDC` : `≥ ${px4(sellPrice(p.limit))} USDC`);
+  const what = (p) => (p.sell === C.usdc ? `buy ${esc(coinSym(p.buy))} for ${fmt(p.amount, 2)} USDC` : `sell ${fmt(p.amount, 2)} ${esc(coinSym(p.sell))}`);
+  const kind = { place_order: "", place_stop_order: " (stop)", place_order_then: " (with take profit)", place_dca: " (DCA)" };
+  const nOk = (parts) => (parts ? parts.length : 0);
+  const extra = trustOk ? 0 : 1;
+  const approvals = (parts) => `${nOk(parts) + extra} approval${nOk(parts) + extra > 1 ? "s" : ""} in your wallet${extra ? " (one adds the USDC trustline)" : ""}`;
+  const rows = [
+    ["From", `Earlier vault ${short(v.id)}`],
+    ["To", dest ? `Your newest vault ${short(dest)}` : "A new vault, opened in the same transaction"],
+    ["Coins", coinRow || "none"],
+  ];
+  if (withPlan.mockLeftInWallet > 0n)
+    rows.push(["Stays in your wallet", `${fmt(withPlan.mockLeftInWallet, 2)} old test USDC: above the exchange's limit of 5,000 per wallet. You can exchange it afterwards with Iora's backup exchange.`]);
+  if (withPlan.cancel.length) {
+    const choice = (val, label, parts, on, hint) =>
+      `<label class="mv-keep"><input type="radio" name="mv-how" value="${val}"${on ? " checked" : ""}${parts ? "" : " disabled"} /> <b>${label}</b> · ${parts ? approvals(parts) : "not possible right now"}${hint ? `<br><span class="muted">${hint}</span>` : ""}</label>`;
+    rows.push([
+      "How",
+      choice("with", "Move with orders — one approval", w.parts, !!w.parts, "Recommended. Your open orders are opened again in the new vault at their old prices.") +
+        "<br>" +
+        choice("without", "Move without orders", b.parts, !w.parts, "Your open orders are cancelled; only the coins move."),
+    ]);
+    if (withPlan.place.length) rows.push(["Opened again", withPlan.place.map((p) => `#${p.id} ${what(p)} ${price(p)}${kind[p.func]}`).join("<br>")]);
+    if (withPlan.skipped.length) rows.push(["Only cancelled", withPlan.skipped.map((x) => `#${x.id}: ${esc(x.why)}`).join("<br>")]);
+  }
+  const notes = [
+    withPlan.cancel.length ? "Pick how above; either way it is one transaction (two if the move is large)." : `${approvals(b.parts || w.parts)}.`,
+    "A few stroops of interest that accrue while you approve stay in the earlier vault as dust.",
+    "Everything happens in one transaction: if any part fails, nothing moves.",
+  ];
+  if (!(await ask({ title: "Move to your newest vault", rows, notes, confirm: "Move" }))) return;
+  const how = (document.querySelector('input[name="mv-how"]:checked') || {}).value || "without";
+  const plan = how === "with" && w.parts ? withPlan : bare;
+  let parts = how === "with" && w.parts ? w.parts : b.parts;
+  if (!parts) return fallback("the move could not be prepared");
+  if (!trustOk && !(await ensureUsdcTrust())) return log("Nothing was moved: the USDC trustline is needed first. Try again.", "err");
+
+  let newVault = null;
+  for (const [k, part] of parts.entries()) {
+    const args = moverArgs(v.id, part, info.exchange);
+    if (k > 0) {
+      const why = await simulateMove(args);
+      if (why) {
+        log(`Part ${k + 1} of ${parts.length} could not be prepared (${esc(why)}). The coins moved so far are in your new vault; the rest is still in your earlier vault: press Move again to finish.`, "err");
+        break;
+      }
+    }
+    const label = parts.length > 1 ? `Move to your newest vault (part ${k + 1} of ${parts.length})` : "Move to your newest vault";
+    const res = await call(MOVER, "move_vault", args, label, MOVER_ERRORS);
+    if (!res) {
+      if (k > 0) log("The first part went through: some coins are already in your new vault. Press Move again to move the rest.", "err");
+      return refresh();
+    }
+    newVault = res.value ? String(res.value) : newVault;
+  }
+  flushReads(true);
+  // Old test USDC above the exchange's limit stayed in the wallet: offer the backup exchange for it.
+  if (plan.mockLeftInWallet > 0n) {
+    const wb = await read(OLD_BLEND_USDC, "balance", [addr(me)]);
+    const extraMock = wb.ok ? (BigInt(wb.value) < plan.mockLeftInWallet ? BigInt(wb.value) : plan.mockLeftInWallet) : plan.mockLeftInWallet;
+    log(`${fmt(extraMock, 2)} old test USDC stayed in your wallet (above the exchange's limit).`, "err");
+    if (
+      extraMock > 0n &&
+      (await ask({ title: "Exchange the rest?", lede: `${fmt(extraMock, 2)} old test USDC stayed in your wallet. Iora's backup exchange can swap it 1:1 for Circle's USDC and deposit it in your new vault (a few more approvals).`, confirm: "Exchange it", back: "Not now" }))
+    ) {
+      const out = await exchangeOldUsdc(extraMock);
+      const target = newVault || (await read(GEN_LATEST.buy, "vault_of", [addr(me)])).value;
+      if (out && out > 0n && target) await call(String(target), "deposit", [addr(C.usdc), i128(out)], `Deposit ${fmt(out, 2)} USDC into your new vault`, VAULT_ERRORS);
+    }
+  }
+  log(`Done: your coins${plan.place.length ? " and orders" : ""} are in your newest vault. Reloading…`, "ok");
+  setTimeout(() => location.reload(), 2500);
+}
+
+/** Earlier single vault -> newest vault: cancel, withdraw every coin, open the new vault if needed, deposit, and
+    (if the owner keeps the box ticked) place the open orders again with the same settings. Every step is signed.
+    The fallback of the one-approval move above. */
+async function moveStepByStep(v) {
   // Only coins the newest factory allows go into the new vault. Blend's old test USDC is exchanged 1:1 for Circle's
   // USDC on the way (and its orders are placed again in Circle's USDC). Any other coin is withdrawn to the wallet
   // only, and an order that uses one is cancelled, not placed again.

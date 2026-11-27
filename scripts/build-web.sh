@@ -20,6 +20,8 @@ source ../testnet/factory.env || { echo "testnet/factory.env not found"; exit 1;
 [ -f ../testnet/pairs.env ] && source ../testnet/pairs.env
 # Other trading venues (the Aquarius router): the Market tab swaps where the quote is best
 [ -f ../testnet/filler.env ] && source ../testnet/filler.env
+# The one-approval vault move (iora-mover) and the testnet USDC exchange (old Blend test USDC -> Circle USDC)
+[ -f ../testnet/mover.env ] && source ../testnet/mover.env
 for v in FACTORY USDC XLM ROUTER POOL; do
   [ -n "${!v}" ] || { echo "Missing setting: $v (testnet/*.env). The site was not built."; exit 1; }
 done
@@ -42,6 +44,8 @@ VITE_XLM=$XLM
 VITE_ROUTER=$ROUTER
 VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_FILLER=${FILLER:-}
+VITE_MOVER=${MOVER:-}
+VITE_USDC_EXCHANGE=${USDC_EXCHANGE:-}
 VITE_POOL=$POOL
 VITE_USDC_ISSUER=${USDC_ISSUER:-GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5}
 EOF
