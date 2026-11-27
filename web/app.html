@@ -168,7 +168,7 @@
       <div class="view tradeview" data-view-pane="vault" hidden>
       <section class="tbar user-only" aria-label="Market">
         <div class="tb-pair"><i class="coin xlm" aria-hidden="true"></i><select class="pairsel" aria-label="Market"><option>XLM / USDC</option></select></div>
-        <div class="tb-px"><b id="m-price">—</b><small>USDC per XLM</small></div>
+        <div class="tb-px"><b id="m-price">—</b><small>USDC per XLM <i id="m-tip" class="tip tb-tip" tabindex="0" data-tip="Testnet prices: test tokens have no real value and nobody arbitrages the testnet pools, so each pool has its own price, far from the real market. Orders fill at the best pool price.">i</i></small><small class="tb-src" id="m-src"></small></div>
         <div class="tb-stat"><span>24h change</span><b class="tb-chg">—</b></div>
         <div class="tb-stat"><span>24h high</span><b class="tb-hi">—</b></div>
         <div class="tb-stat"><span>24h low</span><b class="tb-lo">—</b></div>
@@ -192,6 +192,7 @@
               <div class="chart-box"><canvas id="ch" aria-label="Price chart, with your open orders drawn as dashed lines"></canvas></div>
               <p id="ch-note" class="ch-note" hidden></p>
               <div class="ch-legend"><span><i></i>Your buy orders</span><span><i class="s"></i>Your sell orders</span><span id="ch-src">Price history of one trading pool; your orders fill wherever the price is best. Drag to go back in time, scroll to zoom, double-click to reset.</span></div>
+              <p id="ch-venues" class="ch-venues" hidden></p>
             </section>
             <section class="tpanel depth" aria-label="Pool depth">
               <h2>Pool depth <i class="tip" tabindex="0" data-tip="How much can be traded in one pool before the price reaches each level. Click a row to use its price.">i</i></h2>
@@ -557,7 +558,7 @@
       <div class="view sellview tradeview" data-view-pane="sell" hidden>
       <section class="tbar user-only" aria-label="Market">
         <div class="tb-pair"><i class="coin xlm" aria-hidden="true"></i><select class="pairsel" aria-label="Market"><option>XLM / USDC</option></select></div>
-        <div class="tb-px"><b id="sv-m-price">—</b><small><span data-out-sym>USDC</span> per XLM</small></div>
+        <div class="tb-px"><b id="sv-m-price">—</b><small><span data-out-sym>USDC</span> per XLM <i id="sv-m-tip" class="tip tb-tip" tabindex="0" data-tip="Testnet prices: test tokens have no real value and nobody arbitrages the testnet pools, so each pool has its own price, far from the real market. Orders fill at the best pool price.">i</i></small><small class="tb-src" id="sv-m-src"></small></div>
         <div class="tb-stat"><span>24h change</span><b class="tb-chg">—</b></div>
         <div class="tb-stat"><span>24h high</span><b class="tb-hi">—</b></div>
         <div class="tb-stat"><span>24h low</span><b class="tb-lo">—</b></div>

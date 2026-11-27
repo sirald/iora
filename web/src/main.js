@@ -24,6 +24,7 @@ import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
 import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
 import { PART, planMove as planMoverCall, sortCoins, splitPlan } from "./mover.js";
+import { bestVenue, coinStyle, reflectorPrice, testnetNote, venueLine } from "./prices.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
 import { StellarWalletsKit } from "swk-sdk";
@@ -222,6 +223,57 @@ const EXTRA_MARKETS = String((!V7 && import.meta.env.VITE_MARKETS) || "")
   .filter((p) => p.length === 3 && /^C[A-Z2-7]{55}$/.test(p[1]) && /^C[A-Z2-7]{55}$/.test(p[2]))
   .map(([sym, token, factory]) => ({ sym: sym.replace(/[^A-Za-z0-9]/g, "").slice(0, 12), token, factory }));
 // State of the trading screen (chart, depth). showView uses it when the page opens: it must be defined at the top.
+// ---- Coin icons for any symbol (PAIRS can bring new coins): see prices.js coinStyle() ----
+function coinI(sym, extra = "") {
+  const st = coinStyle(sym);
+  return `<i class="coin ${st.cls}${extra ? ` ${extra}` : ""}"${st.mark ? ` data-mark="${esc(st.mark)}" style="--coin:${st.color}"` : ""} aria-hidden="true"></i>`;
+}
+function paintCoin(el, sym) {
+  if (!el) return;
+  const st = coinStyle(sym);
+  el.className = `coin ${st.cls}`;
+  if (st.mark) {
+    el.dataset.mark = st.mark;
+    el.style.setProperty("--coin", st.color);
+  } else {
+    delete el.dataset.mark;
+    el.style.removeProperty("--coin");
+  }
+}
+
+// ---- Testnet prices and where they come from: each pool has its own price, so every price says its source ----
+const REFLECTOR = (import.meta.env.VITE_REFLECTOR || "CCSZNMAXTNMIZNGDBLIZYKLOZG3LYKSIXCYC7GKWLOBLSMUPX7MKPHDF").trim();
+const PX = { buy: [], sell: [], ref: null, refFor: null, refAt: 0 };
+/** The Reflector oracle's price (in $) for a coin, read at most once a minute; null if it has none. */
+async function refPrice(token) {
+  if (PX.refFor === token && Date.now() - PX.refAt < 60_000) return PX.ref;
+  const r = await read(REFLECTOR, "lastprice", [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), addr(token)])]).catch(() => ({ ok: false }));
+  PX.ref = r.ok ? reflectorPrice(r.value) : null;
+  PX.refFor = token;
+  PX.refAt = Date.now();
+  return PX.ref;
+}
+/** Writes the source of the top prices, the testnet note and the venue line under the chart. */
+function paintPriceSources() {
+  const b = bestVenue(PX.buy, "buy"), s = bestVenue(PX.sell, "sell");
+  const set = (id, t) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t;
+  };
+  set("m-src", b ? `Best price · ${b.venue}` : "");
+  set("sv-m-src", s ? `Best price · ${s.venue}` : "");
+  const note = testnetNote(BS, PX.refFor === BASE.addr ? PX.ref : null);
+  for (const id of ["m-tip", "sv-m-tip"]) document.getElementById(id)?.setAttribute("data-tip", note);
+  const v = document.body.dataset.view;
+  const quotes = v === "sell" && PX.sell.length ? PX.sell : PX.buy;
+  const line = venueLine(quotes, PX.refFor === BASE.addr ? PX.ref : null);
+  const el = $("ch-venues");
+  if (el) {
+    el.textContent = line ? `Now, USDC per ${BS}${v === "sell" ? " (selling)" : " (buying)"}: ${line}` : "";
+    el.hidden = !line;
+  }
+}
+
 const TR = { key: null, quote: "USDC", pair: null, base0: true, pts: [], tf: 3600, hover: null, spot: null, res: null, lines: [], note: "", scanned: false };
 // The keeper does not fill orders smaller than this (against keeping the keeper busy with dust orders)
 const MIN_ORDER = 1_000_000n;
@@ -1702,7 +1754,7 @@ if (XB) {
         if (v && v.includes("XLM")) el.setAttribute(a, fix(v));
       }
     }
-    for (const c of root.querySelectorAll("i.coin.xlm")) c.className = "coin other";
+    for (const c of root.querySelectorAll("i.coin.xlm")) paintCoin(c, BS);
   }
   const leave = $("sv-leave-note");
   if (leave) leave.textContent = `The keeper sells automatically when your price is met. If it is offline, orders wait. ${LEAVE_NOTE}`;
@@ -2675,7 +2727,7 @@ async function renderPortfolio() {
     if (cp) cp.onclick = () => navigator.clipboard && navigator.clipboard.writeText(vid).then(() => copied(cp));
     // Balances: one row per coin the vault holds (USDC always); a coin that is not held is not listed
     const balRow = (sym, bal, usd, res, apr, earnedTxt, acts) =>
-      `<tr><td><span class="pf-asset"><i class="coin ${sym === "USDC" ? "usdc" : sym === "XLM" ? "xlm" : "other"}" aria-hidden="true"></i>${esc(sym)}</span></td><td class="num">${nfmt(bal, 4)}</td><td class="num">${usd === null ? "—" : `≈ ${n(usd)}`}</td><td class="num">${nfmt(res, 4)}</td><td class="num">${nfmt(Math.max(0, bal - res), 4)}</td><td class="num pos">${apr}</td><td class="num pos">${earnedTxt}</td><td class="pf-row-acts">${acts}</td></tr>`;
+      `<tr><td><span class="pf-asset">${coinI(sym)}${esc(sym)}</span></td><td class="num">${nfmt(bal, 4)}</td><td class="num">${usd === null ? "—" : `≈ ${n(usd)}`}</td><td class="num">${nfmt(res, 4)}</td><td class="num">${nfmt(Math.max(0, bal - res), 4)}</td><td class="num pos">${apr}</td><td class="num pos">${earnedTxt}</td><td class="pf-row-acts">${acts}</td></tr>`;
     const act = (label, coin, mode) => `<button type="button" class="link" data-move="${mode}" data-coin="${esc(coin)}">${label}</button>`;
     const trade = (coin) => `<a href="#vault" data-base="${esc(coin)}" data-go="#vault">Trade</a>`;
     const balRows = [
@@ -2772,10 +2824,15 @@ async function refreshBuy() {
   // It is worked out beside the vault reads below, not before them: the vault's numbers do not wait for a price.
   const pricing = (async () => {
     let refOut = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+    const quotes = [{ venue: "Soroswap", price: refOut ? Number(U) / Number(refOut) : null }];
     try {
       const aq = await aquaBest(C.usdc, BASE.addr, U);
+      if (aq && aq.out > 0n) quotes.push({ venue: "Aquarius", price: Number(U) / Number(aq.out) });
       if (aq && (refOut === null || aq.out > refOut)) refOut = aq.out;
     } catch {}
+    PX.buy = quotes;
+    await refPrice(BASE.addr);
+    paintPriceSources();
     if (refOut !== null && refOut > 0n) {
       const out = refOut;
       marketPrice = Number(U) / Number(out);
@@ -3738,7 +3795,7 @@ async function loadPool() {
       if (mkX) {
         for (const m of EXTRA_MARKETS) {
           rowsMk.push(`<tr data-go="sell:${m.sym}">
-            <td><div class="mk-pair"><i class="coin xlm" aria-hidden="true"></i><b>XLM</b><span aria-hidden="true">→</span><i class="coin other" aria-hidden="true"></i><b>${esc(m.sym)}</b></div>
+            <td><div class="mk-pair"><i class="coin xlm" aria-hidden="true"></i><b>XLM</b><span aria-hidden="true">→</span>${coinI(m.sym)}<b>${esc(m.sym)}</b></div>
               <div class="mk-tags"><span class="warn">Showcase</span><span class="warn">Thin test pool</span><span>Earns on Blend</span></div></td>
             <td><span class="mk-xprice" data-tok="${m.token}">—</span><small>${esc(m.sym)} per XLM</small></td>
             <td class="pos">${mkX.rate}<small>a year, paid in XLM</small></td>
@@ -3755,7 +3812,7 @@ async function loadPool() {
         for (const p of [{ sym: "XLM", token: C.xlm }, ...PAIRS]) {
           const main = p.sym === "XLM";
           rowsMk.push(`<tr data-base="${esc(p.sym)}">
-            <td><div class="mk-pair"><i class="coin ${main ? "xlm" : "other"}" aria-hidden="true"></i><b>${esc(p.sym)}</b><span aria-hidden="true">/</span><i class="coin usdc" aria-hidden="true"></i><b>USDC</b></div>
+            <td><div class="mk-pair">${coinI(p.sym)}<b>${esc(p.sym)}</b><span aria-hidden="true">/</span><i class="coin usdc" aria-hidden="true"></i><b>USDC</b></div>
               <div class="mk-tags"><span>Limit buy and sell</span>${main ? `<span>USDC and XLM earn on Blend</span>${(u && u.busy) || ""}` : `<span>USDC earns on Blend</span><span class="warn">${esc(p.sym)} earns no interest</span><span class="warn">Thin test pool</span>`}</div></td>
             <td><span class="mk-bprice" data-tok="${p.token}">—</span><small>USDC per ${esc(p.sym)}</small></td>
             <td class="pos">${u ? u.rate : "—"}<small>a year on waiting USDC${main && x ? `, ${x.rate} on XLM` : ""}</small></td>
@@ -4124,8 +4181,8 @@ function swSyms() {
   const [a, b] = SW.dir === "xu" ? [BS, "USDC"] : ["USDC", BS];
   $("swap-sym-in").textContent = a;
   $("swap-sym-out").textContent = b;
-  $("swap-coin-in").className = `coin ${a.toLowerCase()}`;
-  $("swap-coin-out").className = `coin ${b.toLowerCase()}`;
+  paintCoin($("swap-coin-in"), a);
+  paintCoin($("swap-coin-out"), b);
   const bin = SW.dir === "xu" ? walletXlm : walletUsdc;
   const bout = SW.dir === "xu" ? walletUsdc : walletXlm;
   $("swap-bal-in").textContent = bin !== null ? fmt(bin, 2) : "—";
@@ -5122,7 +5179,7 @@ function setSellMarket(sym) {
   document.body.classList.remove("has-svault");
   document.body.classList.toggle("xmarket", !!m);
   for (const el of document.querySelectorAll("[data-out-sym]")) el.textContent = SV.out.sym;
-  for (const el of document.querySelectorAll("[data-out-coin]")) el.className = `coin ${m ? "other" : "usdc"}`;
+  for (const el of document.querySelectorAll("[data-out-coin]")) paintCoin(el, m ? m.sym : "USDC");
   $("sv-title").textContent = m ? `${BS} → ${m.sym} vault` : "Your sell vault";
   $("sv-stats").innerHTML = "";
   $("sv-chip").innerHTML = "";
@@ -5228,10 +5285,16 @@ async function refreshSell() {
   ]);
   // Market: USDC received for selling 1 XLM
   let sellRef = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+  const sellQuotes = [{ venue: "Soroswap", price: sellRef ? Number(sellRef) / 1e7 : null }];
   try {
     const aq = await aquaBest(BASE.addr, SV.out.addr, U); // the best venue for a seller, as on the buy side
+    if (aq && aq.out > 0n) sellQuotes.push({ venue: "Aquarius", price: Number(aq.out) / 1e7 });
     if (aq && (sellRef === null || aq.out > sellRef)) sellRef = aq.out;
   } catch {}
+  if (SV.out.addr === C.usdc) {
+    PX.sell = sellQuotes;
+    refPrice(BASE.addr).then(paintPriceSources, () => {});
+  }
   if (sellRef !== null) SV.mkt = Number(sellRef) / 1e7;
   else if (marketPrice) SV.mkt = marketPrice;
   $("sv-mkt").textContent = SV.mkt ? `Market ${px4(SV.mkt)}` : "";
@@ -5760,6 +5823,9 @@ async function tradeSync() {
   if (TR.key !== m.token) return;
   if (!r.ok || !r.value) return tradeNote("This market has no pool with a price history yet, so there is nothing to chart.");
   const pair = String(r.value);
+  // The chart is the Soroswap pool's history; the price at the top is the best venue's, so the legend says which is which.
+  $("ch-src").textContent = `Price history of the Soroswap ${BS} / USDC pool (the price at the top is the best pool's, so they can differ on testnet); your orders fill wherever the price is best. Drag to go back in time, scroll to zoom, double-click to reset.`;
+  paintPriceSources();
   read(pair, "get_reserves").catch(() => {}); // asked now, read in tradeTick below: the live price arrives one round sooner
   const t0 = await read(pair, "token_0");
   if (TR.key !== m.token) return;
