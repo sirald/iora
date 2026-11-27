@@ -50,3 +50,4 @@ testnet/*
 !testnet/filler.env
 !testnet/pairs.env
 !testnet/blend-pool.env
+!testnet/mover.env
