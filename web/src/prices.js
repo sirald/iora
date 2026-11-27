@@ -33,7 +33,7 @@ export function testnetNote(sym, ref, refPool = "") {
   const r = Number.isFinite(ref) && ref > 0 ? ` (reference for ${sym}: ${px(ref)} $ from the Reflector oracle)` : "";
   if (refPool)
     return `Testnet prices: test tokens have no real value and nobody arbitrages the testnet pools, so most pools have their own price, far from the real market. The chart and the price at the top come from ${refPool}, which is kept at the real price${r}. Pools more than ${Math.round(MAX_GAP * 100)}% away from it are ignored when orders fill.`;
-  return `Testnet prices: test tokens have no real value and nobody arbitrages the testnet pools, so each pool has its own price, far from the real market${r}. Orders fill at the best pool price.`;
+  return `Testnet prices: test tokens have no real value and nobody arbitrages the testnet pools, so each pool has its own price${r}. The price shown is the best pool's within ${Math.round(MAX_GAP * 100)}% of the real price; pools further away are ignored.`;
 }
 
 // ---- Iora's reference pool (kept at the real price) and the pools far from it ----
@@ -43,6 +43,23 @@ export const MAX_GAP = 0.05;
 export const gapFrom = (price, ref) => (Number.isFinite(price) && price > 0 && Number.isFinite(ref) && ref > 0 ? Math.abs(price / ref - 1) : null);
 /** The quotes with `ignored` set on those further than MAX_GAP from the real price (`real`, in the same unit). */
 export const markFar = (quotes, real, max = MAX_GAP) => quotes.map((q) => ({ ...q, ignored: !q.ref && gapFrom(q.price, real) !== null && gapFrom(q.price, real) > max }));
+/**
+ * The one price shown for a coin, everywhere in the app (trade screen, Markets, portfolio):
+ *  1. Iora's reference pool when it has a quote (`ref: true`): it is kept at the real price;
+ *  2. else the best quote for the side among the pools within MAX_GAP of the real price (`real`, Reflector);
+ *  3. if every pool is further away, the real price itself (`oracle: true`): a far pool is never the price;
+ *  4. with no real price at all (the oracle has none), the best quote.
+ * Returns the chosen { venue, price, ref?, oracle? } or null.
+ */
+export function pickPrice(quotes, real, side = "buy", max = MAX_GAP) {
+  const ok = (quotes || []).filter((q) => q && Number.isFinite(q.price) && q.price > 0);
+  const ref = ok.find((q) => q.ref);
+  if (ref) return ref;
+  const hasReal = Number.isFinite(real) && real > 0;
+  if (!hasReal) return bestVenue(ok, side);
+  const near = bestVenue(ok.filter((q) => gapFrom(q.price, real) <= max), side);
+  return near || { venue: "Reflector (real price; no pool is near it now)", price: real, oracle: true };
+}
 /** "aquarius" | "soroswap" for a VENUE setting (anything else: null). */
 export function refKind(venue) {
   const v = String(venue || "").toLowerCase();

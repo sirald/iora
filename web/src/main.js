@@ -24,7 +24,8 @@ import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
 import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
 import { PART, planMove as planMoverCall, sortCoins, splitPlan } from "./mover.js";
-import { bestVenue, coinBlurb, coinStyle, interestTag, markFar, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "./prices.js";
+import { candlesToPoints, historyCaption, historyCoin, joinHistory } from "./history.js";
+import { coinBlurb, coinStyle, gapFrom, interestTag, MAX_GAP, markFar, pickPrice, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "./prices.js";
 import { SUGGESTED, capabilityOf, createNetWait, mustCheck, networkName, networkState, noSwitchIds } from "./network.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
@@ -255,11 +256,19 @@ async function inBlend(token) {
 // ---- Testnet prices and where they come from: each pool has its own price, so every price says its source ----
 const REFLECTOR = (import.meta.env.VITE_REFLECTOR || "CCSZNMAXTNMIZNGDBLIZYKLOZG3LYKSIXCYC7GKWLOBLSMUPX7MKPHDF").trim();
 const PX = { buy: [], sell: [], ref: null, refFor: null, refAt: 0 };
-/** The Reflector oracle's price (in $) for a coin, read at most once a minute; null if it has none. */
-async function refPrice(token) {
-  if (PX.refFor === token && Date.now() - PX.refAt < 60_000) return PX.ref;
+const REALS = new Map(); // token -> { at, v }: the Reflector price, read at most once a minute per coin
+/** The Reflector oracle's price (in $, taken as USDC) for a coin; null if it has none. */
+async function realPrice(token) {
+  const c = REALS.get(token);
+  if (c && Date.now() - c.at < 60_000) return c.v;
   const r = await read(REFLECTOR, "lastprice", [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), addr(token)])]).catch(() => ({ ok: false }));
-  PX.ref = r.ok ? reflectorPrice(r.value) : null;
+  const v = r.ok ? reflectorPrice(r.value) : null;
+  REALS.set(token, { at: Date.now(), v });
+  return v;
+}
+/** The same for the trading screen's coin, kept in PX for the price notes. */
+async function refPrice(token) {
+  PX.ref = await realPrice(token);
   PX.refFor = token;
   PX.refAt = Date.now();
   return PX.ref;
@@ -299,19 +308,56 @@ async function refPoolPrice(base = BASE.addr, quote = C.usdc) {
   const b = t[0] === base ? r0 : r1, q = t[0] === base ? r1 : r0;
   return b > 0n && q > 0n ? Number(q) / Number(b) : null;
 }
-/** The quotes as shown: with the reference pool, the ones far from the real price are marked ignored. */
-const shownQuotes = (quotes) => (quotes.some((q) => q.ref) && PX.refFor === BASE.addr && PX.ref ? markFar(quotes, PX.ref) : quotes);
+/** The quotes as shown: the ones far from the real price are marked ignored (they are never the price). */
+const shownQuotes = (quotes) => (PX.refFor === BASE.addr && PX.ref ? markFar(quotes, PX.ref) : quotes);
+
+/**
+ * Every venue's quote for 1 `token` in USDC, for a buyer ("buy": USDC paid per coin) or a seller ("sell": USDC got
+ * per coin): Iora's reference pool (if it trades the coin), the Soroswap pool and the best Aquarius pool.
+ */
+async function venueQuotes(token, side = "buy") {
+  const buy = side === "buy";
+  const path = buy ? [C.usdc, token] : [token, C.usdc];
+  const [rp, q, aq] = await Promise.all([
+    refPoolPrice(token, C.usdc).catch(() => null),
+    read(C.router, "router_get_amounts_out", [i128(U), addrVec(path)]).catch(() => ({ ok: false })),
+    aquaBest(path[0], path[1], U).catch(() => null),
+  ]);
+  const of = (out) => (out > 0n ? (buy ? Number(U) / Number(out) : Number(out) / Number(U)) : null);
+  const quotes = [{ venue: "Soroswap", price: q.ok ? of(BigInt(q.value[q.value.length - 1])) : null }];
+  if (aq && aq.out > 0n) quotes.push({ venue: "Aquarius", price: of(aq.out) });
+  if (rp) quotes.unshift({ venue: REF_LABEL, price: rp, ref: true });
+  return quotes;
+}
+const PRICES = new Map(); // `${side}:${token}` -> { at, v }
+/**
+ * The one price of a coin in USDC, used everywhere (trade screen, Markets, portfolio): the reference pool, else the
+ * best pool within 5% of the real price, else the real price (see pickPrice). Kept for 30 seconds.
+ * Returns { price, venue, ref?, oracle?, quotes, real } or null.
+ */
+async function priceOf(token, side = "buy") {
+  const key = `${side}:${token}`;
+  const c = PRICES.get(key);
+  if (c && Date.now() - c.at < 30_000) return c.v;
+  const [quotes, real] = await Promise.all([venueQuotes(token, side), realPrice(token)]);
+  const pick = pickPrice(quotes, real, side);
+  const v = pick ? { ...pick, quotes, real } : null;
+  PRICES.set(key, { at: Date.now(), v });
+  return v;
+}
 
 /** Writes the source of the top prices, the testnet note and the venue line under the chart. */
 function paintPriceSources() {
   const refQ = (list) => list.find((q) => q.ref && q.price > 0);
-  const b = refQ(PX.buy) || bestVenue(PX.buy, "buy"), s = refQ(PX.sell) || bestVenue(PX.sell, "sell");
+  const real = PX.refFor === BASE.addr ? PX.ref : null;
+  const b = pickPrice(PX.buy, real, "buy"), s = pickPrice(PX.sell, real, "sell");
   const set = (id, t) => {
     const el = document.getElementById(id);
     if (el) el.textContent = t;
   };
-  set("m-src", b ? `${b.ref ? "Price" : "Best price"} · ${b.venue}` : "");
-  set("sv-m-src", s ? `${s.ref ? "Price" : "Best price"} · ${s.venue}` : "");
+  const src = (x) => (x ? `${x.ref || x.oracle ? "Price" : "Best price"} · ${x.venue}` : "");
+  set("m-src", src(b));
+  set("sv-m-src", src(s));
   const note = testnetNote(BS, PX.refFor === BASE.addr ? PX.ref : null, refQ(PX.buy) || refQ(PX.sell) ? REF_LABEL : "");
   for (const id of ["m-tip", "sv-m-tip"]) document.getElementById(id)?.setAttribute("data-tip", note);
   const v = document.body.dataset.view;
@@ -324,7 +370,7 @@ function paintPriceSources() {
   }
 }
 
-const TR = { key: null, quote: "USDC", pair: null, base0: true, pts: [], tf: 3600, hover: null, spot: null, res: null, lines: [], note: "", scanned: false };
+const TR = { key: null, quote: "USDC", pair: null, base0: true, pts: [], tf: 3600, hover: null, spot: null, res: null, lines: [], note: "", scanned: false, mkt: null, src: "" };
 // The keeper does not fill orders smaller than this (against keeping the keeper busy with dust orders)
 const MIN_ORDER = 1_000_000n;
 /** Warning for a limit worse than the market (audit Y-1): the contract only guarantees the limit, not the market price. */
@@ -2808,9 +2854,8 @@ async function renderPortfolio() {
               const t = String(p.token);
               const k = known.find((x) => x.token === t);
               if (!k || t === BASE.addr || BigInt(p.balance) <= 0n) return null;
-              const q = await read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, t])]);
-              const out = q.ok ? Number(BigInt(q.value[q.value.length - 1])) : 0;
-              const opx = out > 0 ? 1e7 / out : null;
+              const pk = await priceOf(t, "buy").catch(() => null); // the same price as everywhere else
+              const opx = pk ? pk.price : null;
               const bal = Number(BigInt(p.balance)) / 1e7, res = Number(BigInt(p.reserved)) / 1e7;
               return { sym: k.sym, bal, res, usd: opx ? bal * opx : null, resUsd: opx ? res * opx : 0 };
             }),
@@ -2824,7 +2869,7 @@ async function renderPortfolio() {
       box.innerHTML = `<div class="pf-empty"><p>You have no vault yet. Open one on the Trade page with one signature, deposit, and it starts earning.</p><a class="btn primary" href="#vault">Go to Trade</a></div>`;
       return;
     }
-    const px = marketPrice || (TR.key === C.usdc && TR.spot) || SV.mkt || 0;
+    const px = marketPrice || SV.mkt || (await priceOf(BASE.addr, "buy").catch(() => null))?.price || 0;
     const n = (v, d = 2) => v.toLocaleString("en-US", { minimumFractionDigits: d === 2 ? 2 : 0, maximumFractionDigits: d });
     const pct = (a) => (a !== null && a !== undefined ? `${(a * 100).toFixed(2)}%` : "—");
     const xApr = SV.apr !== null ? SV.apr : xp ? xp.apr : null;
@@ -2991,22 +3036,14 @@ async function refreshBuy() {
   // Aquarius pool), for a small reference trade: an order fills where the price is best, so that is the price
   // a limit should be compared with.
   // It is worked out beside the vault reads below, not before them: the vault's numbers do not wait for a price.
+  // The price is the one used everywhere (priceOf): Iora's reference pool when it trades this coin, else the best
+  // pool within 5% of the real (Reflector) price; a pool far from it is shown as ignored, never as the price.
   const pricing = (async () => {
-    let refOut = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
-    const quotes = [{ venue: "Soroswap", price: refOut ? Number(U) / Number(refOut) : null }];
-    try {
-      const aq = await aquaBest(C.usdc, BASE.addr, U);
-      if (aq && aq.out > 0n) quotes.push({ venue: "Aquarius", price: Number(U) / Number(aq.out) });
-      if (aq && (refOut === null || aq.out > refOut)) refOut = aq.out;
-    } catch {}
-    // Iora's reference pool, when it trades this coin: its price is the one shown (the real price, not an outlier)
-    const rp = await refPoolPrice().catch(() => null);
-    if (rp) quotes.unshift({ venue: REF_LABEL, price: rp, ref: true });
-    PX.buy = quotes;
-    await refPrice(BASE.addr);
+    const [pick] = await Promise.all([priceOf(BASE.addr, "buy"), refPrice(BASE.addr)]);
+    PX.buy = pick ? pick.quotes : [];
     paintPriceSources();
-    if (rp || (refOut !== null && refOut > 0n)) {
-      marketPrice = rp || Number(U) / Number(refOut);
+    if (pick) {
+      marketPrice = pick.price;
       $("market").textContent = `Market ${marketPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}`;
       $("m-price").textContent = marketPrice.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
       paintMkPrice();
@@ -4036,14 +4073,13 @@ function paintPrices(now = false) {
   paintExtraPrices().catch((e) => console.warn("market prices", e));
 }
 
-/** Price cells in the Markets table (updated as the Soroswap price arrives). */
-/** Markets page: each coin's USDC price (from what 1 USDC buys; the same calculation as the price on the trading screen). */
+/** Markets page: each coin's USDC price, the same one as on the trading screen (priceOf); its source in the tooltip. */
 async function paintBasePrices() {
   await Promise.all(
     [...document.querySelectorAll(".mk-bprice")].map(async (el) => {
-      const q = await read(C.router, "router_get_amounts_out", [i128(U), addrVec([C.usdc, el.dataset.tok])]);
-      const out = q.ok ? Number(BigInt(q.value[q.value.length - 1])) : 0;
-      el.textContent = out > 0 ? px4(1e7 / out) : "no pool";
+      const pk = await priceOf(el.dataset.tok, "buy").catch(() => null);
+      el.textContent = pk ? px4(pk.price) : "no price";
+      el.title = pk ? `${pk.ref || pk.oracle ? "Price" : "Best price"} · ${pk.venue}` : "";
       mkSeen.set(`b${el.dataset.tok}`, el.textContent);
     }),
   );
@@ -5457,23 +5493,23 @@ async function refreshSell() {
     readXlmPool(),
     read(C.router, "router_get_amounts_out", [i128(U), addrVec([BASE.addr, SV.out.addr])]),
   ]);
-  // Market: USDC received for selling 1 XLM
-  let sellRef = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
-  const sellQuotes = [{ venue: "Soroswap", price: sellRef ? Number(sellRef) / 1e7 : null }];
-  try {
-    const aq = await aquaBest(BASE.addr, SV.out.addr, U); // the best venue for a seller, as on the buy side
-    if (aq && aq.out > 0n) sellQuotes.push({ venue: "Aquarius", price: Number(aq.out) / 1e7 });
-    if (aq && (sellRef === null || aq.out > sellRef)) sellRef = aq.out;
-  } catch {}
-  const sellRp = SV.out.addr === C.usdc ? await refPoolPrice(BASE.addr, C.usdc).catch(() => null) : null;
-  if (sellRp) sellQuotes.unshift({ venue: REF_LABEL, price: sellRp, ref: true });
+  // Market: USDC received for selling 1 coin. In USDC the price used everywhere (priceOf: reference pool, else the
+  // best pool within 5% of the real price); in another coin (showcase market) the best pool, as before.
   if (SV.out.addr === C.usdc) {
-    PX.sell = sellQuotes;
-    refPrice(BASE.addr).then(paintPriceSources, () => {});
+    const [pick] = await Promise.all([priceOf(BASE.addr, "sell").catch(() => null), refPrice(BASE.addr)]);
+    PX.sell = pick ? pick.quotes : [];
+    paintPriceSources();
+    if (pick) SV.mkt = pick.price;
+    else if (marketPrice) SV.mkt = marketPrice;
+  } else {
+    let sellRef = q.ok ? BigInt(q.value[q.value.length - 1]) : null;
+    try {
+      const aq = await aquaBest(BASE.addr, SV.out.addr, U);
+      if (aq && (sellRef === null || aq.out > sellRef)) sellRef = aq.out;
+    } catch {}
+    if (sellRef !== null) SV.mkt = Number(sellRef) / 1e7;
+    else if (marketPrice) SV.mkt = marketPrice;
   }
-  if (sellRp) SV.mkt = sellRp;
-  else if (sellRef !== null) SV.mkt = Number(sellRef) / 1e7;
-  else if (marketPrice) SV.mkt = marketPrice;
   $("sv-mkt").textContent = SV.mkt ? `Market ${px4(SV.mkt)}` : "";
   $("sv-m-price").textContent = SV.mkt ? px4(SV.mkt) : "—";
   SV.apr = pool ? pool.apr : null;
@@ -5952,6 +5988,8 @@ async function pollSellFills() {
 // The chart uses no made-up data: the real price history is derived from the "sync" events (reserves after each
 // trade) of the Soroswap pool where orders fill. The network keeps about a week of events; the points seen are
 // stored in the browser, so the history grows over time in the same browser. If the pool had no trades the line stays flat.
+// Before the pool's first trade the chart shows the coin's market price (api/history.js: Kraken, else Reflector), drawn
+// dashed and muted with a marker where the pool takes over, so a pool a few hours old still has a full chart.
 // ---------------------------------------------------------------------------
 const cssv = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 const SYNC_TOPIC = xdr.ScVal.scvSymbol("sync").toXDR("base64");
@@ -5992,7 +6030,7 @@ async function tradeSync() {
   const m = tradeMarket();
   for (const sel of document.querySelectorAll(".pairsel")) sel.value = V7 ? BS : m.token === C.usdc ? "home" : m.quote;
   if (TR.key === m.token) return drawChart();
-  Object.assign(TR, { key: m.token, quote: m.quote, pair: null, pts: [], res: null, spot: null, lines: [], hover: null, scanned: false });
+  Object.assign(TR, { key: m.token, quote: m.quote, pair: null, pts: [], res: null, spot: null, lines: [], hover: null, scanned: false, mkt: null, src: "" });
   tradeNote("");
   drawChart();
   paintDepth();
@@ -6004,7 +6042,7 @@ async function tradeSync() {
   if (useRef) {
     pair = REF_POOL;
     kind = REF_KIND;
-    $("ch-src").textContent = `Price history of ${REF_LABEL}, which is kept at the real price; the price at the top comes from it too. Drag to go back in time, scroll to zoom, double-click to reset.`;
+    TR.src = `Price history of ${REF_LABEL}, which is kept at the real price; the price at the top comes from it too.`;
   } else {
     const r = await read(C.router, "router_pair_for", [addr(BASE.addr), addr(m.token)]);
     if (TR.key !== m.token) return;
@@ -6012,8 +6050,9 @@ async function tradeSync() {
     pair = String(r.value);
     kind = "soroswap";
     // The chart is the Soroswap pool's history; the price at the top is the best venue's, so the legend says which is which.
-    $("ch-src").textContent = `Price history of the Soroswap ${BS} / USDC pool (the price at the top is the best pool's, so they can differ on testnet); your orders fill wherever the price is best. Drag to go back in time, scroll to zoom, double-click to reset.`;
+    TR.src = `Price history of the Soroswap ${BS} / USDC pool (the price at the top is the best pool's within 5% of the real price, so they can differ on testnet).`;
   }
+  paintChartSource();
   paintPriceSources();
   read(pair, "get_reserves").catch(() => {}); // asked now, read in tradeTick below: the live price arrives one round sooner
   let first = null;
@@ -6030,7 +6069,60 @@ async function tradeSync() {
   drawChart();
   tradeLinesSoon();
   await tradeTick();
+  const mh = loadMarketHistory();
   await tradeHistory();
+  await mh;
+}
+
+// ---- Market history: the coin's real price before the pool's first trade (api/history.js: Kraken, else Reflector) ----
+const MKH = new Map(); // coin -> Promise<{ source, pts } | null>, once per page load (the answer is cached 5 minutes)
+function marketHistory(coin) {
+  if (!MKH.has(coin))
+    MKH.set(
+      coin,
+      fetch(`/api/history?coin=${encodeURIComponent(coin)}`, { headers: { accept: "application/json" } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => (j && j.ok && Array.isArray(j.candles) ? { source: j.source, pts: candlesToPoints(j.candles, Math.floor(Date.now() / 1000)) } : null))
+        .catch(() => (MKH.delete(coin), null)),
+    );
+  return MKH.get(coin);
+}
+/**
+ * Loads the market history for the chart's coin. Only in USDC markets, and only if the pool's price is within 5% of
+ * the real price: a pool with a price of its own would not continue the market line.
+ */
+async function loadMarketHistory() {
+  const key = TR.key, pair = TR.pair;
+  const coin = TR.quote === "USDC" ? historyCoin(BS) : null;
+  if (!coin) return;
+  const [h, real] = await Promise.all([marketHistory(coin), realPrice(BASE.addr)]);
+  if (TR.key !== key || TR.pair !== pair || !h || !h.pts.length) return;
+  const gap = gapFrom(TR.spot, real);
+  if (gap !== null && gap > MAX_GAP) return;
+  TR.mkt = h;
+  chartPtsMemo = null;
+  paintChartSource();
+  drawChart();
+  paintTradeBar();
+}
+/** The chart's caption: the pool it shows and, with market history, where the line before the pool comes from. */
+function paintChartSource() {
+  const el = $("ch-src");
+  if (!el) return;
+  const start = TR.mkt && TR.pts.length ? TR.pts[0].t : null;
+  const day = (t) => new Date(t * 1000).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  const pool = TR.pair === REF_POOL ? REF_LABEL : `the Soroswap ${BS} / USDC pool`;
+  const hist = TR.mkt ? ` ${historyCaption(TR.mkt.source, start, pool, day)}` : "";
+  el.textContent = `${TR.src}${hist} Drag to go back in time, scroll to zoom, double-click to reset.`;
+}
+/** The chart's points: market history (if any) before the pool's first point, then the pool's points. */
+let chartPtsMemo = null;
+function chartPts() {
+  const m = chartPtsMemo;
+  if (m && m.pool === TR.pts && m.n === TR.pts.length && m.mkt === TR.mkt) return m.pts;
+  const pts = joinHistory(TR.mkt && TR.mkt.pts, TR.pts);
+  chartPtsMemo = { pool: TR.pts, n: TR.pts.length, mkt: TR.mkt, pts };
+  return pts;
 }
 
 const resPrice = (r0, r1) => {
@@ -6143,6 +6235,7 @@ async function tradeHistory() {
         : "",
   );
   chartFit();
+  paintChartSource();
   drawChart();
   paintTradeBar();
 }
@@ -6175,7 +6268,7 @@ function candlesOf(pts, tf, from, to) {
       if (p > h) h = p;
       if (p < l) l = p;
       c = p;
-      if (!x.live) n++;
+      if (!x.live && !x.m) n++;
     }
     out.push({ t, o: prev, h, l, c, n });
     prev = c;
@@ -6233,7 +6326,11 @@ function drawChart() {
   const mono = cssv("--mono") || "monospace", sans = cssv("--sans") || "sans-serif";
   const col = { line: cssv("--line"), line2: cssv("--line-2"), muted: cssv("--muted"), text: cssv("--text"), text2: cssv("--text-2"), card: cssv("--card"), up: cssv("--ok"), down: cssv("--down"), buy: cssv("--accent"), sell: cssv("--amber") };
   const now = Math.floor(Date.now() / 1000);
-  const pts = TR.pts;
+  const all = chartPts();
+  // The line view draws the market history's closes only; the candle view uses every point
+  const pts = CH.mode === "line" && TR.mkt ? all.filter((q) => !q.m || q.c) : all;
+  // Where the market history ends and the pool's own trades begin (null without market history)
+  const poolFrom = TR.mkt && pts.length && pts[0].m ? (TR.pts.length ? TR.pts[0].t : Infinity) : null;
   $("ch-live").hidden = CH.pan === 0;
   if (!pts.length) {
     g.font = `13px ${sans}`;
@@ -6353,6 +6450,24 @@ function drawChart() {
       path.push([x(pts[i].t), y(p)]);
     }
     path.push([x(tEnd), y(p)]);
+    // Market history (before the pool's first trade): a dashed, muted line; the pool's own trades after it.
+    if (poolFrom !== null && x(poolFrom) > path[0][0]) {
+      const bx = Math.min(x(poolFrom), path[path.length - 1][0]);
+      const old = path.filter(([px]) => px <= bx);
+      let k = 0;
+      while (k < path.length && path[k][0] <= bx) k++;
+      const by = old.length ? old[old.length - 1][1] : path[0][1];
+      old.push([bx, by]);
+      path.splice(0, k, [bx, by]);
+      g.beginPath();
+      old.forEach(([px, py], j) => (j ? g.lineTo(px, py) : g.moveTo(px, py)));
+      g.strokeStyle = alpha(col.text2, 0.75);
+      g.lineWidth = 1.6;
+      g.setLineDash([5, 4]);
+      g.stroke();
+      g.setLineDash([]);
+      g.lineWidth = 1;
+    }
     const grad = g.createLinearGradient(0, padT, 0, padT + ph + volH);
     grad.addColorStop(0, alpha(trend, 0.26));
     grad.addColorStop(1, alpha(trend, 0));
@@ -6386,7 +6501,8 @@ function drawChart() {
     const bw = Math.max(1, Math.min(cw - 2, Math.round(cw * 0.72)));
     for (const c of win.cs) {
       const flat = c.h === c.l;
-      const cc = flat ? alpha(col.muted, 0.7) : c.c >= c.o ? col.up : col.down;
+      const mkt = poolFrom !== null && c.t + tf <= poolFrom; // market history: lighter candles
+      const cc = flat ? alpha(col.muted, 0.7) : alpha(c.c >= c.o ? col.up : col.down, mkt ? 0.4 : 1);
       const cx0 = x(c.t) + (cw - bw) / 2, m = Math.round(x(c.t) + cw / 2) + 0.5;
       g.strokeStyle = cc;
       g.fillStyle = cc;
@@ -6399,6 +6515,26 @@ function drawChart() {
       const yo = y(c.o), yc = y(c.c), bh = Math.max(flat ? 1.5 : 2, Math.abs(yc - yo));
       roundRect(g, cx0, Math.min(yo, yc) - (Math.abs(yc - yo) < 2 ? bh / 2 : 0), bw, bh, Math.min(1.5, bw / 2));
       g.fill();
+    }
+  }
+  if (poolFrom !== null && Number.isFinite(poolFrom)) {
+    const bx = Math.round(x(poolFrom)) + 0.5;
+    if (bx > 0 && bx < W - padR) {
+      g.strokeStyle = alpha(col.text2, 0.5);
+      g.setLineDash([2, 3]);
+      g.beginPath();
+      g.moveTo(bx, padT);
+      g.lineTo(bx, H - padB);
+      g.stroke();
+      g.setLineDash([]);
+      g.font = `11px ${sans}`;
+      g.fillStyle = col.muted;
+      g.textBaseline = "top";
+      const lab = "◂ market · Iora pool ▸";
+      const lw = g.measureText(lab).width;
+      g.textAlign = bx + lw / 2 + 4 > W - padR ? "right" : bx - lw / 2 - 4 < 0 ? "left" : "center";
+      g.fillText(lab, g.textAlign === "right" ? bx - 4 : g.textAlign === "left" ? bx + 4 : bx, padT + 2);
+      g.textBaseline = "middle";
     }
   }
   g.restore();
@@ -6536,7 +6672,7 @@ function drawChart() {
 function paintTradeBar() {
   const now = Date.now() / 1000, from = now - 86400;
   let chg = "—", hi = "—", lo = "—", cls = "";
-  const pts = TR.pts;
+  const pts = chartPts();
   if (pts.length && TR.spot) {
     let before = null;
     const inside = [];
@@ -6569,7 +6705,7 @@ function paintTradeBar() {
     const k = TR.res.base * TR.res.quote;
     let prev = null, sum = 0;
     for (const x of pts) {
-      if (x.t > from && prev !== null && !x.live) sum += Math.abs(Math.sqrt(k * x.p) - Math.sqrt(k * prev));
+      if (x.t > from && prev !== null && !x.live && !x.m) sum += Math.abs(Math.sqrt(k * x.p) - Math.sqrt(k * prev));
       prev = x.p;
     }
     if (TR.scanned || pts[0].t <= from) vol = `${compact(sum)} ${SV.out && SV.out.sym ? SV.out.sym : "USDC"}`;

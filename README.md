@@ -100,6 +100,12 @@ iXRP): Iora issues them, they have no value, and a bot keeps their pools at the 
 Reflector oracle. Until the Blend pool lists them they wait in the vault without earning; the app reads the pool's
 reserve list and says "earns no interest yet" until then.
 
+Prices in the app come from one place: Iora's reference pool when it trades the coin, else the best pool within 5% of
+the Reflector price; a pool further away is never used as a price (if none is near, the Reflector price is shown and
+labelled so). The price chart shows the pool's own trades and, before the pool's first trade, the coin's market price
+in USD (dashed) from `web/api/history.js`, which reads Kraken's public candles (no key) and caches them for 5 minutes,
+or the Reflector oracle's last ~20 hours if Kraken cannot be reached.
+
 ## Factory interface
 
 | Function | Caller | What it does |

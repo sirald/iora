@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_GAP, bestVenue, coinStyle, gapFrom, markFar, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "../src/prices.js";
+import { MAX_GAP, bestVenue, coinStyle, gapFrom, markFar, pickPrice, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "../src/prices.js";
 
 const quotes = [{ venue: "Soroswap", price: 0.605 }, { venue: "Aquarius", price: 0.366 }];
 
@@ -20,7 +20,7 @@ test("the venue line lists every quote and the Reflector reference", () => {
 test("the testnet note works for any coin, with or without a reference", () => {
   assert.match(testnetNote("XLM", 0.129), /nobody arbitrages the testnet pools/);
   assert.match(testnetNote("XLM", 0.129), /reference for XLM: 0\.1290 \$ from the Reflector oracle/);
-  assert.match(testnetNote("BTC", null), /Orders fill at the best pool price\.$/);
+  assert.match(testnetNote("BTC", null), /best pool's within 5% of the real price; pools further away are ignored\.$/);
   assert.doesNotMatch(testnetNote("BTC", null), /Reflector/);
 });
 
@@ -90,4 +90,28 @@ test("Iora test tokens: icon of the coin they follow, the symbol stays", async (
   assert.deepEqual(interestTag("iBTC", false), { text: "iBTC earns no interest yet", warn: true });
   assert.deepEqual(interestTag("iBTC", true), { text: "iBTC earns on Blend", warn: false });
   assert.deepEqual(interestTag("AQUA", false), { text: "AQUA earns no interest", warn: true });
+});
+
+test("one price everywhere: reference pool, else the best pool near the real price, never a far pool", () => {
+  // The bug: Markets showed Soroswap's 0.5922 for XLM while the real price was 0.127
+  const q = [{ venue: "Soroswap", price: 0.5922 }, { venue: "Aquarius", price: 0.3676 }];
+  const ref = { venue: "Iora reference pool (Aquarius)", price: 0.1271, ref: true };
+  assert.equal(pickPrice([...q, ref], 0.1267, "buy").price, 0.1271);
+  assert.equal(pickPrice([ref, ...q], null, "sell").price, 0.1271, "the reference pool even without a Reflector price");
+  // No reference pool: every pool far -> the real price, labelled as such
+  const far = pickPrice(q, 0.1267, "buy");
+  assert.equal(far.price, 0.1267);
+  assert.equal(far.oracle, true);
+  assert.match(far.venue, /Reflector/);
+  // Pools within 5%: the best one for the side; a far one is never chosen even if "better"
+  const near = [{ venue: "Soroswap", price: 0.13 }, { venue: "Aquarius", price: 0.125 }, { venue: "Other", price: 0.05 }];
+  assert.equal(pickPrice(near, 0.1267, "buy").venue, "Aquarius");
+  assert.equal(pickPrice(near, 0.1267, "sell").venue, "Soroswap");
+  // Just inside 5% counts; just over does not
+  assert.equal(pickPrice([{ venue: "A", price: 104.99 }], 100, "buy").venue, "A");
+  assert.equal(pickPrice([{ venue: "A", price: 105.1 }], 100, "buy").oracle, true);
+  // No real price: the best quote, as before; nothing at all: null
+  assert.equal(pickPrice(q, null, "buy").venue, "Aquarius");
+  assert.equal(pickPrice([], null, "buy"), null);
+  assert.equal(pickPrice([{ venue: "Soroswap", price: null }], 0.1267, "buy").oracle, true);
 });
