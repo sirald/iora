@@ -54,6 +54,8 @@ import {
   oracleRate,
   preferQuote,
   shownPrice,
+  tokenReference,
+  ttlPageStarts,
   cometMaxPrice,
   crossPairs,
   firstAccepted,
@@ -210,15 +212,23 @@ const LEDGER_POLL_MAX = Math.max(1, Number(cfg.LEDGER_POLL_MAX || 6));
 // ----- oracle price band -----
 // A pool whose price is more than VENUE_MAX_DEVIATION_BPS (500 = 5%) away from the oracle's rate
 // lastprice(tin) / lastprice(tout) is not used: not for fill_via routes, not for the vault's own route (execute),
-// not on the price board, and crosses stay inside the same band. 0 = off. Without a usable oracle price (none, or
-// older than ORACLE_MAX_AGE_SEC) the check is off for that pair, as before; VENUE_REQUIRE_ORACLE=1: no fill then.
+// not on the price board, and crosses stay inside the same band. 0 = off. The band never opens by itself: when the
+// oracle has no fresh price (none, or older than ORACLE_MAX_AGE_SEC) for a coin, the reference is, in this order, a
+// USD stablecoin's 1.0 (USDC and STABLE_TOKENS), the coin's last oracle price up to ORACLE_FALLBACK_SEC old, the
+// reference pool's own price; with none of them the pair has no fill and no cross (fail-closed, logged and in
+// status.json). VENUE_REQUIRE_ORACLE=0 brings back the old behaviour (no reference: the band is off for that pair).
 // The oracle: PRICE_ORACLE, else ORACLE of testnet/blend-pool.env (only that key is taken), else on testnet the
 // Reflector-backed adapter the site uses.
 const TESTNET_ORACLE = "CCSZNMAXTNMIZNGDBLIZYKLOZG3LYKSIXCYC7GKWLOBLSMUPX7MKPHDF";
 const PRICE_ORACLE = String(cfg.PRICE_ORACLE || readEnv(path.join(root, "testnet/blend-pool.env")).ORACLE || (PASSPHRASE === Networks.TESTNET ? TESTNET_ORACLE : "")).trim();
 const VENUE_MAX_DEVIATION_BPS = Math.max(0, Number(cfg.VENUE_MAX_DEVIATION_BPS ?? 500) || 0);
-const VENUE_REQUIRE_ORACLE = /^(1|on|true|yes)$/i.test(String(cfg.VENUE_REQUIRE_ORACLE || "").trim());
+const VENUE_REQUIRE_ORACLE = !/^(0|off|false|no)$/i.test(String(cfg.VENUE_REQUIRE_ORACLE ?? "1").trim());
 const ORACLE_MAX_AGE_SEC = Math.max(60, Number(cfg.ORACLE_MAX_AGE_SEC || 600));
+const ORACLE_FALLBACK_SEC = Math.max(ORACLE_MAX_AGE_SEC, Number(cfg.ORACLE_FALLBACK_SEC || 1800));
+// USD stablecoins whose price is taken as 1.0 when the oracle has none (addresses or symbols, comma separated).
+const STABLE_TOKENS = new Set(String(cfg.STABLE_TOKENS || "").split(",").map((s) => s.trim()).filter(Boolean));
+// The reference pool's own price is used as the band's reference only while it is this fresh.
+const REF_RATE_MAX_SEC = 300;
 const BAND_ON = !!PRICE_ORACLE && VENUE_MAX_DEVIATION_BPS > 0;
 // The reference pool (testnet/ref-pool.env POOL=<pool address or Aquarius pool index>, VENUE=aquarius|soroswap|...;
 // only those two keys are taken): a pool kept at the oracle price. It is marked "ref" in the logs and preferred on
@@ -463,6 +473,17 @@ let rpcHighInFlight = 0;
 const SPREAD_METHODS = new Set(["simulateTransaction", "getLedgerEntries"]);
 const SPREAD_TIMEOUT_MS = 3000;
 const low = (fn) => rpcLowCtx.run(true, fn);
+// The main loop runs under mainLoopCtx: only the RPC answers it waits for itself (background priority too) count as
+// its progress for the watchdog. Work it starts and leaves running (background(): TTL, the price board, oracle prices,
+// fee stats) does not count, nor do the ledger stream and RPC ledger poll loops: before, their requests counted, and
+// they kept the watchdog quiet for minutes while the loop sat in the TTL preparation (2026-11-27 21:40).
+const mainLoopCtx = new AsyncLocalStorage();
+const background = (fn) => mainLoopCtx.run(false, () => low(fn));
+/** Background work gives way: it waits while a fill-path request is in flight (up to 2 s), then pauses `ms`. */
+async function giveWay(ms = 0) {
+  for (let i = 0; i < 40 && rpcHighInFlight > 0; i++) await sleep(50);
+  if (ms > 0) await sleep(ms);
+}
 // Sends to every server (RPC_SEND_ALL): how many, and how often a copy (not the usual server) took it first.
 const sendAllStats = { sent: 0, firstByCopy: 0 };
 
@@ -581,7 +602,7 @@ function makeServer(urls) {
         ]);
         lim.in429 = 0;
         lim.latency.add(Date.now() - sentAt);
-        if (!rpcLowCtx.getStore()) loopWatch.progress(); // background (TTL) requests do not count as main-loop progress
+        if (mainLoopCtx.getStore() === true) loopWatch.progress(); // only what the main loop itself waits for (see mainLoopCtx)
         if (mirror) return { ok: true, value: res };
         if (spread) {
           // a read sent to another server to use its capacity: the current server stays the current one
@@ -1606,10 +1627,16 @@ async function localBest(amount, tin, tout, vias) {
 // `execute` route and the price board) is compared with the oracle's rate lastprice(tin) / lastprice(tout). A quote
 // whose price is more than VENUE_MAX_DEVIATION_BPS away is treated as no quote: that pool is not used, and when no
 // pool is left the order waits. Crosses are kept inside the same band around the oracle price.
-const oracleCache = new Map(); // token -> { at, price (bigint | null), ts (s), dec, why }
+// A coin without a fresh oracle price falls back to a stablecoin's 1.0, its last oracle price (ORACLE_FALLBACK_SEC)
+// or the reference pool's price; with none of them the pair is closed (no fill, no cross) until one comes back.
+const oracleCache = new Map(); // token -> { at, price (bigint | null: none at all), ts (s), dec, why }
+const oracleLastGood = new Map(); // token -> { price, ts, dec }: the newest price the oracle gave, however old
 const oracleInFlight = new Map();
+const refRates = new Map(); // "tin|tout" -> { rate, at, decIn, decOut }: the reference pool's own price (its best recent quote)
 const bandNotes = new Map(); // "tin|tout" -> { text, at }: the last reason a quote of this pair was dropped
-const bandStats = { skipped: 0, noOracle: 0, crossesKept: 0 };
+const bandStats = { skipped: 0, noOracle: 0, crossesKept: 0, closed: 0, fallbacks: 0 };
+const bandClosed = new Map(); // "tin|tout" -> { at, why }: pairs closed for want of any reference (status.json)
+const bandSrc = new Map(); // token -> what its last reference was ("oracle", "stablecoin 1.0", "oracle price 12 min old")
 const bandSaid = new Map();
 /** A price band log line, at most once per 10 minutes per key. */
 function bandSay(key, text) {
@@ -1619,7 +1646,19 @@ function bandSay(key, text) {
   log(`price band: ${text}`);
 }
 
-/** The oracle's price of a token (cached 60 s) and the token's decimals: { price, ts, dec } or { why } if unusable. */
+/** Is the token a USD stablecoin (price 1.0 when the oracle has none)? */
+const isStable = (token) => token === USDC || STABLE_TOKENS.has(token) || STABLE_TOKENS.has(sym(token));
+
+/** The oracle's decimals (Reflector: 14), read once; null while unknown. */
+let oracleDec = null;
+async function oracleDecimals() {
+  if (oracleDec !== null) return oracleDec;
+  const r = await read(PRICE_ORACLE, "decimals").catch(() => ({ ok: false }));
+  if (r.ok && Number.isInteger(Number(r.value))) oracleDec = Number(r.value);
+  return oracleDec;
+}
+
+/** The oracle's latest price of a token (cached 60 s), however old, and the token's decimals: { price, ts, dec } or { price: null, why }. */
 async function oraclePrice(token) {
   const c = oracleCache.get(token);
   if (c && Date.now() - c.at < 60_000) return c;
@@ -1636,9 +1675,11 @@ async function oraclePrice(token) {
     else if (!r.value || r.value.price === undefined) e = { at: Date.now(), price: null, dec, why: "the oracle has no price for it" };
     else {
       const price = BigInt(r.value.price);
-      const ts = Number(r.value.timestamp);
-      const age = Date.now() / 1000 - ts;
-      e = price > 0n && age <= ORACLE_MAX_AGE_SEC ? { at: Date.now(), price, ts, dec } : { at: Date.now(), price: null, ts, dec, why: price > 0n ? `the oracle price is ${Math.round(age / 60)} min old` : "the oracle price is not positive" };
+      e = price > 0n ? { at: Date.now(), price, ts: Number(r.value.timestamp), dec } : { at: Date.now(), price: null, dec, why: "the oracle price is not positive" };
+    }
+    if (e.price !== null) {
+      const lg = oracleLastGood.get(token);
+      if (!lg || e.ts >= lg.ts) oracleLastGood.set(token, { price: e.price, ts: e.ts, dec });
     }
     oracleCache.set(token, e);
     return e;
@@ -1647,35 +1688,99 @@ async function oraclePrice(token) {
   return p;
 }
 
-/** The oracle rate for tin -> tout (raw units of tout per raw unit of tin) with decimals, or { why } if none. */
+/** The band's reference price of one token: { price, dec, src } (see tokenReference) or { why }. */
+async function referencePrice(token) {
+  const e = await oraclePrice(token);
+  const stable = isStable(token);
+  const oneUsd = stable ? await oracleDecimals() : null;
+  const r = tokenReference(e, oracleLastGood.get(token), {
+    now: Date.now() / 1000,
+    maxAgeSec: ORACLE_MAX_AGE_SEC,
+    fallbackSec: ORACLE_FALLBACK_SEC,
+    oneUsd: oneUsd === null ? null : 10n ** BigInt(oneUsd),
+  });
+  if (r.price === undefined) return { why: e.price === null ? e.why : `the oracle price is ${Math.round((Date.now() / 1000 - e.ts) / 60)} min old` };
+  bandSrc.set(token, r.src);
+  return { price: r.price, dec: e.dec, src: r.src };
+}
+
+/** The reference pool's price of tin -> tout (or of the reverse pair, inverted), if fresh. */
+function refRateFor(tin, tout) {
+  const fresh = (x) => x && Date.now() - x.at < REF_RATE_MAX_SEC * 1000;
+  const d = refRates.get(`${tin}|${tout}`);
+  if (fresh(d)) return { rate: d.rate, decIn: d.decIn, decOut: d.decOut };
+  const r = refRates.get(`${tout}|${tin}`);
+  if (fresh(r)) return { rate: 1 / r.rate, decIn: r.decOut, decOut: r.decIn };
+  return null;
+}
+
+/** Notes a quote of the reference pool: its best recent price (price impact only lowers it) is kept for the band. */
+function noteRefQuote(tin, tout, amountIn, amountOut) {
+  const i = Number(amountIn);
+  const o = Number(amountOut);
+  if (!(i > 0) || !(o > 0)) return;
+  const key = `${tin}|${tout}`;
+  const rate = o / i;
+  const prev = refRates.get(key);
+  if (prev && Date.now() - prev.at < 60_000 && prev.rate >= rate) return;
+  const dIn = oracleCache.get(tin)?.dec ?? 7;
+  const dOut = oracleCache.get(tout)?.dec ?? 7;
+  refRates.set(key, { rate, at: Date.now(), decIn: dIn, decOut: dOut });
+}
+
+/**
+ * The band's rate for tin -> tout (raw units of tout per raw unit of tin) with decimals and where it came from, or
+ * { why } when there is no reference at all: both coins' references (see referencePrice), else the reference pool's
+ * own price.
+ */
 async function oracleRateFor(tin, tout) {
-  const [a, b] = await Promise.all([oraclePrice(tin), oraclePrice(tout)]);
-  if (a.price === null) return { why: `${sym(tin)}: ${a.why}` };
-  if (b.price === null) return { why: `${sym(tout)}: ${b.why}` };
-  return { rate: oracleRate(a.price, b.price, a.dec, b.dec), decIn: a.dec, decOut: b.dec };
+  const [a, b] = await Promise.all([referencePrice(tin), referencePrice(tout)]);
+  if (a.price !== undefined && b.price !== undefined) {
+    const src = a.src === "oracle" && b.src === "oracle" ? "oracle" : `${sym(tin)}: ${a.src}, ${sym(tout)}: ${b.src}`;
+    return { rate: oracleRate(a.price, b.price, a.dec, b.dec), decIn: a.dec, decOut: b.dec, src };
+  }
+  const why = a.price === undefined ? `${sym(tin)}: ${a.why}` : `${sym(tout)}: ${b.why}`;
+  const ref = refRateFor(tin, tout);
+  if (ref) return { ...ref, src: `the reference pool's price (${why})` };
+  return { why };
 }
 
 const pct = (bps) => `${(bps / 100).toFixed(bps < 1000 ? 1 : 0)}%`;
 const shown = (v) => (v === null ? "?" : v >= 100 ? v.toFixed(2) : v >= 1 ? v.toFixed(4) : v.toPrecision(3));
 
+/** A pair has no reference at all: closed (no fill, no cross): noted for the order, the log and status.json. */
+function closePair(tin, tout, why) {
+  const key = `${tin}|${tout}`;
+  bandStats.closed++;
+  bandClosed.set(key, { at: Date.now(), why });
+  const text = `no fill: no reference price for the oracle band (${why}; no fresh or recent oracle price, no reference pool price)`;
+  bandNotes.set(key, { at: Date.now(), text });
+  bandSay(`closed:${key}`, `${sym(tin)}->${sym(tout)} closed: ${text}`);
+}
+
 /**
- * May a quote of `label` (amountIn tin -> amountOut tout) be used? False when its price is outside the oracle band,
- * or when the oracle has no usable price and VENUE_REQUIRE_ORACLE is set. Without the band (VENUE_MAX_DEVIATION_BPS
- * = 0) or without an oracle price (default): true, as before.
+ * May a quote of `label` (amountIn tin -> amountOut tout) be used? False when its price is outside the band, or when
+ * the pair has no reference price at all (unless VENUE_REQUIRE_ORACLE=0: then true, as before). Without the band
+ * (VENUE_MAX_DEVIATION_BPS = 0, or no oracle set): true.
  */
 async function inBand(label, tin, tout, amountIn, amountOut) {
-  if (!BAND_ON) return !VENUE_REQUIRE_ORACLE || !!PRICE_ORACLE;
+  if (!BAND_ON) return !VENUE_REQUIRE_ORACLE || !!PRICE_ORACLE || VENUE_MAX_DEVIATION_BPS === 0;
   const key = `${tin}|${tout}`;
+  if (/ ref$/.test(label)) noteRefQuote(tin, tout, amountIn, amountOut);
   const o = await oracleRateFor(tin, tout);
   if (!o.rate) {
     bandStats.noOracle++;
     if (VENUE_REQUIRE_ORACLE) {
-      bandNotes.set(key, { at: Date.now(), text: `no fill without an oracle price (VENUE_REQUIRE_ORACLE): ${o.why}` });
-      bandSay(`oracle:req:${key}`, `no fills for ${sym(tin)}->${sym(tout)} without an oracle price (VENUE_REQUIRE_ORACLE): ${o.why}`);
+      closePair(tin, tout, o.why);
       return false;
     }
-    bandSay(`oracle:off:${key}`, `oracle price band off for ${sym(tin)}->${sym(tout)}: ${o.why}; pools are used as before`);
+    bandSay(`oracle:off:${key}`, `oracle price band off for ${sym(tin)}->${sym(tout)}: ${o.why}; pools are used as before (VENUE_REQUIRE_ORACLE=0)`);
     return true;
+  }
+  bandClosed.delete(key);
+  if (o.src !== "oracle") {
+    bandStats.fallbacks++;
+    bandSay(`fallback:${key}`, `${sym(tin)}->${sym(tout)}: no fresh oracle price for both coins; the band uses ${o.src}`);
   }
   const c = bandCheck(amountIn, amountOut, o.rate, VENUE_MAX_DEVIATION_BPS);
   if (c.ok) return true;
@@ -1684,7 +1789,7 @@ async function inBand(label, tin, tout, amountIn, amountOut) {
   const what = usd ? `${sym(tin === USDC ? tout : tin)} in USDC` : `${sym(tout)} per ${sym(tin)}`;
   const text =
     `venue ${label} skipped: price ${shown(shownPrice(c.implied, tin === USDC, o.decIn, o.decOut))} is ${pct(c.devBps)} off the oracle ` +
-    `${shown(shownPrice(o.rate, tin === USDC, o.decIn, o.decOut))} (${what}; band ${pct(VENUE_MAX_DEVIATION_BPS)})`;
+    `${shown(shownPrice(o.rate, tin === USDC, o.decIn, o.decOut))} (${what}; band ${pct(VENUE_MAX_DEVIATION_BPS)}${o.src === "oracle" ? "" : `; reference: ${o.src}`})`;
   bandNotes.set(key, { at: Date.now(), text });
   bandSay(`band:${label}:${key}`, `${sym(tin)}->${sym(tout)}: ${text}`);
   return false;
@@ -1703,7 +1808,8 @@ function oracleTick() {
   const tokens = [USDC, ...boardTokens()].filter((t) => !oracleCache.has(t) || Date.now() - oracleCache.get(t).at > 50_000);
   if (!tokens.length) return;
   oracleBusy = true;
-  low(async () => {
+  background(async () => {
+    await oracleDecimals();
     for (const t of tokens) {
       oracleCache.delete(t);
       await oraclePrice(t).catch(() => null);
@@ -1715,22 +1821,38 @@ function oracleTick() {
     });
 }
 
-/** For status.json: the band, the oracle prices in USDC and how many quotes it dropped. */
+/** For status.json: the band, the reference prices in USDC, where they come from, and the pairs closed for want of one. */
 function bandSummary() {
-  if (!BAND_ON) return VENUE_REQUIRE_ORACLE && !PRICE_ORACLE ? "no oracle set: no fills (VENUE_REQUIRE_ORACLE)" : "off";
+  if (!BAND_ON) return VENUE_MAX_DEVIATION_BPS > 0 && VENUE_REQUIRE_ORACLE && !PRICE_ORACLE ? "no oracle set: no fills (VENUE_REQUIRE_ORACLE)" : "off";
   const u = oracleCache.get(USDC);
   const prices = {};
+  const now = Date.now() / 1000;
   for (const [t, e] of oracleCache) {
     if (t === USDC) continue;
-    prices[sym(t)] = e.price !== null && u && u.price ? Number(shown(shownPrice(oracleRate(e.price, u.price, e.dec, u.dec), false, e.dec, u.dec))) : e.why || null;
+    prices[sym(t)] =
+      e.price !== null && u && u.price ? Number(shown(shownPrice(oracleRate(e.price, u.price, e.dec, u.dec), false, e.dec, u.dec))) : e.why || null;
+  }
+  const ages = {};
+  for (const [t, e] of oracleCache) ages[sym(t)] = e.price !== null ? Math.round(now - e.ts) : e.why;
+  const closed = {};
+  for (const [k, v] of bandClosed) {
+    if (Date.now() - v.at > 10 * 60_000) continue;
+    const [a, b] = k.split("|");
+    closed[`${sym(a)}->${sym(b)}`] = v.why;
   }
   return {
     max_deviation_bps: VENUE_MAX_DEVIATION_BPS,
     oracle: PRICE_ORACLE,
     require_oracle: VENUE_REQUIRE_ORACLE,
     prices_usdc: prices,
+    oracle_age_sec: ages,
+    // per coin: "oracle", "stablecoin 1.0" or "oracle price N min old" (the last reference the band used)
+    reference: Object.fromEntries([...bandSrc].map(([t, s]) => [sym(t), s])),
+    // pairs with no reference price at all in the last 10 minutes: no fill and no cross there
+    closed_pairs: closed,
     quotes_skipped: bandStats.skipped,
     quotes_without_oracle: bandStats.noOracle,
+    quotes_on_fallback: bandStats.fallbacks,
     ref_pool: REF_POOL ? `${REF_VENUE || "?"} ${REF_POOL}${refSeen ? "" : " (not found yet)"}` : "none",
   };
 }
@@ -2468,7 +2590,7 @@ function boardTick() {
   if (!BOARD_ON || !VENUES || Date.now() < venueState.offUntil) return;
   if (!allowedBusy && Date.now() - allowedAt > 30 * 60_000) {
     allowedBusy = true;
-    low(() => refreshAllowed())
+    background(() => refreshAllowed())
       .catch(() => {})
       .finally(() => {
         allowedBusy = false;
@@ -2478,7 +2600,7 @@ function boardTick() {
   const pick = boardPlan(boardDirections(), { ledger: lastLedger || latestCache.seq, maxQuotes: BOARD_MAX_QUOTES, coldEvery: BOARD_COLD_LEDGERS });
   if (!pick.length) return;
   boardBusy = true;
-  low(async () => {
+  background(async () => {
     // forward directions (from USDC) first: the reverse ones take their reference amount from them
     for (const d of pick) boardWant.delete(d.key);
     for (const d of pick.filter((x) => x.tin === USDC)) await refreshBoard(d.tin, d.tout).catch(() => {});
@@ -3055,10 +3177,12 @@ async function tryCross(a, b, budget = null) {
       [rlo, rhi, start] = [cb.lo, cb.hi, cb.p];
       bandStats.crossesKept++;
     } else if (VENUE_REQUIRE_ORACLE) {
-      bandSay(`cross:noracle:${a.tin}|${a.tout}`, `crosses of ${sym(a.tin)}/${sym(a.tout)} wait: no oracle price (${o.why}; VENUE_REQUIRE_ORACLE)`);
+      bandStats.closed++;
+      bandClosed.set(`${a.tin}|${a.tout}`, { at: Date.now(), why: o.why });
+      bandSay(`cross:noracle:${a.tin}|${a.tout}`, `crosses of ${sym(a.tin)}/${sym(a.tout)} wait: no reference price for the oracle band (${o.why})`);
       return "no";
     }
-  } else if (VENUE_REQUIRE_ORACLE && !PRICE_ORACLE) return "no";
+  } else if (VENUE_MAX_DEVIATION_BPS > 0 && VENUE_REQUIRE_ORACLE && !PRICE_ORACLE) return "no";
   let amt = crossAmounts(a, b, start);
   if (!amt) return "no";
   // What would the pool give each side for these amounts?
@@ -3249,44 +3373,111 @@ function keyId(k) {
   return JSON.stringify(k, (_, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
-/** One factory's entries: a job list, page by page. */
-async function factoryTtlJobs() {
+// The TTL job list is prepared in the background (startTtlPrep), one read at a time at background priority, giving
+// way to the fill path; the main loop and the heartbeat never wait for it. Reads are kept from round to round: a
+// factory whose vault count has not changed reuses its last list (one read), a bucket of up to 40 vaults needs no read
+// at all (its head is enough), and a longer one is walked again only when its head or length changed. Before, every
+// bucket was read on every round (228 reads on 2026-11-27) while the loop waited.
+const TTL_PREP_PAUSE_MS = Math.max(0, Number(cfg.TTL_PREP_PAUSE_MS ?? 100));
+const ttlLists = new Map(); // factory -> { count, jobs }: the last round's job list
+const ttlPages = new Map(); // "factory:bucket" -> { last, len, froms }: where each page of 40 starts in a chained bucket
+let ttlPrep = { busy: false, startedAt: 0, buckets: 0, of: 0, reads: 0, reused: 0, tookMs: null, jobs: 0, error: null };
+
+/** The factories' TTL jobs: one per page of 40 entries. `pr` counts the progress (status.json). */
+async function factoryTtlJobs(pr = { buckets: 0, of: 0, reads: 0, reused: 0 }) {
   const jobs = [];
+  const rd = async (...a) => {
+    await giveWay(TTL_PREP_PAUSE_MS);
+    pr.reads++;
+    return read(...a);
+  };
   for (const f of FACTORIES) {
     const buckets = await bucketsOf(f);
+    const count = await rd(f, "vault_count");
+    if (!count.ok) throw new Error(`vault_count of ${short(f)}: ${errText(count)}`);
+    const n = Number(count.value);
+    const prev = ttlLists.get(f);
+    if (prev && prev.count === n) {
+      // no vault added since the last round: the same entries, the same pages
+      jobs.push(...prev.jobs);
+      pr.reused++;
+      continue;
+    }
+    const mine = [];
     if (buckets > 0 && (await isChained(f))) {
       // Version 9: one job per page of 40 along each bucket's chain (`from` is the owner the page starts at).
+      const heads = [];
       for (let start = 0; start < 256; start += 64) {
-        const hs = await read(f, "heads", [u32(start), u32(64)]);
-        if (!hs.ok) continue;
-        for (const h of hs.value) {
+        const hs = await rd(f, "heads", [u32(start), u32(64)]);
+        if (!hs.ok) throw new Error(`heads of ${short(f)} from ${start}: ${errText(hs)}`);
+        heads.push(...hs.value);
+      }
+      pr.of += heads.length;
+      for (const h of heads) {
+        const idx = Number(h.index);
+        const len = Number(h.len);
+        const last = String(h.last);
+        const key = `${f}:${idx}`;
+        let froms = ttlPageStarts(ttlPages.get(key), last, len);
+        if (froms) pr.reused++;
+        else {
+          // the `prev` of each page's last entry is where the next page starts; the last page itself is not read
+          froms = [null];
           let from = null;
-          for (let page = 0; page < 100_000; page++) {
-            jobs.push({ kind: "factory", f, chain: true, bucket: Number(h.index), from });
-            const pg = await read(f, "bucket", [u32(Number(h.index)), optAddr(from), u32(40)]);
-            if (!pg.ok || !pg.value.length) break;
-            const prev = pg.value[pg.value.length - 1].prev;
-            if (!prev) break;
-            from = String(prev);
+          while (froms.length < Math.ceil(len / 40)) {
+            const pg = await rd(f, "bucket", [u32(idx), optAddr(from), u32(40)]);
+            if (!pg.ok) throw new Error(`bucket ${idx} of ${short(f)}: ${errText(pg)}`);
+            const next = pg.value.length ? pg.value[pg.value.length - 1].prev : null;
+            if (!next) break;
+            from = String(next);
+            froms.push(from);
           }
+          ttlPages.set(key, { last, len, froms });
         }
+        for (const from of froms) mine.push({ kind: "factory", f, chain: true, bucket: idx, from });
+        pr.buckets++;
       }
-      continue;
-    }
-    if (buckets > 0) {
+    } else if (buckets > 0) {
       // Version 6: for every non-empty bucket, the owner entries in it, 40 at a time.
+      pr.of += buckets;
       for (let b = 0; b < buckets; b++) {
-        const list = await read(f, "bucket", [u32(b)]);
+        const list = await rd(f, "bucket", [u32(b)]);
+        pr.buckets++;
         if (!list.ok || !list.value.length) continue;
-        for (let start = 0; start < list.value.length; start += 40) jobs.push({ kind: "factory", f, bucket: b, start });
+        for (let start = 0; start < list.value.length; start += 40) mine.push({ kind: "factory", f, bucket: b, start });
       }
-      continue;
+    } else {
+      for (let start = 0; start < n; start += 40) mine.push({ kind: "factory", f, start });
     }
-    const count = await read(f, "vault_count");
-    if (!count.ok) continue;
-    for (let start = 0; start < Number(count.value); start += 40) jobs.push({ kind: "factory", f, start });
+    ttlLists.set(f, { count: n, jobs: mine });
+    jobs.push(...mine);
   }
   return jobs;
+}
+
+/** Starts the day's TTL round: the job list is prepared in the background; the loop goes on at once. */
+function startTtlPrep(vaults) {
+  const t0 = Date.now();
+  ttlPrep = { busy: true, startedAt: t0, buckets: 0, of: 0, reads: 0, reused: 0, tookMs: null, jobs: 0, error: null };
+  const pr = ttlPrep;
+  background(() => factoryTtlJobs(pr))
+    .then((jobs) => {
+      ttlJobs = [...jobs, ...vaults.map((vault) => ({ kind: "vault", vault }))];
+      ttlStats.roundFailed = 0;
+      pr.jobs = ttlJobs.length;
+      if (ttlJobs.length === 0) lastTtl = Date.now();
+      log(`TTL round: ${ttlJobs.length} jobs prepared in ${((Date.now() - t0) / 1000).toFixed(1)} s in the background (${pr.reads} reads, ${pr.reused} lists/buckets reused from the last round)`);
+    })
+    .catch((e) => {
+      pr.error = String(e.message || e).slice(0, 200);
+      // tried again in 10 minutes (not on the very next scan: a failing RPC must not be asked in a tight loop)
+      lastTtl = Date.now() - TTL_EVERY_SEC * 1000 + 600_000;
+      log(`TTL round: preparing the job list failed (${pr.error}); tried again in 10 min`);
+    })
+    .finally(() => {
+      pr.busy = false;
+      pr.tookMs = Date.now() - t0;
+    });
 }
 
 // TTL upkeep record for status.json and alerts (IORA-04): jobs done and failed, in the current round and in all.
@@ -3368,7 +3559,17 @@ async function ttlJob(job) {
 /** --once mode (GitHub Actions): everything in one go. */
 async function extendTtlAll(vaults) {
   ttlStats.roundFailed = 0;
-  for (const job of await factoryTtlJobs()) await runTtlJob(job);
+  let jobs = [];
+  try {
+    jobs = await factoryTtlJobs();
+  } catch (e) {
+    // the factories' list could not be read: the round counts as failed, the vaults are still extended
+    ttlStats.failed++;
+    ttlStats.roundFailed++;
+    ttlStats.lastError = `TTL job list: ${e.message || e}`.slice(0, 300);
+    log(`TTL round: preparing the job list failed (${e.message || e})`);
+  }
+  for (const job of jobs) await runTtlJob(job);
   for (const vault of vaults) await runTtlJob({ kind: "vault", vault });
   if (ttlStats.roundFailed === 0) lastTtl = Date.now();
   log(`TTL round done: ${ttlStats.roundFailed} failed`);
@@ -3539,6 +3740,7 @@ let failedScansInRow = 0;
 function writeStatus() {
   const s = lastScanInfo || {};
   const now = Date.now();
+  statusWrittenAt = now;
   const usageNow = rpcUsage.lastMinute(now);
   try {
     fs.writeFileSync(
@@ -3585,6 +3787,14 @@ function writeStatus() {
           last_ledger_seen_by: ledgerWatch.by || null,
           send_all: RPC_SEND_ALL && RPC_URLS.length > 1 ? sendAllStats : "off",
           loop_stage: loopWatch.stageName,
+          // the heartbeat also moves while the loop is in a long stage (startAlive); these tell a long stage from a
+          // stuck loop: how long the current stage has lasted, and how long since the loop last moved at all
+          stage: loopWatch.stageName,
+          stage_sec: Math.round((now - loopWatch.stageAt) / 1000),
+          loop_progress_age_sec: Math.round((now - loopWatch.lastAt) / 1000),
+          last_scan_age_sec: s.at ? Math.round((now - Date.parse(s.at)) / 1000) : null,
+          background: backgroundWork(now),
+          ttl_prep: ttlPrepSummary(now),
           loop_stalls: loopWatch.stalls,
           fast_paths: loopWatch.safe() ? `off until ${new Date(loopWatch.safeUntil).toISOString()} (watchdog)` : "on",
           keeper_balance_xlm: s.balance ?? null,
@@ -3692,9 +3902,12 @@ async function main() {
   log(
     BAND_ON
       ? `price band: pools more than ${pct(VENUE_MAX_DEVIATION_BPS)} away from the oracle ${short(PRICE_ORACLE)} are not used (fill_via, execute, board, crosses); ` +
-          `without an oracle price ${VENUE_REQUIRE_ORACLE ? "no fills (VENUE_REQUIRE_ORACLE)" : "the band is off for that pair"}; ` +
+          `without a fresh oracle price: USD stablecoins 1.0, else the last oracle price up to ${Math.round(ORACLE_FALLBACK_SEC / 60)} min old, else the reference pool's price, ` +
+          `else ${VENUE_REQUIRE_ORACLE ? "no fill on that pair (fail-closed)" : "the band is off for that pair (VENUE_REQUIRE_ORACLE=0)"}; ` +
           `reference pool ${REF_POOL ? `${REF_VENUE || "any venue"} ${REF_POOL}` : "none (testnet/ref-pool.env)"}`
-      : `price band off${VENUE_REQUIRE_ORACLE ? (PRICE_ORACLE ? "" : "; no oracle set and VENUE_REQUIRE_ORACLE: no fills") : ""}`,
+      : VENUE_MAX_DEVIATION_BPS > 0 && VENUE_REQUIRE_ORACLE && !PRICE_ORACLE
+        ? "WARNING price band: no oracle set (PRICE_ORACLE): no pool fills and no crosses (fail-closed). Set PRICE_ORACLE, or VENUE_MAX_DEVIATION_BPS=0 / VENUE_REQUIRE_ORACLE=0 to fill without the band"
+        : "price band off",
   );
   log(
     `fill latency: ledger stream ${LEDGER_STREAM ? HORIZON_URL : "off"}, reads spread over the RPC servers ${RPC_SPREAD_READS ? "on" : "off"}, ` +
@@ -3753,103 +3966,105 @@ async function main() {
       (SCAN_MODE === "ledger" ? "scanning on every new ledger (~5 s)." : `scanning every ${INTERVAL_SEC} s.`),
   );
   startWatchdog();
-  for (;;) {
-    try {
-      lastScanStart = Date.now();
-      loopWatch.stage("scan");
-      const s = await scan();
-      loopWatch.stage("after scan");
-      // Worker balances are checked once an hour.
-      if (WORKERS > 0 && Date.now() - workersAt > 3600_000) {
-        workersAt = Date.now();
-        await low(() => ensureWorkers());
-      }
-      // TTL upkeep must not hold up scanning: a job list is prepared once a day and worked through
-      // one job at a time in rounds without a fill.
-      // With the adaptive interval a job runs every SCAN_IDLE_SEC while idle (a round of ~25 jobs takes ~15 min)
-      // and on every ledger without a fill while an order is near its limit; all its requests go through the RPC
-      // rate limit like any other. If fills keep every round busy for a day, TTL runs anyway (overdue).
-      const ttlOverdue = Date.now() - lastTtl > 2 * TTL_EVERY_SEC * 1000;
-      if (DO_TTL && (s.filled === 0 || ttlOverdue)) {
-        if (ttlJobs.length === 0 && !ttlBusy && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
-          ttlJobs = [...(await low(() => factoryTtlJobs())), ...s.vaults.map((vault) => ({ kind: "vault", vault }))];
-          ttlStats.roundFailed = 0;
-          if (ttlJobs.length === 0) lastTtl = Date.now();
-        } else if (ttlJobs.length > 0 && !ttlBusy) {
-          // In the background (one job at a time, main account): a TTL job waits ~5-10 s for its transaction, and the
-          // next scan (a new order) must not wait for it. Its requests are background priority.
-          ttlBusy = true;
-          const job = ttlJobs.shift();
-          const last = ttlJobs.length === 0;
-          low(() => runTtlJob(job))
-            .catch(() => {})
-            .finally(() => {
-              ttlBusy = false;
-              if (last && ttlJobs.length === 0) {
-                // A round with failures is tried again in an hour instead of a day.
-                lastTtl = ttlStats.roundFailed === 0 ? Date.now() : Date.now() - TTL_EVERY_SEC * 1000 + 3600_000;
-                log(`TTL round done: ${ttlStats.roundFailed} failed${ttlStats.roundFailed ? "; the round is repeated in 1 hour" : ""}`);
-              }
-            });
+  startAlive();
+  // Only what this loop waits for counts as its progress (mainLoopCtx).
+  await mainLoopCtx.run(true, async () => {
+    for (;;) {
+      try {
+        lastScanStart = Date.now();
+        loopWatch.stage("scan");
+        const s = await scan();
+        loopWatch.stage("after scan");
+        // Worker balances are checked once an hour.
+        if (WORKERS > 0 && Date.now() - workersAt > 3600_000) {
+          workersAt = Date.now();
+          await low(() => ensureWorkers());
+        }
+        // TTL upkeep must not hold up scanning: a job list is prepared once a day and worked through
+        // one job at a time in rounds without a fill.
+        // With the adaptive interval a job runs every SCAN_IDLE_SEC while idle (a round of ~25 jobs takes ~15 min)
+        // and on every ledger without a fill while an order is near its limit; all its requests go through the RPC
+        // rate limit like any other. If fills keep every round busy for a day, TTL runs anyway (overdue).
+        const ttlOverdue = Date.now() - lastTtl > 2 * TTL_EVERY_SEC * 1000;
+        if (DO_TTL && (s.filled === 0 || ttlOverdue)) {
+          if (ttlJobs.length === 0 && !ttlBusy && !ttlPrep.busy && Date.now() - lastTtl > TTL_EVERY_SEC * 1000) {
+            startTtlPrep(s.vaults); // in the background (see factoryTtlJobs): this loop does not wait for it
+          } else if (ttlJobs.length > 0 && !ttlBusy) {
+            // In the background (one job at a time, main account): a TTL job waits ~5-10 s for its transaction, and the
+            // next scan (a new order) must not wait for it. Its requests are background priority.
+            ttlBusy = true;
+            const job = ttlJobs.shift();
+            const last = ttlJobs.length === 0;
+            background(() => runTtlJob(job))
+              .catch(() => {})
+              .finally(() => {
+                ttlBusy = false;
+                if (last && ttlJobs.length === 0) {
+                  // A round with failures is tried again in an hour instead of a day.
+                  lastTtl = ttlStats.roundFailed === 0 ? Date.now() : Date.now() - TTL_EVERY_SEC * 1000 + 3600_000;
+                  log(`TTL round done: ${ttlStats.roundFailed} failed${ttlStats.roundFailed ? "; the round is repeated in 1 hour" : ""}`);
+                }
+              });
+          }
+        }
+        failedScansInRow = 0;
+      } catch (e) {
+        stats.lastError = e.message;
+        failedScansInRow++;
+        log(`ERROR scan: ${e.message}`);
+        writeStatus(); // the heartbeat moves on even when scans fail; failed_scans_in_row shows it
+        if (failedScansInRow >= 3) {
+          await notify(`${failedScansInRow} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
         }
       }
-      failedScansInRow = 0;
-    } catch (e) {
-      stats.lastError = e.message;
-      failedScansInRow++;
-      log(`ERROR scan: ${e.message}`);
-      writeStatus(); // the heartbeat moves on even when scans fail; failed_scans_in_row shows it
-      if (failedScansInRow >= 3) {
-        await notify(`${failedScansInRow} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
+      oracleTick(); // the oracle prices for the price band, in the background
+      boardTick(); // the price board, in the background
+      // The inclusion fee is refreshed here, in the background, so a fill never waits for getFeeStats.
+      if (Date.now() - feeStatsCache.at > 20_000 && !feeRefreshing) {
+        feeRefreshing = true;
+        background(() => fetchInclusionFee())
+          .catch(() => {})
+          .finally(() => {
+            feeRefreshing = false;
+          });
+      }
+      // One-time venue notes are said again once a day (and the set cannot grow without end).
+      if (Date.now() - saidResetAt > 24 * 3600_000) {
+        saidResetAt = Date.now();
+        venueState.said.clear();
+      }
+      if (Date.now() - usageLogAt >= 10 * 60_000) {
+        usageLogAt = Date.now();
+        logRpcUsage();
+        logLedgerRace();
+      }
+      if (SCAN_MODE !== "ledger") {
+        await sleep(INTERVAL_SEC * 1000);
+        continue;
+      }
+      // Every ledger while an order is near its limit; otherwise a full scan every SCAN_IDLE_SEC and, on each ledger
+      // in between, only the order events (a new or changed order starts a full scan at once).
+      const scanOk = failedScansInRow === 0;
+      const idleMs = scanIntervalMs({ near: !scanOk || proximity.near, eventsOk, idleMs: SCAN_IDLE_SEC * 1000 });
+      if ((idleMs > 0) !== idleMode) {
+        idleMode = idleMs > 0;
+        log(
+          idleMode
+            ? `scan interval: ${SCAN_IDLE_SEC} s (no open order within ${SCAN_NEAR_PCT}% of its limit); order events are still read on every ledger`
+            : `scan interval: every ledger (an order is within ${SCAN_NEAR_PCT}% of its limit, can cross, or is due)`,
+        );
+      }
+      const scanStarted = lastScanStart;
+      for (;;) {
+        loopWatch.stage("waiting for the next ledger");
+        await waitNextLedger(INTERVAL_SEC * 1000);
+        loopWatch.stage(`reading the events of ledger ${lastLedger}`);
+        await readEventsFor(lastLedger); // this ledger's new orders, as soon as the RPC has them
+        if (idleMs === 0 || Date.now() - scanStarted >= idleMs) break;
+        if (dirty.size > 0 || !eventsOk) break; // something happened in a vault (or events failed): full scan now
       }
     }
-    oracleTick(); // the oracle prices for the price band, in the background
-    boardTick(); // the price board, in the background
-    // The inclusion fee is refreshed here, in the background, so a fill never waits for getFeeStats.
-    if (Date.now() - feeStatsCache.at > 20_000 && !feeRefreshing) {
-      feeRefreshing = true;
-      low(() => fetchInclusionFee())
-        .catch(() => {})
-        .finally(() => {
-          feeRefreshing = false;
-        });
-    }
-    // One-time venue notes are said again once a day (and the set cannot grow without end).
-    if (Date.now() - saidResetAt > 24 * 3600_000) {
-      saidResetAt = Date.now();
-      venueState.said.clear();
-    }
-    if (Date.now() - usageLogAt >= 10 * 60_000) {
-      usageLogAt = Date.now();
-      logRpcUsage();
-      logLedgerRace();
-    }
-    if (SCAN_MODE !== "ledger") {
-      await sleep(INTERVAL_SEC * 1000);
-      continue;
-    }
-    // Every ledger while an order is near its limit; otherwise a full scan every SCAN_IDLE_SEC and, on each ledger
-    // in between, only the order events (a new or changed order starts a full scan at once).
-    const scanOk = failedScansInRow === 0;
-    const idleMs = scanIntervalMs({ near: !scanOk || proximity.near, eventsOk, idleMs: SCAN_IDLE_SEC * 1000 });
-    if ((idleMs > 0) !== idleMode) {
-      idleMode = idleMs > 0;
-      log(
-        idleMode
-          ? `scan interval: ${SCAN_IDLE_SEC} s (no open order within ${SCAN_NEAR_PCT}% of its limit); order events are still read on every ledger`
-          : `scan interval: every ledger (an order is within ${SCAN_NEAR_PCT}% of its limit, can cross, or is due)`,
-      );
-    }
-    const scanStarted = lastScanStart;
-    for (;;) {
-      loopWatch.stage("waiting for the next ledger");
-      await waitNextLedger(INTERVAL_SEC * 1000);
-      loopWatch.stage(`reading the events of ledger ${lastLedger}`);
-      await readEventsFor(lastLedger); // this ledger's new orders, as soon as the RPC has them
-      if (idleMs === 0 || Date.now() - scanStarted >= idleMs) break;
-      if (dirty.size > 0 || !eventsOk) break; // something happened in a vault (or events failed): full scan now
-    }
-  }
+  });
 }
 
 let usageLogAt = Date.now();
@@ -4082,6 +4297,45 @@ function startWatchdog() {
     });
   }, 5000);
   watchdogTimer.unref?.();
+}
+
+// ----- the heartbeat between scans -----
+// status.json is written after every scan; while the loop is in a long stage it is written every 10 s as well, so
+// the heartbeat says the process is alive. It does not hide a stuck loop: `stage`, `stage_sec` and
+// `loop_progress_age_sec` show it (monitor/check-heartbeat.sh alarms on the last one), and the watchdog still fires.
+let statusWrittenAt = 0;
+let aliveTimer = null;
+function startAlive() {
+  if (aliveTimer) return;
+  aliveTimer = setInterval(() => {
+    if (Date.now() - statusWrittenAt >= 10_000) writeStatus();
+  }, 2000);
+  aliveTimer.unref?.();
+}
+
+/** What runs in the background now (status.json `background`). */
+function backgroundWork(now = Date.now()) {
+  const w = [];
+  if (ttlPrep.busy) w.push(`ttl-prep: ${ttlPrep.buckets}/${ttlPrep.of || "?"} buckets, ${ttlPrep.reads} reads, ${Math.round((now - ttlPrep.startedAt) / 1000)} s`);
+  if (ttlBusy) w.push(`ttl-job: ${ttlJobs.length} left`);
+  if (boardBusy) w.push("price board");
+  if (oracleBusy) w.push("oracle prices");
+  return w;
+}
+
+function ttlPrepSummary(now = Date.now()) {
+  if (!ttlPrep.startedAt) return null;
+  return {
+    stage: ttlPrep.busy ? "ttl-prep" : ttlPrep.error ? "failed" : "done",
+    started: new Date(ttlPrep.startedAt).toISOString(),
+    sec: Math.round((ttlPrep.busy ? now - ttlPrep.startedAt : ttlPrep.tookMs) / 1000),
+    buckets: ttlPrep.buckets,
+    of: ttlPrep.of,
+    reads: ttlPrep.reads,
+    reused: ttlPrep.reused,
+    jobs: ttlPrep.jobs,
+    error: ttlPrep.error,
+  };
 }
 
 // ----- fill timing -----

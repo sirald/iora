@@ -839,12 +839,14 @@ export class LoopWatch {
     this.now = now;
     this.lastAt = now();
     this.stageName = "start";
+    this.stageAt = this.lastAt; // when the current stage began
     this.stalls = 0;
     this.safeUntil = 0;
     this.reported = false;
   }
 
   stage(name) {
+    if (name !== this.stageName) this.stageAt = this.now();
     this.stageName = name;
     this.progress();
   }
@@ -1125,4 +1127,31 @@ export function preferQuote(quotes, prefer = null, preferBps = 0) {
   if (!p || p[1] === null || p[1] === undefined) return best;
   const q = BigInt(p[1]);
   return q > 0n && q * 10_000n >= best.q * (10_000n - BigInt(Math.max(0, Math.round(preferBps)))) ? { label: prefer, q } : best;
+}
+
+/**
+ * The oracle band's reference price of one token, from the oracle's latest answer `e` ({ price (bigint | null), ts })
+ * and the newest price it ever gave `last` ({ price, ts } | undefined): a fresh price (at most maxAgeSec old) first;
+ * else, for a USD stablecoin (oneUsd = the oracle's 1.0, else null), 1.0; else the newest price at most fallbackSec
+ * old. Returns { price, src, ageSec } or {} when there is none (the pair is then closed).
+ */
+export function tokenReference(e, last, { now, maxAgeSec = 600, fallbackSec = 1800, oneUsd = null } = {}) {
+  const ok = (x) => x && x.price !== null && x.price !== undefined && BigInt(x.price) > 0n && Number.isFinite(Number(x.ts));
+  const age = (x) => Math.max(0, now - Number(x.ts));
+  if (ok(e) && age(e) <= maxAgeSec) return { price: BigInt(e.price), src: "oracle", ageSec: Math.round(age(e)) };
+  if (oneUsd !== null && oneUsd !== undefined && BigInt(oneUsd) > 0n) return { price: BigInt(oneUsd), src: "stablecoin 1.0", ageSec: 0 };
+  const best = [e, last].filter(ok).sort((a, b) => Number(b.ts) - Number(a.ts))[0];
+  if (best && age(best) <= fallbackSec) return { price: BigInt(best.price), src: `oracle price ${Math.round(age(best) / 60)} min old`, ageSec: Math.round(age(best)) };
+  return {};
+}
+
+/**
+ * TTL upkeep of a chained factory bucket: where each page of `page` entries starts (null = the head), without a read
+ * when it can be known: a bucket of at most one page starts at its head; a longer one reuses the last round's list
+ * (`cached`: { last, len, froms }) while its newest entry and its length are unchanged. null: the bucket must be read.
+ */
+export function ttlPageStarts(cached, last, len, page = 40) {
+  if (Number(len) <= page) return [null];
+  if (cached && cached.last === String(last) && cached.len === Number(len) && Array.isArray(cached.froms)) return cached.froms;
+  return null;
 }

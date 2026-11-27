@@ -6,7 +6,10 @@
 #   keeper/monitor/check-heartbeat.sh [path/to/status.json]
 #
 # Settings (environment; with systemd put them in the EnvironmentFile named in the .service file):
-#   MAX_AGE_SEC        heartbeat older than this = alarm (default 120; the keeper writes it every ~5 s)
+#   MAX_AGE_SEC        heartbeat older than this = alarm (default 120; the keeper writes it every ~5 s, and every
+#                      10 s while its main loop is in a long stage)
+#   MAX_STALL_SEC      the main loop has not moved for this long (loop_progress_age_sec) = alarm, even while the
+#                      heartbeat is fresh (default 180; stage and stage_sec in status.json say where it is)
 #   SERVICE            systemd unit to check (default iora-keeper.service; empty = skip the check)
 #   MAX_RPC_ERRORS     rpc_consecutive_errors at or above this = alarm (default 20)
 #   MAX_FAILED_SCANS   failed_scans_in_row at or above this = alarm (default 10)
@@ -19,6 +22,7 @@
 set -u
 STATUS="${1:-$(dirname "$0")/../status.json}"
 MAX_AGE_SEC="${MAX_AGE_SEC:-120}"
+MAX_STALL_SEC="${MAX_STALL_SEC:-180}"
 SERVICE="${SERVICE-iora-keeper.service}"
 MAX_RPC_ERRORS="${MAX_RPC_ERRORS:-20}"
 MAX_FAILED_SCANS="${MAX_FAILED_SCANS:-10}"
@@ -36,20 +40,23 @@ if [ ! -f "$STATUS" ]; then
   problems+=("status file missing: $STATUS")
 else
   # node is on the keeper machine anyway; it reads the JSON safely (no jq needed).
-  read -r AGE RPC_ERR FAILED RPC_CUR TTL_ON TTL_AGE_H TTL_FAILED < <(node -e '
+  read -r AGE RPC_ERR FAILED RPC_CUR TTL_ON TTL_AGE_H TTL_FAILED STALL STAGE < <(node -e '
     const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const hb = Date.parse(s.heartbeat || s.last_scan || "");
     const age = Number.isFinite(hb) ? Math.round((Date.now() - hb) / 1000) : -1;
     const t = Date.parse(s.last_ttl || "");
     const ttlAge = Number.isFinite(t) ? Math.floor((Date.now() - t) / 3600000) : -1;
     console.log(age, s.rpc_consecutive_errors ?? 0, s.failed_scans_in_row ?? 0, s.rpc_current || "-",
-      s.ttl_enabled === false ? 0 : s.ttl_enabled === true ? 1 : -1, ttlAge, s.ttl_failed_this_round ?? 0);
-  ' "$STATUS" 2> /dev/null || echo "-1 0 0 - -1 -1 0")
+      s.ttl_enabled === false ? 0 : s.ttl_enabled === true ? 1 : -1, ttlAge, s.ttl_failed_this_round ?? 0,
+      Number.isFinite(s.loop_progress_age_sec) ? s.loop_progress_age_sec : -1, String(s.stage || "-").replace(/\s+/g, "_"));
+  ' "$STATUS" 2> /dev/null || echo "-1 0 0 - -1 -1 0 -1 -")
   if [ "$AGE" -lt 0 ]; then
     problems+=("status.json has no readable heartbeat")
   elif [ "$AGE" -gt "$MAX_AGE_SEC" ]; then
     problems+=("heartbeat is ${AGE}s old (limit ${MAX_AGE_SEC}s)")
   fi
+  # the heartbeat also moves while the loop is in a long stage: a loop that does not move at all is an alarm too
+  if [ "$STALL" -gt "$MAX_STALL_SEC" ]; then problems+=("main loop has not moved for ${STALL}s at stage ${STAGE} (limit ${MAX_STALL_SEC}s)"); fi
   [ "$RPC_ERR" -ge "$MAX_RPC_ERRORS" ] && problems+=("${RPC_ERR} RPC errors in a row (now on ${RPC_CUR})")
   [ "$FAILED" -ge "$MAX_FAILED_SCANS" ] && problems+=("${FAILED} scans failed in a row")
   # TTL upkeep (IORA-04): off, never done, too old, or failing

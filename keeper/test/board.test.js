@@ -162,6 +162,7 @@ function sandbox({ sources, quick = true, allowed = {}, symbols = {} }) {
     proximity: { checked: new Set(), far: new Set() },
     sourcesFor: async (tin, tout) => (sources[`${tin}|${tout}`] || []).map(([l, r]) => mkSource(l, r)),
     low: (fn) => fn(),
+    background: (fn) => fn(),
     xdr: { ScVal: { scvVec: (steps) => ({ steps }) } },
     Date,
   });

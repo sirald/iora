@@ -94,18 +94,23 @@ const E14 = 100_000_000_000_000;
  * pools: { soroswap: price of XLM in USDC | null, aquarius: [[id, address, price], ...] }; oracle: { token: $ price
  * | null }; the rates are applied both ways with no fee, so a quote's implied price is exactly the pool's price.
  */
-function sandbox({ soroswap = 0.6, aquarius = [["ab12", cid(), 0.37]], oracle = { [USDC]: 1, [XLM]: 0.127 }, oracleAgeSec = 30, ref = null, require = false, maxBps = 500 } = {}) {
+function sandbox({ soroswap = 0.6, aquarius = [["ab12", cid(), 0.37]], oracle = { [USDC]: 1, [XLM]: 0.127 }, oracleAgeSec = 30, ref = null, require = true, maxBps = 500, oracleDown = false } = {}) {
   const logs = [];
   const writes = [];
   const reads = [];
+  // changed by a test while it runs: the oracle's prices, per-token ages, and whether it answers at all
+  const net = { oracleDown, ages: {} };
   const xlmIn = (price, tin, a) => (tin === USDC ? (BigInt(a) * 10_000n) / BigInt(Math.round(price * 10_000)) : (BigInt(a) * BigInt(Math.round(price * 10_000))) / 10_000n);
   const read = async (contract, method, args = []) => {
     reads.push(`${method}`);
+    if (contract === ORACLE && method === "decimals") return { ok: true, value: 14 };
     if (contract === ORACLE && method === "lastprice") {
+      if (net.oracleDown) return { ok: false, error: "HostError: oracle down" };
       const [, token] = scValToNative(args[0]);
+      const ageSec = net.ages[token] ?? oracleAgeSec;
       const p = oracle[token];
       if (p === null || p === undefined) return { ok: true, value: undefined };
-      return { ok: true, value: { price: BigInt(Math.round(p * E14)), timestamp: BigInt(Math.floor(Date.now() / 1000) - oracleAgeSec) } };
+      return { ok: true, value: { price: BigInt(Math.round(p * E14)), timestamp: BigInt(Math.floor(Date.now() / 1000) - ageSec) } };
     }
     if (method === "decimals") return { ok: true, value: 7 };
     if (contract === ROUTER && method === "router_get_amounts_out") {
@@ -141,6 +146,9 @@ function sandbox({ soroswap = 0.6, aquarius = [["ab12", cid(), 0.37]], oracle = 
     VENUE_MAX_DEVIATION_BPS: maxBps,
     VENUE_REQUIRE_ORACLE: require,
     ORACLE_MAX_AGE_SEC: 600,
+    ORACLE_FALLBACK_SEC: 1800,
+    STABLE_TOKENS: new Set(),
+    REF_RATE_MAX_SEC: 300,
     REF_POOL: ref || "",
     REF_VENUE: ref ? "aquarius" : "",
     REF_PREFER_BPS: 25,
@@ -157,6 +165,7 @@ function sandbox({ soroswap = 0.6, aquarius = [["ab12", cid(), 0.37]], oracle = 
     addrVec: (list) => xdr.ScVal.scvVec(list.map((a) => new Address(a).toScVal())),
     rpcLabelCtx: { run: (l, f) => f() },
     low: (f) => f(),
+    background: (f) => f(),
     pathOf: (tin, tout, via) => (via ? [tin, via, tout] : [tin, tout]),
     poolOf: async () => (soroswap === null ? null : { pair: cid() }),
     soroStep: async (tin, tout, pair, a, min) => ({ label: "Soroswap", a, min }),
@@ -205,7 +214,7 @@ function sandbox({ soroswap = 0.6, aquarius = [["ab12", cid(), 0.37]], oracle = 
     crossKey: (a, b) => `${a.key}|${b.key}`,
   });
   vm.runInContext(code, ctx);
-  return { ctx, logs, writes, reads };
+  return { ctx, logs, writes, reads, net, oracle };
 }
 
 describe("price band in keeper.js (sandbox)", () => {
@@ -252,19 +261,57 @@ describe("price band in keeper.js (sandbox)", () => {
     assert.equal(ctx.board.get(`${XLM}|${USDC}`).best.label, "Aquarius ef56 ref"); // 0.1270 vs Soroswap 0.1272: 16 bps less
   });
 
-  test("no oracle price: the band is off for that pair by default; with VENUE_REQUIRE_ORACLE no fill", async () => {
-    const off = sandbox({ oracle: { [USDC]: 1, [XLM]: null } });
-    assert.equal(await off.ctx.quotePath(100_000_000n, [XLM, USDC]), 60_000_000n); // 10 XLM at 0.60
-    assert.ok(off.logs.some((l) => /oracle price band off for XLM->USDC: XLM: the oracle has no price/.test(l)));
-    const req = sandbox({ oracle: { [USDC]: 1, [XLM]: null }, require: true });
-    assert.equal(await req.ctx.quotePath(100_000_000n, [XLM, USDC]), null);
-    assert.match(req.ctx.priceNoteFor(XLM, USDC, 1n, null, 1n), /no fill without an oracle price \(VENUE_REQUIRE_ORACLE\)/);
+  test("no reference price at all: the pair is closed (no fill), logged and in status; VENUE_REQUIRE_ORACLE=0: the old behaviour", async () => {
+    const closed = sandbox({ oracle: { [USDC]: 1, [XLM]: null } });
+    assert.equal(await closed.ctx.quotePath(100_000_000n, [XLM, USDC]), null);
+    assert.match(closed.ctx.priceNoteFor(XLM, USDC, 1n, null, 1n), /no fill: no reference price for the oracle band \(XLM: the oracle has no price for it/);
+    assert.ok(closed.logs.some((l) => /price band: XLM->USDC closed: no fill: no reference price/.test(l)), closed.logs.join("\n"));
+    assert.deepEqual(Object.keys(closed.ctx.bandSummary().closed_pairs), ["XLM->USDC"]);
+    const old = sandbox({ oracle: { [USDC]: 1, [XLM]: null }, require: false });
+    assert.equal(await old.ctx.quotePath(100_000_000n, [XLM, USDC]), 60_000_000n); // 10 XLM at 0.60
+    assert.ok(old.logs.some((l) => /oracle price band off for XLM->USDC: XLM: the oracle has no price/.test(l)));
   });
 
-  test("a stale oracle price (older than ORACLE_MAX_AGE_SEC) counts as none", async () => {
-    const { ctx, logs } = sandbox({ oracleAgeSec: 3600 });
-    assert.equal(await ctx.quotePath(100_000_000n, [XLM, USDC]), 60_000_000n); // 10 XLM at 0.60
-    assert.ok(logs.some((l) => /the oracle price is 60 min old/.test(l)), logs.join("\n"));
+  test("the oracle has no USDC price (2026-11-27 21:49): USDC counts as 1.0 and the band stays on", async () => {
+    const { ctx, logs } = sandbox({ oracle: { [USDC]: null, [XLM]: 0.127 } });
+    assert.equal(await ctx.quotePath(100_000_000n, [USDC, XLM]), null); // Soroswap 0.60 is still kept out
+    assert.equal(await ctx.quotePath(100_000_000n, [XLM, USDC]), null);
+    assert.ok(logs.some((l) => /venue Soroswap skipped: price 0\.600 is 372% off the oracle 0\.127/.test(l)), logs.join("\n"));
+    assert.ok(!logs.some((l) => /band off/.test(l)), logs.join("\n"));
+    assert.equal(ctx.bandSummary().reference.USDC, "stablecoin 1.0");
+    // a pool at the real price is still used
+    const ok = sandbox({ soroswap: 0.128, aquarius: [], oracle: { [USDC]: null, [XLM]: 0.127 } });
+    assert.equal(await ok.ctx.quotePath(100_000_000n, [XLM, USDC]), 1_280_000n * 10n);
+  });
+
+  test("the oracle stops answering: the last price it gave (up to 30 min) keeps the band on", async () => {
+    const { ctx, logs, net } = sandbox();
+    assert.equal(await ctx.quotePath(100_000_000n, [XLM, USDC]), null); // fresh oracle: Soroswap is out
+    net.oracleDown = true;
+    ctx.oracleCache.clear(); // a minute later: the cache is stale, the oracle does not answer
+    assert.equal(await ctx.quotePath(100_000_000n, [XLM, USDC]), null);
+    assert.equal(ctx.bandSummary().reference.XLM, "oracle price 1 min old");
+    assert.ok(logs.some((l) => /no fresh oracle price for both coins; the band uses XLM: oracle price 1 min old, USDC: stablecoin 1\.0/.test(l)), logs.join("\n"));
+  });
+
+  test("an oracle price 20 min old is still a reference; 60 min old is none (closed)", async () => {
+    const recent = sandbox({ oracleAgeSec: 1200 });
+    assert.equal(await recent.ctx.quotePath(100_000_000n, [XLM, USDC]), null); // Soroswap 0.60 out, against 0.127
+    assert.ok(recent.logs.some((l) => /Soroswap skipped: price 0\.600 is 372% off the oracle 0\.127 .*reference: XLM: oracle price 20 min old/.test(l)), recent.logs.join("\n"));
+    const old = sandbox({ oracleAgeSec: 3600 });
+    assert.equal(await old.ctx.quotePath(100_000_000n, [XLM, USDC]), null);
+    assert.match(old.ctx.priceNoteFor(XLM, USDC, 1n, null, 1n), /no reference price .*XLM: the oracle price is 60 min old/);
+  });
+
+  test("no oracle price for the coin: the reference pool's own price is the reference", async () => {
+    const { ctx, logs } = sandbox({ soroswap: 0.6, aquarius: [["ef56", REF_ADDR, 0.127]], ref: REF_ADDR, oracle: { [USDC]: 1, [XLM]: null } });
+    const sources = await ctx.sourcesFor(XLM, USDC);
+    assert.equal(sources[0].label, "Aquarius ref");
+    const ref = await sources[0].quote(100_000_000n);
+    const soro = await sources[1].quote(100_000_000n);
+    assert.equal(ref, 1_270_000n * 10n); // the reference pool itself
+    assert.equal(soro, null); // Soroswap 0.60 against the reference pool's 0.127
+    assert.ok(logs.some((l) => /the band uses the reference pool's price/.test(l)), logs.join("\n"));
   });
 
   test("oracle prices are read once a minute, not on every quote", async () => {
@@ -289,13 +336,14 @@ describe("price band in keeper.js (sandbox)", () => {
     assert.equal(writes.length, 1);
   });
 
-  test("a cross without an oracle price: the middle of the limits as before; with VENUE_REQUIRE_ORACLE none", async () => {
+  test("a cross without any reference price: none (fail-closed); VENUE_REQUIRE_ORACLE=0: the middle of the limits as before", async () => {
     const order = (vault, id, tin, tout, remaining, limit) => ({ vault, o: { id }, key: `${vault}:${id}`, tin, tout, remaining, limit, minFill: 1n, fees: {} });
     const a = order(cid(), 1, XLM, USDC, 1_000_000_000n, 60_000_000n);
     const b = order(cid(), 2, USDC, XLM, 200_000_000n, 2_000_000n);
-    const off = sandbox({ oracle: { [USDC]: 1, [XLM]: null } });
+    const off = sandbox({ oracle: { [USDC]: 1, [XLM]: null }, require: false });
     assert.equal(await off.ctx.tryCross(a, b), "crossed");
-    const req = sandbox({ oracle: { [USDC]: 1, [XLM]: null }, require: true });
+    const req = sandbox({ oracle: { [USDC]: 1, [XLM]: null } });
     assert.equal(await req.ctx.tryCross(a, b), "no");
+    assert.deepEqual(Object.keys(req.ctx.bandSummary().closed_pairs), ["XLM->USDC"]);
   });
 });

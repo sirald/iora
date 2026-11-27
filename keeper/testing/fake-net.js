@@ -3,7 +3,7 @@
 // 127.0.0.1 only. Ledgers advance on a timer. Nothing leaves the machine.
 import http from "node:http";
 import crypto from "node:crypto";
-import { Address, SorobanDataBuilder, StrKey, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
+import { Address, SorobanDataBuilder, StrKey, TransactionBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
 
 export const FAKE_PASSPHRASE = "Iora fake network for tests ; 2026";
 
@@ -15,10 +15,16 @@ export const FAKE_PASSPHRASE = "Iora fake network for tests ; 2026";
 // takes requests and never answers (a stuck fallback such as a slow public RPC).
 // latencyMs: how long the main RPC takes to answer. streamDelayMs: Horizon announces each ledger this long after the
 // RPC has it (the RPC can then be first).
-export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDropAfter = 0, stream = true, vaults = 0, secondRpc = null, latencyMs = 0, streamDelayMs = 0 } = {}) {
+// chained: a version 9 factory (buckets as chains) instead: { buckets (non-empty ones, of 256), len (each bucket's
+// length in `heads`), slowAfter (bucket reads after this many answer only after slowMs) }. Its `bucket` pages are empty,
+// so it lists no vaults; it is there for the TTL job list (the 2026-11-27 stall: 228 bucket reads in a row).
+export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDropAfter = 0, stream = true, vaults = 0, secondRpc = null, latencyMs = 0, streamDelayMs = 0, chained = null } = {}) {
   const vaultIds = Array.from({ length: vaults }, () => StrKey.encodeContract(crypto.randomBytes(32)));
   // hang: the RPC takes requests but never answers; tooMany: the RPC answers HTTP 429 (with Retry-After: 1)
-  const state = { ledger: 1000, calls: {}, streamConnections: 0, streamClients: new Set(), events: [], hang: false, tooMany: false };
+  const state = { ledger: 1000, calls: {}, streamConnections: 0, streamClients: new Set(), events: [], hang: false, tooMany: false, bucketReads: 0 };
+  const lastOwner = chained ? Array.from({ length: chained.buckets }, () => StrKey.encodeEd25519PublicKey(crypto.randomBytes(32))) : [];
+  const u32 = (n) => xdr.ScVal.scvU32(n);
+  const entry = (k, v) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(k), val: v });
   const count = (m) => (state.calls[m] = (state.calls[m] || 0) + 1);
   const rpcLedger = () => state.ledger - rpcLagLedgers;
 
@@ -46,14 +52,36 @@ export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDr
 
   function simulate(id, params) {
     let fn = "?";
+    let args = [];
     try {
       const tx = TransactionBuilder.fromXDR(params.transaction, FAKE_PASSPHRASE);
       // XDR fields are properties in SDK 17 and functions in older versions
       const get = (o, k) => (typeof o[k] === "function" ? o[k]() : o[k]);
-      fn = String(get(get(tx.operations[0].func, "invokeContract"), "functionName"));
+      const inv = get(tx.operations[0].func, "invokeContract");
+      fn = String(get(inv, "functionName"));
+      args = get(inv, "args") || [];
     } catch {}
     count(`simulate:${fn}`);
     const base = { latestLedger: rpcLedger(), minResourceFee: "100", transactionData: emptyData };
+    const answer = (v) => ok(id, { ...base, results: [{ auth: [], xdr: v.toXDR("base64") }] });
+    if (chained) {
+      if (fn === "bucket_count") return answer(u32(256));
+      if (fn === "vault_count") return answer(u32(0));
+      if (fn === "heads") {
+        const start = Number(scValToNative(args[0]));
+        const limit = Number(scValToNative(args[1]));
+        const list = [];
+        for (let i = start; i < Math.min(start + limit, chained.buckets); i++) {
+          list.push(xdr.ScVal.scvMap([entry("index", u32(i)), entry("last", new Address(lastOwner[i]).toScVal()), entry("len", u32(chained.len))]));
+        }
+        return answer(xdr.ScVal.scvVec(list));
+      }
+      if (fn === "bucket") {
+        state.bucketReads++;
+        const out = answer(xdr.ScVal.scvVec([]));
+        return state.bucketReads > (chained.slowAfter ?? Infinity) ? { slowMs: chained.slowMs || 0, out } : out;
+      }
+    }
     // the factory lists no vaults; every other read is a contract error (a simulation error, not an RPC error)
     if (fn === "vaults") {
       const list = xdr.ScVal.scvVec(vaultIds.map((v) => new Address(v).toScVal()));
@@ -89,7 +117,14 @@ export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDr
         const start = params && params.startLedger;
         if (start && start > rpcLedger()) out = fail(id, `startLedger must be between the oldest ledger: 1 and the latest ledger: ${rpcLedger()}`);
         else out = ok(id, { events: state.events.splice(0), latestLedger: rpcLedger(), cursor: "" });
-      } else if (method === "simulateTransaction") out = simulate(id, params);
+      } else if (method === "simulateTransaction") {
+        out = simulate(id, params);
+        if (out && out.slowMs) {
+          const { slowMs, out: later } = out;
+          setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end(later), slowMs);
+          return;
+        }
+      }
       else if (method === "getLedgerEntries") out = ok(id, { entries: [], latestLedger: rpcLedger() });
       else if (method === "getFeeStats") out = ok(id, { sorobanInclusionFee: { p70: "100" }, inclusionFee: { p70: "100" }, latestLedger: rpcLedger() });
       else out = fail(id, `fake RPC: ${method} is not served`);
