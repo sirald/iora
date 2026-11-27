@@ -903,6 +903,7 @@ html:not([data-tone="dark"]) :is(.frame--cta, .frame--lit, .footer--statement) {
 
 /* the company block's one line, set in the display face (footer-columns) */
 .footer__lede { font: var(--display-weight) var(--t-h3)/1.25 var(--font-display); letter-spacing: var(--display-tracking); max-width: 22ch; }
+.footer__copy { margin: 0; font-size: var(--t-label); color: var(--muted); letter-spacing: 0.01em; }
 /* the legal row's end: the socials sit right of the copyright line */
 .footer__legal .socials a { width: 32px; height: 32px; }
 
