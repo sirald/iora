@@ -24,7 +24,7 @@ import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
 import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
 import { PART, planMove as planMoverCall, sortCoins, splitPlan } from "./mover.js";
-import { bestVenue, coinStyle, markFar, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "./prices.js";
+import { bestVenue, coinBlurb, coinStyle, interestTag, markFar, refKind, reflectorPrice, reservesFromEvent, testnetNote, venueLine } from "./prices.js";
 import { SUGGESTED, capabilityOf, createNetWait, mustCheck, networkName, networkState, noSwitchIds } from "./network.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
@@ -240,6 +240,16 @@ function paintCoin(el, sym) {
     delete el.dataset.mark;
     el.style.removeProperty("--coin");
   }
+}
+
+/** Is the token a reserve of the Blend pool? (iBTC & co. start earning once the pool lists them; read, not assumed.) */
+let blendList = null;
+async function inBlend(token) {
+  if (!blendList) {
+    const r = await read(C.pool, "get_reserve_list").catch(() => ({ ok: false }));
+    if (r.ok && Array.isArray(r.value)) blendList = new Set(r.value.map(String));
+  }
+  return !!blendList && blendList.has(String(token));
 }
 
 // ---- Testnet prices and where they come from: each pool has its own price, so every price says its source ----
@@ -1909,8 +1919,20 @@ if (XB) {
     if (el.querySelector("#sv-util, #sv-apr")) el.hidden = true;
   }
   const warn = $("sv-warn");
+  // Iora's own test tokens (iBTC…) say what they are; "earns no interest yet" until the Blend pool lists them.
+  const xbNote = (listed) => {
+    const blurb = coinBlurb(BS);
+    if (blurb)
+      return `<b>${esc(blurb)}.</b> ${
+        listed
+          ? `${esc(BS)} earns interest on Blend while your orders wait, and so does your USDC.`
+          : `${esc(BS)} earns no interest yet: it is not in the Blend pool yet, so it waits in your vault as it is; your USDC still earns while buy orders wait.`
+      } Test tokens have no real value.`;
+    return `<b>${esc(BS)} earns no interest.</b> It is not in the Blend pool, so ${esc(BS)} waits in your vault as it is; your USDC still earns while buy orders wait. This test pool is small and its price is not a real market price, so keep orders to a few USDC.`;
+  };
   if (warn) {
-    warn.innerHTML = `<b>${esc(BS)} earns no interest.</b> It is not in the Blend pool, so ${esc(BS)} waits in your vault as it is; your USDC still earns while buy orders wait. This test pool is small and its price is not a real market price, so keep orders to a few USDC.`;
+    warn.innerHTML = xbNote(false);
+    warn.classList.add("xb-note");
     warn.hidden = false;
     const bar = document.querySelector('[data-view-pane="vault"] .pairsel');
     const sec = bar && bar.closest("section");
@@ -1919,6 +1941,9 @@ if (XB) {
       c.removeAttribute("id");
       sec.after(c);
     }
+    inBlend(BASE.addr).then((listed) => {
+      if (listed) for (const el of document.querySelectorAll(".xb-note")) el.innerHTML = xbNote(true);
+    }, () => {});
   }
 }
 
@@ -3955,11 +3980,14 @@ async function loadPool() {
         // Single vault: each row is a "<coin> / USDC" pair. Waiting USDC earns on Blend in every pair; the coin side only for XLM.
         rowsMk.length = 0;
         const u = mkStat.USDC, x = mkStat.XLM;
+        const listed = await Promise.all(PAIRS.map((p) => inBlend(p.token)));
         for (const p of [{ sym: "XLM", token: C.xlm }, ...PAIRS]) {
           const main = p.sym === "XLM";
+          const tag = main ? null : interestTag(p.sym, listed[PAIRS.indexOf(p)]);
+          const blurb = main ? null : coinBlurb(p.sym);
           rowsMk.push(`<tr data-base="${esc(p.sym)}">
             <td><div class="mk-pair">${coinI(p.sym)}<b>${esc(p.sym)}</b><span aria-hidden="true">/</span><i class="coin usdc" aria-hidden="true"></i><b>USDC</b></div>
-              <div class="mk-tags"><span>Limit buy and sell</span>${main ? `<span>USDC and XLM earn on Blend</span>${(u && u.busy) || ""}` : `<span>USDC earns on Blend</span><span class="warn">${esc(p.sym)} earns no interest</span><span class="warn">Thin test pool</span>`}</div></td>
+              <div class="mk-tags"><span>Limit buy and sell</span>${main ? `<span>USDC and XLM earn on Blend</span>${(u && u.busy) || ""}` : `<span>USDC earns on Blend</span><span${tag.warn ? ' class="warn"' : ""}>${esc(tag.text)}</span>${blurb ? `<span>${esc(blurb)}</span>` : `<span class="warn">Thin test pool</span>`}`}</div></td>
             <td><span class="mk-bprice" data-tok="${p.token}">—</span><small>USDC per ${esc(p.sym)}</small></td>
             <td class="pos">${u ? u.rate : "—"}<small>a year on waiting USDC${main && x ? `, ${x.rate} on XLM` : ""}</small></td>
             <td>${u ? u.avail : "—"}<small>${u ? u.of : ""}</small></td>

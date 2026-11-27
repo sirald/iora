@@ -75,3 +75,19 @@ test("the testnet note with the reference pool", () => {
   assert.match(n, /come from Iora reference pool \(Aquarius\), which is kept at the real price/);
   assert.match(n, /more than 5% away from it are ignored/);
 });
+
+test("Iora test tokens: icon of the coin they follow, the symbol stays", async () => {
+  const { ioraUnderlying, coinBlurb, interestTag } = await import("../src/prices.js");
+  for (const [s, u] of [["iBTC", "BTC"], ["iETH", "ETH"], ["iSOL", "SOL"], ["iAVAX", "AVAX"], ["iXRP", "XRP"]]) {
+    assert.equal(ioraUnderlying(s), u);
+    assert.deepEqual(coinStyle(s), coinStyle(u), s);
+  }
+  assert.equal(coinStyle("iAVAX").cls, "gen avax");
+  assert.equal(coinStyle("iAVAX").color, "#e84142");
+  for (const s of ["IOTA", "BTC", "i", "ibtc", "XLM", "iUSDC2"]) assert.equal(ioraUnderlying(s) === null, s !== "iUSDC2", s);
+  assert.equal(coinBlurb("iBTC"), "Iora test token, priced at the real BTC price (Reflector)");
+  assert.equal(coinBlurb("AQUA"), null);
+  assert.deepEqual(interestTag("iBTC", false), { text: "iBTC earns no interest yet", warn: true });
+  assert.deepEqual(interestTag("iBTC", true), { text: "iBTC earns on Blend", warn: false });
+  assert.deepEqual(interestTag("AQUA", false), { text: "AQUA earns no interest", warn: true });
+});

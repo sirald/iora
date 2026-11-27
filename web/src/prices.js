@@ -75,10 +75,33 @@ const KNOWN = {
   SOL: { color: "#7a4fe0", mark: "S" },
   EURC: { color: "#0b5bd3", mark: "€" },
   XRP: { color: "#23292f", mark: "X" },
+  AVAX: { color: "#e84142", mark: "A" },
   AQUA: { color: "#1fb5d8", mark: "A" },
 };
-/** For an <i class="coin"> icon: { cls, mark, color }. XLM and USDC keep their drawn icons (cls only). */
+/**
+ * Iora's own test tokens are named "i" + the coin they follow (iBTC, iETH, iSOL, iAVAX, iXRP): the coin they
+ * follow, or null for any other symbol. Only a lowercase "i" before an uppercase name counts (not "IOTA").
+ */
+export function ioraUnderlying(sym) {
+  const m = /^i([A-Z][A-Z0-9]{1,11})$/.exec(String(sym || ""));
+  return m ? m[1] : null;
+}
+/** The one-line description of an Iora test token (null for other coins). */
+export function coinBlurb(sym) {
+  const u = ioraUnderlying(sym);
+  return u ? `Iora test token, priced at the real ${u} price (Reflector)` : null;
+}
+/** Interest tag for a coin: { text, warn }. `inBlend`: the coin is a reserve of the Blend pool. */
+export function interestTag(sym, inBlend) {
+  if (inBlend) return { text: `${sym} earns on Blend`, warn: false };
+  return { text: ioraUnderlying(sym) ? `${sym} earns no interest yet` : `${sym} earns no interest`, warn: true };
+}
+
+/** For an <i class="coin"> icon: { cls, mark, color }. XLM and USDC keep their drawn icons (cls only). An Iora test
+ * token (iBTC) gets the icon of the coin it follows (BTC). */
 export function coinStyle(sym) {
+  const under = ioraUnderlying(sym);
+  if (under) sym = under;
   const s = String(sym || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (s === "XLM" || s === "USDC") return { cls: s.toLowerCase(), mark: "", color: "" };
   const k = KNOWN[s];
