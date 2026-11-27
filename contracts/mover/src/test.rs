@@ -114,6 +114,15 @@ fn dca(s: &S, sell: &Address, buy: &Address, part: i128) -> PlaceCall {
     }
 }
 
+/// `coins` argument: token -> amount to move.
+fn amounts(s: &S, list: &[(&Address, i128)]) -> Map<Address, i128> {
+    let mut m = Map::new(&s.env);
+    for (t, n) in list {
+        m.set((*t).clone(), *n);
+    }
+    m
+}
+
 fn wallet(s: &S) -> [i128; 4] {
     [s.mock.balance(&s.owner), s.usdc.balance(&s.owner), s.xlm.balance(&s.owner), s.btc.balance(&s.owner)]
 }
@@ -155,7 +164,7 @@ fn moves_balances_and_orders_into_a_new_vault_in_one_call() {
         order(&s, &s.xlm.address, &s.usdc.address, 100 * U, 5 * U),
         dca(&s, &s.usdc.address, &s.xlm.address, 100 * U),
     ];
-    let coins = vec![&s.env, s.mock.address.clone(), s.xlm.address.clone(), s.btc.address.clone()];
+    let coins = amounts(&s, &[(&s.mock.address, 1_000 * U), (&s.xlm.address, 500 * U), (&s.btc.address, 2 * U)]);
     let nv = s.m.move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &vec![&s.env, o1, o2], &place, &Some(s.ex.address.clone()));
     print_cost(&s, "3 coins + 2 cancels + 3 orders + new vault + exchange");
     check_limits(&s);
@@ -200,15 +209,21 @@ fn moves_into_an_existing_vault_without_orders() {
     let count = s.new_factory.vault_count();
     let before = wallet(&s);
 
-    // A token the old vault does not hold is skipped.
-    let coins = vec![&s.env, s.xlm.address.clone(), s.btc.address.clone()];
+    // Only the amount asked for moves: 600 of the 700 XLM.
+    let coins = amounts(&s, &[(&s.xlm.address, 600 * U)]);
     let got = s.m.move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &Vec::new(&s.env), &Vec::new(&s.env), &None);
     print_cost(&s, "1 coin, existing vault, no orders");
     assert_eq!(got, nv);
     assert_eq!(s.new_factory.vault_count(), count);
-    assert_eq!(v.balance(&s.xlm.address), 750 * U);
+    assert_eq!(v.balance(&s.xlm.address), 650 * U);
     assert_eq!(v.order_count(), 0);
-    assert_eq!(s.old.balance(&s.xlm.address), 0);
+    assert_eq!(s.old.balance(&s.xlm.address), 100 * U);
+    // A coin amount must be positive.
+    let zero = amounts(&s, &[(&s.xlm.address, 0)]);
+    assert_eq!(
+        s.m.try_move_vault(&s.owner, &s.old.address, &s.new_factory.address, &zero, &Vec::new(&s.env), &Vec::new(&s.env), &None),
+        Err(Ok(soroban_sdk::Error::from(Error::InvalidAmount)))
+    );
     assert_eq!(wallet(&s), before);
 }
 
@@ -216,7 +231,7 @@ fn moves_into_an_existing_vault_without_orders() {
 fn mock_usdc_moves_as_is_without_an_exchange() {
     let s = setup();
     s.old.deposit(&s.mock.address, &(100 * U));
-    let coins = vec![&s.env, s.mock.address.clone()];
+    let coins = amounts(&s, &[(&s.mock.address, 100 * U)]);
     let nv = s.m.move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &Vec::new(&s.env), &Vec::new(&s.env), &None);
     let v = vault::Client::new(&s.env, &nv);
     assert_eq!(v.balance(&s.mock.address), 100 * U);
@@ -230,7 +245,7 @@ fn conversion_stops_at_the_cap_and_the_rest_stays_in_the_wallet() {
     s.old.deposit(&s.mock.address, &(1_000 * U));
     s.ex.set_cap(&(400 * U));
     let before = wallet(&s);
-    let coins = vec![&s.env, s.mock.address.clone()];
+    let coins = amounts(&s, &[(&s.mock.address, 1_000 * U)]);
     let nv = s.m.move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &Vec::new(&s.env), &Vec::new(&s.env), &Some(s.ex.address.clone()));
     let v = vault::Client::new(&s.env, &nv);
     // 400 were exchanged and deposited; the other 600 mock USDC are in the owner's wallet, not in the new vault.
@@ -245,7 +260,7 @@ fn conversion_stops_at_the_cap_and_the_rest_stays_in_the_wallet() {
 fn only_the_four_order_functions_can_be_called() {
     let s = setup();
     s.old.deposit(&s.xlm.address, &(100 * U));
-    let coins = vec![&s.env, s.xlm.address.clone()];
+    let coins = amounts(&s, &[(&s.xlm.address, 100 * U)]);
     for f in ["withdraw", "deposit", "cancel_order", "forget", "claim_rewards"] {
         let bad = PlaceCall { func: Symbol::new(&s.env, f), args: (s.xlm.address.clone(), 1i128).into_val(&s.env) };
         let r = s.m.try_move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &Vec::new(&s.env), &vec![&s.env, bad], &None);
@@ -260,7 +275,7 @@ fn only_the_four_order_functions_can_be_called() {
 fn a_failing_order_undoes_the_whole_move() {
     let s = setup();
     s.old.deposit(&s.xlm.address, &(100 * U));
-    let coins = vec![&s.env, s.xlm.address.clone()];
+    let coins = amounts(&s, &[(&s.xlm.address, 100 * U)]);
     // More than was moved: the new vault refuses the order, and the whole move is undone.
     let place = vec![&s.env, order(&s, &s.xlm.address, &s.usdc.address, 200 * U, 5 * U)];
     assert!(s.m.try_move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &Vec::new(&s.env), &place, &None).is_err());
@@ -272,7 +287,7 @@ fn a_failing_order_undoes_the_whole_move() {
 fn the_owner_must_sign_and_old_and_new_must_differ() {
     let s = setup();
     s.old.deposit(&s.xlm.address, &(100 * U));
-    let coins = vec![&s.env, s.xlm.address.clone()];
+    let coins = amounts(&s, &[(&s.xlm.address, 100 * U)]);
     // The old factory as the "new" one: it returns the old vault.
     assert_eq!(
         s.m.try_move_vault(&s.owner, &s.old.address, &s.old_factory.address, &coins, &Vec::new(&s.env), &Vec::new(&s.env), &None),
@@ -289,7 +304,7 @@ fn one_authorization_covers_the_whole_move() {
     let s = setup();
     s.old.deposit(&s.mock.address, &(100 * U));
     let o = s.old.place_order(&s.mock.address, &s.xlm.address, &(50 * U), &2_000_000, &(50 * U), &300, &(NOW + DAY), &true);
-    let coins = vec![&s.env, s.mock.address.clone()];
+    let coins = amounts(&s, &[(&s.mock.address, 100 * U)]);
     let place = vec![&s.env, order(&s, &s.usdc.address, &s.xlm.address, 50 * U, 2_000_000)];
     s.m.move_vault(&s.owner, &s.old.address, &s.new_factory.address, &coins, &vec![&s.env, o], &place, &Some(s.ex.address.clone()));
     let auths = s.env.auths();
@@ -317,7 +332,7 @@ fn one_authorization_covers_the_whole_move() {
 fn resource_use_by_size() {
     for (coins_n, orders_n, convert) in [(1usize, 0usize, false), (1, 1, false), (1, 1, true), (2, 2, false), (3, 3, false), (3, 3, true), (6, 6, false)] {
         let s = setup();
-        let mut coins = Vec::new(&s.env);
+        let mut coins: Map<Address, i128> = Map::new(&s.env);
         let mut cancel = Vec::new(&s.env);
         let mut place = Vec::new(&s.env);
         // Mock USDC first, so that `convert` exchanges it.
@@ -331,7 +346,7 @@ fn resource_use_by_size() {
         }
         for t in toks.iter().take(coins_n) {
             s.old.deposit(t, &(1_000 * U));
-            coins.push_back(t.clone());
+            coins.set(t.clone(), 1_000 * U);
         }
         // Orders sell the moved coins and buy XLM (BTC when XLM is the coin sold).
         let in_new = |t: &Address| if convert && *t == s.mock.address { s.usdc.address.clone() } else { t.clone() };

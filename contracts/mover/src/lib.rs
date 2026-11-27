@@ -7,12 +7,18 @@
 //! signature covers them all.
 //!
 //! Supported old vaults: the single multi-asset vault (`iora-vault`, version 8 and later), which has
-//! `cancel_order(id)`, `free_balance(token)` and `withdraw(token, WITHDRAW_ALL)`. The earlier two-vault design
+//! `cancel_order(id)` and `withdraw(token, amount)`. The earlier two-vault design
 //! (`order-vault`) is not supported.
 //!
+//! Amounts are fixed in the call (`coins`: token -> amount), not read at run time. The owner's signature covers
+//! the whole call tree including every argument (`deposit(token, amount)`, the token transfer under it, the
+//! exchange's burn), so an amount that changed between simulation and execution (Blend interest accrues every
+//! ledger) would make the signature invalid. The caller takes the amounts from the simulation; interest that
+//! accrues after it stays behind as dust.
+//!
 //! Only what the move itself brings into the owner's wallet is moved on: the mover measures the wallet balance
-//! before and after each withdrawal (and exchange) and deposits exactly the difference. Tokens the owner held
-//! in the wallet before stay where they are.
+//! before and after each withdrawal (and exchange) and deposits at most that difference. Tokens the owner held in
+//! the wallet before stay where they are.
 #![no_std]
 
 use soroban_sdk::{
@@ -20,14 +26,10 @@ use soroban_sdk::{
     token, Address, Env, Map, Symbol, Val, Vec,
 };
 
-/// `withdraw` amount meaning "the whole free balance" (iora-vault `WITHDRAW_ALL`).
-pub const WITHDRAW_ALL: i128 = i128::MAX;
-
 /// The old vault (iora-vault version 8 and later).
 #[contractclient(name = "OldVaultClient")]
 pub trait OldVault {
     fn cancel_order(env: Env, order_id: u32);
-    fn free_balance(env: Env, token: Address) -> i128;
     fn withdraw(env: Env, token: Address, amount: i128);
 }
 
@@ -70,6 +72,8 @@ pub enum Error {
     FuncNotAllowed = 1,
     /// The new vault is the old vault.
     SameVault = 2,
+    /// A coin amount is not positive.
+    InvalidAmount = 3,
 }
 
 /// The move finished. `moved`: token -> amount deposited into the new vault.
@@ -91,11 +95,11 @@ pub struct Mover;
 impl Mover {
     /// Moves `owner`'s vault in one transaction:
     /// 1. cancels the orders `cancel` in `old_vault` (their reserved amounts become free);
-    /// 2. withdraws the whole free balance of every token in `coins` to the owner's wallet;
+    /// 2. withdraws `amount` of every token in `coins` (token -> amount) to the owner's wallet;
     /// 3. if `convert` is an exchange and a token is its mock USDC, exchanges what came in 1:1 for Circle USDC
     ///    (up to the owner's remaining allowance there; any rest stays in the wallet and is not deposited);
     /// 4. uses the owner's vault of `factory`, or creates it;
-    /// 5. deposits exactly what the move brought into the wallet;
+    /// 5. deposits `amount` (or what actually arrived, if less) of every token into the new vault;
     /// 6. opens the orders `place` in the new vault.
     /// Returns the new vault. Any failure undoes the whole move.
     #[allow(clippy::too_many_arguments)]
@@ -104,7 +108,7 @@ impl Mover {
         owner: Address,
         old_vault: Address,
         factory: Address,
-        coins: Vec<Address>,
+        coins: Map<Address, i128>,
         cancel: Vec<u32>,
         place: Vec<PlaceCall>,
         convert: Option<Address>,
@@ -132,14 +136,17 @@ impl Mover {
         let mut moved: Map<Address, i128> = Map::new(&env);
         let ex = convert.map(|a| ExchangeClient::new(&env, &a));
         let mock = ex.as_ref().map(|x| x.mock());
-        for coin in coins.iter() {
-            if old.free_balance(&coin) <= 0 {
-                continue;
+        for (coin, amount) in coins.iter() {
+            if amount <= 0 {
+                panic_with_error!(&env, Error::InvalidAmount);
             }
             let t = token::Client::new(&env, &coin);
             let before = t.balance(&owner);
-            old.withdraw(&coin, &WITHDRAW_ALL);
+            old.withdraw(&coin, &amount);
+            // The vault may send more than asked (asking for its whole free balance withdraws all of it from
+            // Blend, interest included); only `amount` moves on, the rest stays in the wallet.
             let got = t.balance(&owner) - before;
+            let got = if got < amount { got } else { amount };
             if got <= 0 {
                 continue;
             }
