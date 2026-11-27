@@ -125,3 +125,83 @@ export function splitPlan(plan, max = PART, inNew = (t) => t) {
   }
   return parts.filter((p, i) => i === 0 || p.coins.length || p.place.length);
 }
+
+// ---- Old two-vault design (order-vault, any generation): iora-mover 2 `move_order_vault` ----
+export const BAND_DEFAULT = 200; // stop band for an old triggered order that had none (order-vault generation 2)
+
+/**
+ * The plan of one `move_order_vault` call, as scripts/move-vault.mjs builds it.
+ *   cfg       the old vault's get_config: { owner, usdc, xlm } (usdc = the coin it holds, xlm = the coin its orders buy)
+ *   amount    balance() now (fixed in the call: the signature covers every argument)
+ *   orders    [{ id, order, followUp }]  raw get_order / get_follow_up values (open ones count; followUp null in G1)
+ *   exchange  null | { mock, usdc, left }  the on-chain exchange; mock USDC becomes Circle USDC up to `left`
+ *   keep      true: the output of an order moved here stays in the new vault (the old vault sent it to the wallet)
+ * Prices need no change: an old order's limit is the most of its vault's coin paid for 1 of the other coin, the same
+ * unit as the new vault's (sell token paid per 1 buy token); a follow-up's limit likewise for the reverse order.
+ * Returns { amount, coin, other, sell, buy, convert, cancel, place: [{ id, func, args, sell, buy, amount, limit }],
+ *           skipped: [{ id, why }], mockLeftInWallet }.
+ */
+export function planOrderVaultMove({ cfg, amount, orders, exchange = null, now, withOrders = true, keep = true, band = BAND_DEFAULT }) {
+  const coin = String(cfg.usdc), other = String(cfg.xlm);
+  amount = big(amount);
+  const convert = !!exchange && (coin === exchange.mock || other === exchange.mock);
+  const inNew = (t) => (convert && t === exchange.mock ? exchange.usdc : t);
+  const sell = inNew(coin), buy = inNew(other);
+  let arrive = amount, mockLeftInWallet = 0n;
+  if (convert && coin === exchange.mock) {
+    const left = big(exchange.left) > 0n ? big(exchange.left) : 0n;
+    if (arrive > left) {
+      mockLeftInWallet = arrive - left;
+      arrive = left;
+    }
+  }
+  let room = arrive - ROUNDING_BUFFER - SAFETY;
+  const cancel = [], place = [], skipped = [];
+  for (const { id, order: o, followUp: fol } of orders) {
+    if (!isOpen(o)) continue;
+    cancel.push(id);
+    if (!withOrders) {
+      skipped.push({ id, why: "moved without orders" });
+      continue;
+    }
+    if (Number(o.expiry) <= now + EXPIRY_MARGIN) {
+      skipped.push({ id, why: "it expires within two minutes" });
+      continue;
+    }
+    let rem = big(o.amount_in) - big(o.filled_in);
+    if (rem > room) rem = room;
+    if (rem <= 0n) {
+      skipped.push({ id, why: "nothing left to sell for it in the new vault" });
+      continue;
+    }
+    room -= rem;
+    const mf = minFillFor(rem, o.min_fill);
+    let func, args;
+    if (fol) {
+      func = "place_order_then";
+      args = [["addr", sell], ["addr", buy], ["i128", rem], ["i128", big(o.limit_price)], ["i128", mf], ["u32", Number(o.max_impact_bps)], ["u64", big(o.expiry)], ["i128", big(fol.limit_price)], ["u32", Number(fol.max_impact_bps)], ["u64", big(fol.duration)]];
+    } else if (big(o.trigger_price) > 0n) {
+      func = "place_stop_order";
+      args = [["addr", sell], ["addr", buy], ["i128", rem], ["i128", big(o.trigger_price)], ["i128", big(o.limit_price)], ["i128", mf], ["u32", Number(o.max_impact_bps)], ["u64", big(o.expiry)], ["u32", Number(o.stop_band_bps || 0) || band], ["bool", !!keep]];
+    } else {
+      func = "place_order";
+      args = [["addr", sell], ["addr", buy], ["i128", rem], ["i128", big(o.limit_price)], ["i128", mf], ["u32", Number(o.max_impact_bps)], ["u64", big(o.expiry)], ["bool", !!keep]];
+    }
+    place.push({ id, func, args, sell, buy, amount: rem, limit: big(o.limit_price) });
+  }
+  return { amount, coin, other, sell, buy, convert, cancel, place, skipped, mockLeftInWallet };
+}
+
+/**
+ * Several old vaults of one wallet (an old buy vault and an old sell vault, maybe of several generations): one
+ * `move_order_vault` call each, one after the other (a Soroban transaction carries one call). The exchange's
+ * per-wallet allowance is shared, so each plan sees what the ones before it used. `vaults`: [{ id, cfg, amount, orders }].
+ */
+export function planOrderVaultMoves(vaults, { exchange = null, ...opts }) {
+  let left = exchange ? big(exchange.left) : 0n;
+  return vaults.map((v) => {
+    const plan = planOrderVaultMove({ ...opts, ...v, exchange: exchange ? { ...exchange, left } : null });
+    if (plan.convert && plan.coin === exchange.mock) left -= plan.amount - plan.mockLeftInWallet;
+    return { id: v.id, ...plan };
+  });
+}
