@@ -145,6 +145,7 @@ function sandbox({ sources, quick = true, allowed = {}, symbols = {} }) {
       return { ok: false };
     },
     BOARD_QUICK: quick,
+    REF_PREFER_BPS: 25,
     BOARD_ON: true,
     VENUES: true,
     BOARD_REF_USDC: 20,

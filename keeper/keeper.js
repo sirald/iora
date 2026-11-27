@@ -48,7 +48,12 @@ import {
   acquireLock,
   bestQuote,
   boardMode,
+  bandCheck,
   boardPlan,
+  crossBand,
+  oracleRate,
+  preferQuote,
+  shownPrice,
   cometMaxPrice,
   crossPairs,
   firstAccepted,
@@ -202,6 +207,27 @@ const LEDGER_RACE = String(cfg.LEDGER_RACE || "auto").toLowerCase();
 const LEDGER_POLL_MS = Math.max(100, Number(cfg.LEDGER_POLL_MS || 250));
 const LEDGER_POLL_EARLY_MS = Math.max(0, Number(cfg.LEDGER_POLL_EARLY_MS || 500));
 const LEDGER_POLL_MAX = Math.max(1, Number(cfg.LEDGER_POLL_MAX || 6));
+// ----- oracle price band -----
+// A pool whose price is more than VENUE_MAX_DEVIATION_BPS (500 = 5%) away from the oracle's rate
+// lastprice(tin) / lastprice(tout) is not used: not for fill_via routes, not for the vault's own route (execute),
+// not on the price board, and crosses stay inside the same band. 0 = off. Without a usable oracle price (none, or
+// older than ORACLE_MAX_AGE_SEC) the check is off for that pair, as before; VENUE_REQUIRE_ORACLE=1: no fill then.
+// The oracle: PRICE_ORACLE, else ORACLE of testnet/blend-pool.env (only that key is taken), else on testnet the
+// Reflector-backed adapter the site uses.
+const TESTNET_ORACLE = "CCSZNMAXTNMIZNGDBLIZYKLOZG3LYKSIXCYC7GKWLOBLSMUPX7MKPHDF";
+const PRICE_ORACLE = String(cfg.PRICE_ORACLE || readEnv(path.join(root, "testnet/blend-pool.env")).ORACLE || (PASSPHRASE === Networks.TESTNET ? TESTNET_ORACLE : "")).trim();
+const VENUE_MAX_DEVIATION_BPS = Math.max(0, Number(cfg.VENUE_MAX_DEVIATION_BPS ?? 500) || 0);
+const VENUE_REQUIRE_ORACLE = /^(1|on|true|yes)$/i.test(String(cfg.VENUE_REQUIRE_ORACLE || "").trim());
+const ORACLE_MAX_AGE_SEC = Math.max(60, Number(cfg.ORACLE_MAX_AGE_SEC || 600));
+const BAND_ON = !!PRICE_ORACLE && VENUE_MAX_DEVIATION_BPS > 0;
+// The reference pool (testnet/ref-pool.env POOL=<pool address or Aquarius pool index>, VENUE=aquarius|soroswap|...;
+// only those two keys are taken): a pool kept at the oracle price. It is marked "ref" in the logs and preferred on
+// the price board and in single-leg routes while it pays at most REF_PREFER_BPS less than the best pool.
+const refEnv = readEnv(path.join(root, "testnet/ref-pool.env"));
+const REF_POOL = String(cfg.REF_POOL || refEnv.POOL || "").trim();
+const REF_VENUE = String(cfg.REF_VENUE || refEnv.VENUE || "").trim().toLowerCase();
+const REF_PREFER_BPS = Math.max(0, Number(cfg.REF_PREFER_BPS ?? 25) || 0);
+let refSeen = false;
 const BOARD_MAX_QUOTES = Math.max(1, Number(cfg.BOARD_MAX_QUOTES || 10));
 // ----- adaptive scan interval (SCAN_MODE=ledger) -----
 // While no open order is within SCAN_NEAR_PCT percent of its limit (and none can cross, none is due), a full scan
@@ -1575,10 +1601,147 @@ async function localBest(amount, tin, tout, vias) {
   return best;
 }
 
-async function quotePath(amount, path) {
+// ----- oracle price band -----
+// Every venue quote (Soroswap through the router, Aquarius, Phoenix, Comet; for fill_via routes, the vault's own
+// `execute` route and the price board) is compared with the oracle's rate lastprice(tin) / lastprice(tout). A quote
+// whose price is more than VENUE_MAX_DEVIATION_BPS away is treated as no quote: that pool is not used, and when no
+// pool is left the order waits. Crosses are kept inside the same band around the oracle price.
+const oracleCache = new Map(); // token -> { at, price (bigint | null), ts (s), dec, why }
+const oracleInFlight = new Map();
+const bandNotes = new Map(); // "tin|tout" -> { text, at }: the last reason a quote of this pair was dropped
+const bandStats = { skipped: 0, noOracle: 0, crossesKept: 0 };
+const bandSaid = new Map();
+/** A price band log line, at most once per 10 minutes per key. */
+function bandSay(key, text) {
+  if (Date.now() - (bandSaid.get(key) || 0) < 10 * 60_000) return;
+  bandSaid.set(key, Date.now());
+  if (bandSaid.size > 2000) bandSaid.clear();
+  log(`price band: ${text}`);
+}
+
+/** The oracle's price of a token (cached 60 s) and the token's decimals: { price, ts, dec } or { why } if unusable. */
+async function oraclePrice(token) {
+  const c = oracleCache.get(token);
+  if (c && Date.now() - c.at < 60_000) return c;
+  if (oracleInFlight.has(token)) return oracleInFlight.get(token);
+  const p = (async () => {
+    const asset = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), new Address(token).toScVal()]);
+    const [r, d] = await Promise.all([
+      rpcLabelCtx.run("simulate:lastprice", () => read(PRICE_ORACLE, "lastprice", [asset])).catch((e) => ({ ok: false, error: e.message })),
+      c && c.dec !== undefined ? { ok: true, value: c.dec } : read(token, "decimals").catch(() => ({ ok: false })),
+    ]);
+    const dec = d.ok && Number.isInteger(Number(d.value)) ? Number(d.value) : 7;
+    let e;
+    if (!r.ok) e = { at: Date.now(), price: null, dec, why: `the oracle did not answer (${String(r.error || "").split("\n")[0].slice(0, 80)})` };
+    else if (!r.value || r.value.price === undefined) e = { at: Date.now(), price: null, dec, why: "the oracle has no price for it" };
+    else {
+      const price = BigInt(r.value.price);
+      const ts = Number(r.value.timestamp);
+      const age = Date.now() / 1000 - ts;
+      e = price > 0n && age <= ORACLE_MAX_AGE_SEC ? { at: Date.now(), price, ts, dec } : { at: Date.now(), price: null, ts, dec, why: price > 0n ? `the oracle price is ${Math.round(age / 60)} min old` : "the oracle price is not positive" };
+    }
+    oracleCache.set(token, e);
+    return e;
+  })().finally(() => oracleInFlight.delete(token));
+  oracleInFlight.set(token, p);
+  return p;
+}
+
+/** The oracle rate for tin -> tout (raw units of tout per raw unit of tin) with decimals, or { why } if none. */
+async function oracleRateFor(tin, tout) {
+  const [a, b] = await Promise.all([oraclePrice(tin), oraclePrice(tout)]);
+  if (a.price === null) return { why: `${sym(tin)}: ${a.why}` };
+  if (b.price === null) return { why: `${sym(tout)}: ${b.why}` };
+  return { rate: oracleRate(a.price, b.price, a.dec, b.dec), decIn: a.dec, decOut: b.dec };
+}
+
+const pct = (bps) => `${(bps / 100).toFixed(bps < 1000 ? 1 : 0)}%`;
+const shown = (v) => (v === null ? "?" : v >= 100 ? v.toFixed(2) : v >= 1 ? v.toFixed(4) : v.toPrecision(3));
+
+/**
+ * May a quote of `label` (amountIn tin -> amountOut tout) be used? False when its price is outside the oracle band,
+ * or when the oracle has no usable price and VENUE_REQUIRE_ORACLE is set. Without the band (VENUE_MAX_DEVIATION_BPS
+ * = 0) or without an oracle price (default): true, as before.
+ */
+async function inBand(label, tin, tout, amountIn, amountOut) {
+  if (!BAND_ON) return !VENUE_REQUIRE_ORACLE || !!PRICE_ORACLE;
+  const key = `${tin}|${tout}`;
+  const o = await oracleRateFor(tin, tout);
+  if (!o.rate) {
+    bandStats.noOracle++;
+    if (VENUE_REQUIRE_ORACLE) {
+      bandNotes.set(key, { at: Date.now(), text: `no fill without an oracle price (VENUE_REQUIRE_ORACLE): ${o.why}` });
+      bandSay(`oracle:req:${key}`, `no fills for ${sym(tin)}->${sym(tout)} without an oracle price (VENUE_REQUIRE_ORACLE): ${o.why}`);
+      return false;
+    }
+    bandSay(`oracle:off:${key}`, `oracle price band off for ${sym(tin)}->${sym(tout)}: ${o.why}; pools are used as before`);
+    return true;
+  }
+  const c = bandCheck(amountIn, amountOut, o.rate, VENUE_MAX_DEVIATION_BPS);
+  if (c.ok) return true;
+  bandStats.skipped++;
+  const usd = tin === USDC || tout === USDC;
+  const what = usd ? `${sym(tin === USDC ? tout : tin)} in USDC` : `${sym(tout)} per ${sym(tin)}`;
+  const text =
+    `venue ${label} skipped: price ${shown(shownPrice(c.implied, tin === USDC, o.decIn, o.decOut))} is ${pct(c.devBps)} off the oracle ` +
+    `${shown(shownPrice(o.rate, tin === USDC, o.decIn, o.decOut))} (${what}; band ${pct(VENUE_MAX_DEVIATION_BPS)})`;
+  bandNotes.set(key, { at: Date.now(), text });
+  bandSay(`band:${label}:${key}`, `${sym(tin)}->${sym(tout)}: ${text}`);
+  return false;
+}
+
+/** Why the last quote of this pair was dropped by the band, if that was within the last minute. */
+function bandNoteFor(tin, tout) {
+  const n = bandNotes.get(`${tin}|${tout}`);
+  return n && Date.now() - n.at < 60_000 ? n.text : null;
+}
+
+/** Keeps the oracle prices of the board's coins warm (background, every ~50 s), so a fill never waits for them. */
+let oracleBusy = false;
+function oracleTick() {
+  if (!BAND_ON || oracleBusy) return;
+  const tokens = [USDC, ...boardTokens()].filter((t) => !oracleCache.has(t) || Date.now() - oracleCache.get(t).at > 50_000);
+  if (!tokens.length) return;
+  oracleBusy = true;
+  low(async () => {
+    for (const t of tokens) {
+      oracleCache.delete(t);
+      await oraclePrice(t).catch(() => null);
+    }
+  })
+    .catch(() => {})
+    .finally(() => {
+      oracleBusy = false;
+    });
+}
+
+/** For status.json: the band, the oracle prices in USDC and how many quotes it dropped. */
+function bandSummary() {
+  if (!BAND_ON) return VENUE_REQUIRE_ORACLE && !PRICE_ORACLE ? "no oracle set: no fills (VENUE_REQUIRE_ORACLE)" : "off";
+  const u = oracleCache.get(USDC);
+  const prices = {};
+  for (const [t, e] of oracleCache) {
+    if (t === USDC) continue;
+    prices[sym(t)] = e.price !== null && u && u.price ? Number(shown(shownPrice(oracleRate(e.price, u.price, e.dec, u.dec), false, e.dec, u.dec))) : e.why || null;
+  }
+  return {
+    max_deviation_bps: VENUE_MAX_DEVIATION_BPS,
+    oracle: PRICE_ORACLE,
+    require_oracle: VENUE_REQUIRE_ORACLE,
+    prices_usdc: prices,
+    quotes_skipped: bandStats.skipped,
+    quotes_without_oracle: bandStats.noOracle,
+    ref_pool: REF_POOL ? `${REF_VENUE || "?"} ${REF_POOL}${refSeen ? "" : " (not found yet)"}` : "none",
+  };
+}
+
+async function quotePath(amount, path, label = "Soroswap") {
   const r = await read(ROUTER, "router_get_amounts_out", [i128(amount), addrVec(path)]);
   if (!r.ok) return null;
-  return BigInt(r.value[r.value.length - 1]);
+  const q = BigInt(r.value[r.value.length - 1]);
+  // a price far from the oracle's: no quote (the vault's own route and the Soroswap leg are not used)
+  if (q > 0n && !(await inBand(path.length > 2 ? `${label} via ${sym(path[1])}` : label, path[0], path[path.length - 1], amount, q))) return null;
+  return q;
 }
 const quote = (amount, tin, tout) => quotePath(amount, [tin, tout]);
 const pathOf = (tin, tout, via) => (via ? [tin, via, tout] : [tin, tout]);
@@ -1675,7 +1838,8 @@ const aquaVenue = {
   async options(a, b) {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     const c = aquaPoolCache.get(key);
-    if (c && Date.now() - c.at < 10 * 60_000) return c.list;
+    const refMissing = REF_POOL && (!REF_VENUE || REF_VENUE === "aquarius") && !refSeen;
+    if (c && Date.now() - c.at < (refMissing ? 60_000 : 10 * 60_000)) return c.list;
     const list = [];
     try {
       const sim = await server.simulateTransaction(readTx(AQUA_ROUTER, "get_pools", [aquaTokens(a, b)]));
@@ -1685,7 +1849,11 @@ const aquaVenue = {
         for (const e of entries) {
           const kn = scValToNative(xget(e, "key"));
           const hash = Buffer.from(kn instanceof Uint8Array ? kn : Object.values(kn));
-          if (hash.length === 32) list.push({ id: hash.toString("hex"), hash });
+          let address = null;
+          try {
+            address = String(scValToNative(xget(e, "val")));
+          } catch {}
+          if (hash.length === 32) list.push({ id: hash.toString("hex"), hash, address });
         }
       }
     } catch {}
@@ -1929,6 +2097,7 @@ async function venueEst(amount, tin, tout) {
       for (const venue of venueList()) {
         for (const opt of await venue.options(tin, tout)) {
           const q = await venue.quote(opt, tin, tout, VENUE_REF);
+          if (q !== null && q > 0n && !(await inBand(venue.name, tin, tout, VENUE_REF, q))) continue;
           if (q !== null && (best === null || q > best)) best = q;
         }
       }
@@ -1946,15 +2115,31 @@ async function venueEst(amount, tin, tout) {
 async function sourcesFor(tin, tout, only = null) {
   const list = [];
   const soro = await poolOf(tin, tout);
-  if (soro) list.push({ label: "Soroswap", soroswap: true, quote: (a) => quotePath(a, [tin, tout]), step: async (a, min = 0n) => soroStep(tin, tout, soro.pair, a, min) });
+  const isRef = (venueName, ...ids) => !!REF_POOL && (!REF_VENUE || REF_VENUE === venueName.toLowerCase()) && ids.some((x) => x && String(x) === REF_POOL);
+  if (soro) {
+    const ref = isRef("soroswap", soro.pair);
+    const label = ref ? "Soroswap ref" : "Soroswap";
+    list.push({ label, ref, soroswap: true, quote: (a) => quotePath(a, [tin, tout], label), step: async (a, min = 0n) => soroStep(tin, tout, soro.pair, a, min) });
+  }
   for (const venue of venueList()) {
     if (only && venue.name !== only) continue;
     const opts = await venue.options(tin, tout);
     for (const opt of opts) {
+      const ref = isRef(venue.name, opt.address, opt.id, opt.pool, opt.contract);
+      if (ref && !refSeen) {
+        refSeen = true;
+        log(`reference pool ${REF_POOL} found: ${venue.name} ${sym(tin)}/${sym(tout)} (marked "ref"; preferred while it pays at most ${REF_PREFER_BPS} bps less than the best pool)`);
+      }
+      const label = `${opts.length > 1 ? `${venue.name} ${String(opt.id).slice(0, 4)}` : venue.name}${ref ? " ref" : ""}`;
       list.push({
-        label: opts.length > 1 ? `${venue.name} ${String(opt.id).slice(0, 4)}` : venue.name,
+        label,
+        ref,
         soroswap: false,
-        quote: (a) => venue.quote(opt, tin, tout, a),
+        // a price far from the oracle's counts as no quote: the pool is left out of every route
+        quote: async (a) => {
+          const q = await venue.quote(opt, tin, tout, a);
+          return q !== null && q > 0n && !(await inBand(label, tin, tout, a, q)) ? null : q;
+        },
         // How the pool takes its token is read only for a pool that is actually used (many pools are empty or tiny).
         step: async (a, min = 0n) => {
           const template = await venueTemplate(venue, opt, tin, tout);
@@ -1964,6 +2149,8 @@ async function sourcesFor(tin, tout, only = null) {
       });
     }
   }
+  const r = list.findIndex((x) => x.ref);
+  if (r > 0) list.unshift(...list.splice(r, 1)); // the reference pool first
   return list;
 }
 /**
@@ -2230,7 +2417,7 @@ async function refreshBoard(tin, tout) {
   const qs = await Promise.all(sources.map((src) => src.quote(ref).catch(() => null)));
   boardQuotes += sources.length;
   const quotes = sources.map((src, i) => [src.label, qs[i]]);
-  const best = bestQuote(quotes);
+  const best = preferQuote(quotes, sources.find((x) => x.ref)?.label, REF_PREFER_BPS);
   board.set(`${tin}|${tout}`, { ref, at: Date.now(), ledger: lastLedger || latestCache.seq, best, n: sources.length, quotes });
   // The best venue's way of taking the token (an auth template, read once and kept 6 h) is learned now, not at fill time.
   if (best) {
@@ -2331,7 +2518,11 @@ async function boardRoute(fill, tin, tout, need) {
     const qs = await Promise.all(rest.map((x) => x.quote(fill).catch(() => null)));
     boardQuotes += rest.length;
     boardWant.add(key);
-    const best = bestQuote(rest.map((x, i) => [x.label, qs[i]]));
+    const best = preferQuote(
+      rest.map((x, i) => [x.label, qs[i]]),
+      rest.find((x) => x.ref)?.label,
+      REF_PREFER_BPS,
+    );
     if (!best) return null;
     src = rest.find((x) => x.label === best.label);
     q = best.q;
@@ -2486,6 +2677,7 @@ function waiting(vault, o, tag, remaining, tin, reason) {
 }
 
 function priceNoteFor(tin, tout, fill, q, limit) {
+  if ((q === null || q <= 0n) && bandNoteFor(tin, tout)) return `no pool within the oracle band: ${bandNoteFor(tin, tout)}`;
   if (q === null || q <= 0n) return `no pool can quote ${fmt(fill)} ${sym(tin)} right now`;
   if (tin === USDC) return `market ${(Number(fill) / Number(q)).toFixed(4)} > limit ${fmt(limit)} USDC/XLM`;
   // Sell: the limit is "at most how many XLM for 1 USDC"; the user is shown "at least how many USDC for 1 XLM".
@@ -2576,6 +2768,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   // Without a Soroswap quote the order can still fill elsewhere when other venues are in play.
   const qSmall = rSmall ? rSmall.q : useVenues ? 0n : null;
   if (qSmall === null) {
+    if (bandNoteFor(tin, tout)) return waiting(vault, o, tag, remaining, tin, `no pool within the oracle band: ${bandNoteFor(tin, tout)}`);
     log(`${tag} no price available`);
     return "error";
   }
@@ -2609,6 +2802,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     let qSoro = route ? route.q : useVenues ? 0n : null;
     let via = route ? route.via : null;
     if (qSoro === null) {
+      if (bandNoteFor(tin, tout)) return waiting(vault, o, tag, remaining, tin, `no pool within the oracle band: ${bandNoteFor(tin, tout)}`);
       log(`${tag} no price available`);
       return "error";
     }
@@ -2845,7 +3039,27 @@ async function tryCross(a, b, budget = null) {
   const lo = (SCALE * SCALE + b.limit - 1n) / b.limit; // the least X per Y that b accepts
   const hi = a.limit; // the most X per Y that a pays
   if (lo > hi) return "no";
-  let amt = crossAmounts(a, b, (lo + hi) / 2n);
+  // The cross price stays inside the oracle band too (X per Y = lastprice(Y) / lastprice(X)): the range both limits
+  // allow is cut to the band, and the start is the oracle price itself. Limits that only meet outside it: no cross.
+  let rlo = lo;
+  let rhi = hi;
+  let start = (lo + hi) / 2n;
+  if (BAND_ON) {
+    const o = await oracleRateFor(a.tout, a.tin); // raw X per raw Y
+    if (o.rate) {
+      const cb = crossBand(lo, hi, BigInt(Math.round(o.rate * Number(SCALE))), VENUE_MAX_DEVIATION_BPS);
+      if (!cb) {
+        bandSay(`cross:${a.key}|${b.key}`, `cross ${short(a.vault)} #${a.o.id} x ${short(b.vault)} #${b.o.id} skipped: the limits only meet outside the oracle band (${pct(VENUE_MAX_DEVIATION_BPS)})`);
+        return "no";
+      }
+      [rlo, rhi, start] = [cb.lo, cb.hi, cb.p];
+      bandStats.crossesKept++;
+    } else if (VENUE_REQUIRE_ORACLE) {
+      bandSay(`cross:noracle:${a.tin}|${a.tout}`, `crosses of ${sym(a.tin)}/${sym(a.tout)} wait: no oracle price (${o.why}; VENUE_REQUIRE_ORACLE)`);
+      return "no";
+    }
+  } else if (VENUE_REQUIRE_ORACLE && !PRICE_ORACLE) return "no";
+  let amt = crossAmounts(a, b, start);
   if (!amt) return "no";
   // What would the pool give each side for these amounts?
   let qa = await quote(amt.x, a.tin, a.tout);
@@ -2853,8 +3067,8 @@ async function tryCross(a, b, budget = null) {
   if (budget) budget.quote(2);
   if (qa !== null && qb !== null && qa > 0n && qb > 0n) {
     let mid = ((amt.x * SCALE) / qa + (qb * SCALE) / amt.y) / 2n; // the pool's middle price for these amounts
-    if (mid < lo) mid = lo;
-    if (mid > hi) mid = hi;
+    if (mid < rlo) mid = rlo;
+    if (mid > rhi) mid = rhi;
     const again = crossAmounts(a, b, mid);
     if (again && (again.x !== amt.x || again.y !== amt.y)) {
       amt = again;
@@ -3365,6 +3579,7 @@ function writeStatus() {
           last_fill_timing: lastFillTiming,
           ledger_stream: LEDGER_STREAM ? (ledgerStreamUp() ? "up" : "down (asking the RPC)") : "off",
           price_board: BOARD_ON && VENUES ? boardSummary(now) : "off",
+          price_band: bandSummary(),
           // which source saw the ledgers first over the last 10 minutes (stream / RPC), and how long after the close
           ledger_sources: lastLedgerRace || { ...ledgerRace.summary(), so_far: true },
           last_ledger_seen_by: ledgerWatch.by || null,
@@ -3475,6 +3690,13 @@ async function main() {
   process.on("exit", lock.release); // also on Ctrl+C / SIGTERM / fatal errors (they all end in process.exit)
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   log(
+    BAND_ON
+      ? `price band: pools more than ${pct(VENUE_MAX_DEVIATION_BPS)} away from the oracle ${short(PRICE_ORACLE)} are not used (fill_via, execute, board, crosses); ` +
+          `without an oracle price ${VENUE_REQUIRE_ORACLE ? "no fills (VENUE_REQUIRE_ORACLE)" : "the band is off for that pair"}; ` +
+          `reference pool ${REF_POOL ? `${REF_VENUE || "any venue"} ${REF_POOL}` : "none (testnet/ref-pool.env)"}`
+      : `price band off${VENUE_REQUIRE_ORACLE ? (PRICE_ORACLE ? "" : "; no oracle set and VENUE_REQUIRE_ORACLE: no fills") : ""}`,
+  );
+  log(
     `fill latency: ledger stream ${LEDGER_STREAM ? HORIZON_URL : "off"}, reads spread over the RPC servers ${RPC_SPREAD_READS ? "on" : "off"}, ` +
       `result looked up ${LEDGER_STREAM ? "after each ledger" : `every ${TX_POLL_MS} ms`}, prepared route shapes ${ROUTE_SHAPE_SEC} s, ` +
       `price board ${BOARD_ON && VENUES ? `on (${boardTokens().map(sym).join(", ")} against USDC, both ways, more from the factories' allowed tokens; ${BOARD_REF_USDC} USDC reference, single leg up to ${BOARD_FAST_MULT}x, <= ${BOARD_MAX_QUOTES} quotes/ledger, idle pairs every ${BOARD_COLD_LEDGERS} ledgers, quick quote without a fresh entry ${BOARD_QUICK ? "on" : "off"})` : "off"}; ` +
@@ -3581,6 +3803,7 @@ async function main() {
         await notify(`${failedScansInRow} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
       }
     }
+    oracleTick(); // the oracle prices for the price band, in the background
     boardTick(); // the price board, in the background
     // The inclusion fee is refreshed here, in the background, so a fill never waits for getFeeStats.
     if (Date.now() - feeStatsCache.at > 20_000 && !feeRefreshing) {
