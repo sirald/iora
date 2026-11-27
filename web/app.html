@@ -97,30 +97,9 @@
       </nav>
     </header>
 
+    <!-- Wrong network: filled by main.js with the steps for the connected wallet (netBox). -->
     <div id="netwarn" class="netwarn" role="alert" hidden>
-      <div class="netwarn-card">
-        <b>Your wallet is on <span id="netwarn-name">Mainnet</span>. Iora runs on Stellar Testnet for now.</b>
-        <p>Wallets don't let websites change their network, so please switch it yourself. It takes ten seconds:</p>
-        <div class="netwarn-ways">
-          <div>
-            <span class="netwarn-w">Varial</span>
-            <ol>
-              <li>Open Varial and click your account name at the top left.</li>
-              <li>Click the settings (gear) icon, then <b>Network</b>.</li>
-              <li>Choose <b>Test Net</b>.</li>
-            </ol>
-          </div>
-          <div>
-            <span class="netwarn-w">Freighter (not updated yet)</span>
-            <ol>
-              <li>Open Freighter (the extension icon in your browser bar).</li>
-              <li>Click the network name at the top (it says <i>Main Net</i>).</li>
-              <li>Choose <b>Test Net</b>.</li>
-            </ol>
-          </div>
-        </div>
-        <p class="netwarn-foot">Using xBull, Lobstr or another wallet? Switch to Testnet in its settings. If a signing window already says the network is wrong, close it with <i>Got it</i> first. This page continues on its own as soon as you switch; no reload needed.</p>
-      </div>
+      <div class="netwarn-card" id="netwarn-card"></div>
     </div>
 
     <div class="shell">

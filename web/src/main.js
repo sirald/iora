@@ -18,13 +18,14 @@ import {
   StrKey,
   xdr,
 } from "@stellar/stellar-sdk";
-import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTransaction } from "@stellar/freighter-api";
+import { getAddress, getNetwork, isAllowed, isConnected, requestAccess, signTransaction, WatchWalletChanges } from "@stellar/freighter-api";
 import { flushReads, makeServer, RPC_FALLBACK, RPC_PRIMARY, setReadPolicy } from "./rpc.js";
 import { COPY_LABEL, copied } from "./motion.js";
 import { makeQuote, quoteMismatch, routeProblem } from "./swap-quote.js";
 import { OLD_BLEND_USDC, coinLabel, planMove, stayNewest } from "./migrate.js";
 import { PART, planMove as planMoverCall, sortCoins, splitPlan } from "./mover.js";
 import { bestVenue, coinStyle, reflectorPrice, testnetNote, venueLine } from "./prices.js";
+import { SUGGESTED, capabilityOf, createNetWait, mustCheck, networkName, networkState, noSwitchIds } from "./network.js";
 import { pendingAdd, pendingDrop, pendingParse, pendingTooOld, txVerdict } from "./tx-status.js";
 import { hfClass, hfText, lpMax as lpMaxOf, lpSafeMax as lpSafeMaxOf, lpTotals as lpTotalsOf } from "./lend.js";
 import { StellarWalletsKit } from "swk-sdk";
@@ -442,6 +443,10 @@ let atWallet = false; // a signing request is open in the wallet
 // Network fees the wallet has paid (the Summary tab): read once, then again only after this page sent something.
 const FEES = { who: null, at: 0, sum: null, stale: false, asking: null };
 async function signAndSend(tx, label = "Transaction") {
+  // A wallet that must be switched is checked first; if it is on another network the request waits for the switch.
+  if (!(await ensureNetwork(label))) throw new Error("Cancelled: your wallet is not on Testnet");
+  const maxT = Number((tx.timeBounds && tx.timeBounds.maxTime) || 0);
+  if (maxT && maxT - Date.now() / 1000 < 20) throw new Error("This request expired while the wallet was being switched. Nothing was sent; press the button again.");
   atWallet = true;
   try {
     return await signAndSendNow(tx, label);
@@ -679,23 +684,9 @@ async function call(contractId, method, args, label, errors) {
     log(`${label}: this page is out of date. Reload it first (button at the top).`, "err");
     return null;
   }
-  // If the wallet is on the wrong network the signing request is not sent at all (the wallet would refuse anyway); a warning is shown first.
-  if (me && setup.testnet === false) {
-    const r = await currentNetworkOk();
-    // Some wallets keep reporting the old network after it was changed. So that the user is not
-    // locked out, the signing request is sent anyway on the second attempt; the wallet has the last word.
-    if (!r.ok && Date.now() - netBlockedAt > 90000) {
-      netBlockedAt = Date.now();
-      netGuard(false, r.name);
-      $("netwarn").scrollIntoView({ behavior: "smooth", block: "start" });
-      log(`${label}: your wallet says it is on ${/PUBLIC|MAIN/i.test(r.name) ? "Mainnet" : esc(r.name || "another network")}. Switch it to Test Net (see the yellow box at the top). Already switched? Press the button again.`, "err");
-      return null;
-    }
-    if (r.ok && !r.unknown) {
-      mark("testnet", true);
-      netGuard(true);
-    }
-  }
+  // A wallet on the wrong network is not asked to sign (it would refuse). The request waits until the wallet is
+  // switched and then continues by itself; it is checked before the transaction is built, so it is built fresh.
+  if (me && !busy && !(await ensureNetwork(label))) return null;
   if (busy) {
     log(
       atWallet
@@ -796,7 +787,17 @@ let KIT = false;
 let useKit = false;
 if (StellarWalletsKit) {
   try {
-    StellarWalletsKit.init({ modules: defaultModules(), network: PASS });
+    // Wallets that sign for the network in the request work on testnet without switching: listed first, labelled.
+    const fast = noSwitchIds();
+    const mods = defaultModules();
+    for (const m of mods) {
+      if (!fast.includes(String(m.productId).toLowerCase())) continue;
+      try {
+        m.productName = `${m.productName} · works on testnet without switching`;
+      } catch {}
+    }
+    mods.sort((a, b) => Number(fast.includes(String(b.productId).toLowerCase())) - Number(fast.includes(String(a.productId).toLowerCase())));
+    StellarWalletsKit.init({ modules: mods, network: PASS });
     KIT = true;
   } catch (e) {
     console.warn("Wallets kit could not start", e);
@@ -883,42 +884,152 @@ async function disconnectWallet() {
 // Wrong network warning: wallets do not let sites change the network (a security rule).
 // So a large warning is shown and the page continues by itself the moment the user switches to Testnet.
 // ---------------------------------------------------------------------------
-let netTimer = null;
-let netBlockedAt = 0;
+// The pure part (which wallet can do what, comparing networks, the waiting requests) is in network.js.
+const NETWAIT = createNetWait();
+let netTimer = null; // polling for wallets without a change watcher
+let netWatch = null; // Freighter API: WatchWalletChanges
+let netLast = "unknown";
+/** The connected wallet's capabilities (Stellar Wallets Kit module id, or the Freighter-API wallet). */
+function walletCap() {
+  let id = "varial";
+  if (useKit) {
+    try {
+      id = StellarWalletsKit.selectedModule.productId;
+    } catch {}
+  }
+  return capabilityOf(id);
+}
 async function currentNetworkOk() {
+  const cap = walletCap();
+  if (!mustCheck(cap) || !cap.query) return { ok: true, name: "", unknown: true };
   try {
-    if (useKit) {
-      const n = await StellarWalletsKit.getNetwork();
-      return { ok: !n || !n.networkPassphrase || n.networkPassphrase === PASS, name: n && n.network ? String(n.network) : "another network" };
-    }
-    const n = await getNetwork();
+    const n = useKit ? await StellarWalletsKit.getNetwork() : await getNetwork();
+    const st = networkState(n, PASS);
     // no answer (the wallet is locked or busy): not known, so neither a warning nor "you are on Testnet now"
-    if (!n || n.error || !n.network) return { ok: true, name: "", unknown: true };
-    return { ok: n.network === "TESTNET", name: String(n.network) };
+    return { ok: st !== "wrong", name: networkName(n), unknown: st === "unknown" };
   } catch {
     return { ok: true, name: "", unknown: true };
   }
 }
+/** A browser notification, only if the user allowed them and this tab is in the background. */
+function netNotify(title, body) {
+  try {
+    if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(title, { body, tag: "iora-network" });
+  } catch {}
+}
+/** The wrong-network box: the steps for the connected wallet, a picture of the switch, and what is waiting. */
+function netBox(name) {
+  const cap = walletCap();
+  const who = useKit ? (walletName || cap.name || "your wallet").split(" · ")[0] : "Your wallet";
+  const card = $("netwarn-card");
+  if (!card) return;
+  const steps = cap.steps.length ? cap.steps : capabilityOf("").steps;
+  const waiting = NETWAIT.waiting;
+  const canNotify = "Notification" in window && Notification.permission === "default";
+  card.innerHTML = `
+    <b>${esc(who)} is on ${esc(name || "another network")}. Iora runs on Stellar Testnet for now.</b>
+    <p>Wallets don't let websites change their network, so please switch it yourself. It takes ten seconds:</p>
+    <div class="netwarn-pic" aria-hidden="true"><span>${esc(name || "Main Net")} ▾</span>→<span class="on">Test Net ✓</span></div>
+    ${
+      useKit
+        ? `<ol>${steps.map((x) => `<li>${x}</li>`).join("")}</ol>`
+        : // The Freighter API answers for Varial and Freighter alike, so both are shown.
+          `<div class="netwarn-ways">${["varial", "freighter"].map((id) => `<div><span class="netwarn-w">${capabilityOf(id).name}</span><ol>${capabilityOf(id).steps.map((x) => `<li>${x}</li>`).join("")}</ol></div>`).join("")}</div>`
+    }
+    ${waiting ? `<p class="netwarn-wait">${waiting === 1 ? "Your request is" : `${waiting} requests are`} waiting and will continue by itself as soon as you switch.</p>` : ""}
+    <div class="netwarn-acts">
+      ${waiting ? `<button type="button" class="btn small" data-nw="go">I already switched — continue</button><button type="button" class="btn small ghost" data-nw="cancel">Cancel</button>` : ""}
+      ${canNotify ? `<button type="button" class="btn small ghost" data-nw="notify">Notify me if this tab is in the background</button>` : ""}
+    </div>
+    <p class="netwarn-foot">No reload needed: this page notices the switch by itself. Wallets that work on testnet without switching: ${SUGGESTED.filter((w) => !/Varial/.test(w)).join(", ")}.</p>`;
+  for (const b of card.querySelectorAll("[data-nw]"))
+    b.onclick = async () => {
+      const a = b.dataset.nw;
+      if (a === "go") NETWAIT.proceed();
+      if (a === "cancel") NETWAIT.cancel();
+      if (a === "notify") {
+        try {
+          await Notification.requestPermission();
+        } catch {}
+      }
+      netBox(name);
+    };
+}
+/** Shows or hides the wrong-network box; when the network becomes right, waiting requests continue. */
 function netGuard(ok, name) {
   const box = $("netwarn");
   if (!box) return;
-  box.hidden = ok;
+  const was = netLast;
+  netLast = ok ? "ok" : "wrong";
+  mark("testnet", ok);
   if (ok) {
-    clearInterval(netTimer);
-    netTimer = null;
+    box.hidden = true;
+    const n = NETWAIT.update("ok");
+    if (was === "wrong") {
+      log(n ? "Wallet switched to Testnet: continuing…" : "Wallet switched to Testnet. You're all set.", "ok");
+      if (n) netNotify("Iora: back on Testnet", "Your request continues; approve it in your wallet.");
+      refresh().catch(() => {});
+    }
     return;
   }
-  const nice = /PUBLIC|MAIN/i.test(name) ? "Mainnet" : name || "another network";
-  $("netwarn-name").textContent = nice;
+  netBox(name);
+  box.hidden = false;
+  if (was !== "wrong") netNotify(`Iora: your wallet is on ${name || "another network"}`, "Switch it to Test Net to use Iora.");
+}
+/** Follows the wallet's network for as long as it is connected (Freighter API: its watcher; others: polling). */
+function startNetWatch() {
+  const cap = walletCap();
+  if (cap.testnet === "no") {
+    log(`${esc((walletName || cap.name).split(" · ")[0])} does not support testnet, so it can't be used with Iora yet. Use ${SUGGESTED.join(", ")} instead.`, "err");
+    return;
+  }
+  if (cap.warn) log(`${esc(cap.warn)} If signing fails, use ${SUGGESTED.join(", ")} instead.`, "err");
+  if (!mustCheck(cap) || !cap.query) return; // it signs for the network in the request: nothing to watch
+  if (!useKit && !netWatch && WatchWalletChanges) {
+    try {
+      netWatch = new WatchWalletChanges(1500);
+      netWatch.watch((n) => {
+        const st = networkState(n, PASS);
+        if (st !== "unknown") netGuard(st === "ok", networkName(n));
+      });
+      return;
+    } catch (e) {
+      console.warn("network watcher", e);
+      netWatch = null;
+    }
+  }
   if (netTimer) return;
   netTimer = setInterval(async () => {
     const r = await currentNetworkOk();
-    if (!r.ok || r.unknown) return;
-    netGuard(true);
-    mark("testnet", true);
-    log("Wallet switched to Testnet. You're all set.", "ok");
-    await refresh();
-  }, 2000);
+    if (!r.unknown) netGuard(r.ok, r.name);
+  }, 1500);
+}
+/**
+ * Before a signing request: true if the wallet is (or may be) on Testnet. If it says another network, the box
+ * shows how to switch and this waits (up to 15 minutes) until the switch, the user's "continue", or "cancel".
+ */
+async function ensureNetwork(label) {
+  if (!mustCheck(walletCap())) return true;
+  const r = await currentNetworkOk();
+  if (r.ok) {
+    if (!r.unknown && netLast === "wrong") netGuard(true);
+    return true;
+  }
+  const waiting = NETWAIT.wait();
+  netGuard(false, r.name);
+  startNetWatch();
+  $("netwarn").scrollIntoView({ behavior: "smooth", block: "start" });
+  log(`${esc(label)}: your wallet is on ${esc(r.name)}. Switch it to Test Net (see the box at the top); this continues by itself.`, "wait");
+  netNotify(`Iora: your wallet is on ${r.name}`, "Switch it to Test Net; your request continues by itself.");
+  const timeout = new Promise((res) => setTimeout(() => res("timeout"), 15 * 60_000));
+  const go = await Promise.race([waiting, timeout]);
+  if (go === "timeout") NETWAIT.cancel();
+  if (go !== true) {
+    log(`${esc(label)}: not sent, because the wallet stayed on ${esc(r.name)}.`, "err");
+    netBox(r.name);
+    return false;
+  }
+  return true;
 }
 
 const validAddr = (a) => {
@@ -951,17 +1062,14 @@ async function connect() {
     try {
       const { address } = await StellarWalletsKit.authModal();
       useKit = true;
-      let ok = true;
-      try {
-        const net = await StellarWalletsKit.getNetwork();
-        ok = !net || !net.networkPassphrase || net.networkPassphrase === PASS;
-        netGuard(ok, net && net.network);
-      } catch {}
+      const r = await currentNetworkOk();
+      if (!r.unknown) netGuard(r.ok, r.name);
       let name = "";
       try {
-        name = StellarWalletsKit.selectedModule.productName;
+        name = String(StellarWalletsKit.selectedModule.productName).split(" · ")[0];
       } catch {}
-      connected(address, ok, name);
+      connected(address, r.ok, name);
+      startNetWatch();
       await refresh();
       if (location.hash === "#lend") loadLend();
     } catch (e) {
@@ -1017,11 +1125,11 @@ async function adoptWallet(address, quiet) {
   getNetwork()
     .then((net) => {
       // Only a network the wallet actually names counts as wrong; an empty answer is not a reason to warn.
-      if (!net || net.error || !net.network) return;
-      mark("testnet", net.network === "TESTNET");
-      netGuard(net.network === "TESTNET", net.network);
+      const st = networkState(net, PASS);
+      if (st !== "unknown") netGuard(st === "ok", networkName(net));
     })
     .catch(() => {});
+  startNetWatch();
   const loaded = firstLoad(); // the vault lookup queues its reads first; the wallet-level reads go right behind them
   prewarm();
   await loaded;
@@ -1158,15 +1266,12 @@ async function autoConnect() {
       const { address } = await StellarWalletsKit.getAddress();
       if (validAddr(address)) {
         useKit = true;
-        let ok = true;
-        try {
-          const net = await StellarWalletsKit.getNetwork();
-          ok = !net || !net.networkPassphrase || net.networkPassphrase === PASS;
-          netGuard(ok, net && net.network);
-        } catch {}
+        const r = await currentNetworkOk();
+        if (!r.unknown) netGuard(r.ok, r.name);
         let name = "";
-        try { name = StellarWalletsKit.selectedModule.productName; } catch {}
-        connected(address, ok, name);
+        try { name = String(StellarWalletsKit.selectedModule.productName).split(" · ")[0]; } catch {}
+        connected(address, r.ok, name);
+        startNetWatch();
         await refresh();
         if (location.hash === "#lend") loadLend();
         return;
