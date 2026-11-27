@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/.." || exit 1
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 N="--network testnet"
-source testnet/blend-pool.env || exit 1
+source <(tr -d '\r' < testnet/blend-pool.env) || exit 1
 SOROSWAP_ROUTER=CCJUD55AG6W5HAI5LRVNKAE5WDP5XGZBUDS5WNTIVDU7O264UZZE7BRD
 CIRCLE_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 U=10000000

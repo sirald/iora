@@ -8,7 +8,7 @@
 cd "$(dirname "$0")/.." || exit 1
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 N="--network testnet"
-source testnet/blend-pool.env || exit 1
+source <(tr -d '\r' < testnet/blend-pool.env) || exit 1
 source scripts/blend-rates.sh
 clean() { sed -E 's/S[A-Z2-7]{55}/S***/g'; }
 save() { sed -i "/^$1=/d" testnet/blend-pool.env; echo "$1=$2" >> testnet/blend-pool.env; }

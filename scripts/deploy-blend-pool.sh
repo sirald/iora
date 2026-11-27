@@ -60,7 +60,7 @@ source scripts/blend-rates.sh
 
 ME=$(stellar keys address dev) || { echo "no stellar identity 'dev'"; exit 1; }
 touch "$ENVF"
-source "$ENVF"
+source <(tr -d '\r' < "$ENVF")
 # Writes KEY=VALUE to the env file (addresses and salts only).
 save() { sed -i "/^$1=/d" "$ENVF"; echo "$1=$2" >> "$ENVF"; eval "$1=$2"; }
 # Strips anything that looks like a secret key from output.

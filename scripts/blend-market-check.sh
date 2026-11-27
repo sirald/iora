@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/.." || exit 1
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 N="--network testnet"
-source testnet/blend-pool.env || exit 1
+source <(tr -d '\r' < testnet/blend-pool.env) || exit 1
 q() { stellar contract invoke --source dev $N --send no --id "$1" -- "${@:2}" 2>/dev/null | tail -1; }
 CFG=$(q "$POOL" get_config)
 echo "pool $POOL  $(date -u +%FT%TZ)  $(echo "$CFG" | python3 -c 'import json,sys; c=json.load(sys.stdin); print("status", c["status"], " backstop take", c["bstop_rate"]/1e7)')"
