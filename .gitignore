@@ -49,3 +49,4 @@ testnet/*
 !testnet/batch.env
 !testnet/filler.env
 !testnet/pairs.env
+!testnet/blend-pool.env

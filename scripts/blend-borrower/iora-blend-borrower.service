@@ -1,0 +1,18 @@
+[Unit]
+Description=Iora Blend borrower bot (testnet): keeps the USDC utilisation of Iora's Blend pool in a band
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=iora
+WorkingDirectory=/opt/iora/blend-borrower
+# BORROWER_SECRET (and optional overrides) live here: root:iora, mode 0640. See borrower.env.example.
+EnvironmentFile=/etc/iora/borrower.env
+ExecStart=/usr/bin/node borrower.js
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/iora/blend-borrower

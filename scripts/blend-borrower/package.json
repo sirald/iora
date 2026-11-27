@@ -1,0 +1,14 @@
+{
+  "name": "iora-blend-borrower",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Iora testnet bot: borrows Circle USDC from Iora's own Blend pool to keep its utilisation in a band",
+  "main": "borrower.js",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -974,6 +974,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iora-blend-oracle"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "iora-factory"
 version = "0.1.0"
 dependencies = [
