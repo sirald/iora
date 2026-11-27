@@ -142,3 +142,27 @@ describe("prepared route shapes", () => {
     assert.equal(sharesOf([1n, 1n, 1n], 3n).reduce((x, y) => x + y, 0), 10_000);
   });
 });
+
+describe("main-loop watchdog", () => {
+  test("reports a stall once, after stallMs without a stage change or progress, and turns the fast paths off", async () => {
+    const { LoopWatch } = await import("../lib.js");
+    let t = 0;
+    const w = new LoopWatch({ stallMs: 60_000, safeMs: 600_000, now: () => t });
+    w.stage("scan: vault list");
+    t = 30_000;
+    assert.equal(w.check(), null);
+    w.progress(); // an RPC answer
+    t = 89_000;
+    assert.equal(w.check(), null);
+    t = 91_000;
+    assert.deepEqual(w.check(), { stage: "scan: vault list", stalledMs: 61_000 });
+    assert.equal(w.check(), null); // once per stall
+    assert.equal(w.safe(), true);
+    assert.equal(w.stalls, 1);
+    t = 91_000 + 600_001;
+    assert.equal(w.safe(), false);
+    w.stage("waiting for the next ledger");
+    t += 61_000;
+    assert.equal(w.check().stage, "waiting for the next ledger"); // a new stall is reported again
+  });
+});

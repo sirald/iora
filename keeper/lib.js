@@ -812,3 +812,50 @@ export function sharesOf(amounts, total) {
   if (s.length) s[0] += 10_000 - used;
   return s;
 }
+
+// ---------------------------------------------------------------------------
+// Main-loop watchdog
+// ---------------------------------------------------------------------------
+
+/**
+ * Watches the main loop: `stage(name)` when it moves to another step, `progress()` when work finishes (an RPC answer).
+ * `check()` (called every few seconds) reports a stall once per stall when nothing happened for `stallMs`, and then
+ * keeps `safe()` true for `safeMs`: the fast paths are off and the keeper runs on plain RPC polling.
+ */
+export class LoopWatch {
+  constructor({ stallMs = 60_000, safeMs = 600_000, now = Date.now } = {}) {
+    this.stallMs = stallMs;
+    this.safeMs = safeMs;
+    this.now = now;
+    this.lastAt = now();
+    this.stageName = "start";
+    this.stalls = 0;
+    this.safeUntil = 0;
+    this.reported = false;
+  }
+
+  stage(name) {
+    this.stageName = name;
+    this.progress();
+  }
+
+  progress() {
+    this.lastAt = this.now();
+    this.reported = false;
+  }
+
+  safe() {
+    return this.now() < this.safeUntil;
+  }
+
+  /** { stage, stalledMs } once per stall, else null. */
+  check() {
+    const at = this.now();
+    const d = at - this.lastAt;
+    if (d < this.stallMs || this.reported) return null;
+    this.reported = true;
+    this.stalls++;
+    this.safeUntil = at + this.safeMs;
+    return { stage: this.stageName, stalledMs: d };
+  }
+}
