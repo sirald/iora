@@ -28,8 +28,7 @@ Run as root on the server. The server layout is the keeper's (`scripts/server.sh
    umask 027
    cd /opt/iora/blend-borrower
    node -e 'const {Keypair}=require("@stellar/stellar-sdk");const k=Keypair.random();console.log("BORROWER_SECRET="+k.secret()+"\nBORROWER_ADDRESS="+k.publicKey())' > /etc/iora/borrower.env
-   grep -v '^BORROWER_SECRET\|^BORROWER_ADDRESS\|^#\|^$' borrower.env.example >> /etc/iora/borrower.env   # BLEND_POOL
-   echo 'BLEND_POOL=<POOL from testnet/blend-pool.env>' >> /etc/iora/borrower.env   # only if the line above added nothing
+   grep '^BLEND_POOL=' borrower.env.example >> /etc/iora/borrower.env   # check it equals POOL in testnet/blend-pool.env
    chown root:iora /etc/iora/borrower.env && chmod 640 /etc/iora/borrower.env
    grep BORROWER_ADDRESS /etc/iora/borrower.env
    ```
