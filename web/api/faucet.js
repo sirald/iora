@@ -80,7 +80,10 @@ module.exports = async (req, res) => {
 
   let sdk, blob, kp;
   try {
-    sdk = require("@stellar/stellar-sdk");
+    // The SDK is loaded with import(): its CommonJS build requires an ES-only dependency, which Vercel's runtime
+    // refuses with require() ("require() of ES Module … not supported").
+    const m = await import("@stellar/stellar-sdk");
+    sdk = m.default && m.default.Keypair ? m.default : m;
     blob = require("@vercel/blob");
     kp = sdk.Keypair.fromSecret(env.FAUCET_SECRET);
   } catch {
