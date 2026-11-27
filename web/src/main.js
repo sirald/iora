@@ -2967,6 +2967,7 @@ $("connect").onclick = (e) => {
 };
 $("trust").onclick = addTrustline;
 $("friendbot").onclick = fundFriendbot;
+$("faucet-usdc").onclick = faucetUsdc;
 $("create").onclick = createVault;
 $("deposit").onclick = deposit;
 $("withdraw").onclick = withdraw;
@@ -3614,7 +3615,10 @@ $("ask").addEventListener("click", (e) => {
 // ---------------------------------------------------------------------------
 // Test funds: Friendbot, trustline state
 // ---------------------------------------------------------------------------
+const FAUCET = { funded: false, trust: false, asking: false };
 function renderFaucet(funded, hasTrust) {
+  FAUCET.funded = !!funded;
+  FAUCET.trust = !!hasTrust;
   const x = walletNative !== null ? fmt(walletNative, 2) : "—";
   $("f-xlm").textContent = funded ? `${x} XLM` : "0 XLM";
   $("f-usdc").textContent = hasTrust && walletUsdc !== null ? `${fmt(walletUsdc, 2)} USDC` : hasTrust ? "0 USDC" : "No trustline";
@@ -3628,6 +3632,7 @@ function renderFaucet(funded, hasTrust) {
   $("trust").disabled = !funded || hasTrust;
   $("trust-note").textContent = hasTrust ? "Done. Your wallet can hold USDC." : !funded ? "Do step 1 first." : "";
   $("usdc-note").textContent = walletUsdc !== null && walletUsdc > 0n ? `Done. You have ${fmt(walletUsdc, 2)} USDC.` : !hasTrust ? "Do step 2 first." : "";
+  $("faucet-usdc").disabled = FAUCET.asking;
 }
 
 async function fundFriendbot() {
@@ -3644,6 +3649,62 @@ async function fundFriendbot() {
     }
   } catch {
     log("Could not reach Friendbot. Check your connection and try again.", "err");
+  }
+  flushReads();
+  await refresh();
+}
+
+// Test USDC from Iora's faucet (api/faucet.js): Circle's testnet USDC, once a day per wallet.
+const FAUCET_ERRORS = {
+  bad_address: "That wallet address is not valid.",
+  no_access: "The faucet is part of the beta: open the app with your invite code or an allowed wallet first.",
+  no_account: "Your wallet is not on testnet yet. Do step 1 first.",
+  no_trustline: "Add the USDC trustline first (step 2).",
+  trustline_full: "Your USDC trustline limit is too low for this amount. Remove the trustline and add it again.",
+  trustline_unauthorized: "Your wallet is not allowed to hold this USDC.",
+  wallet_limit: "This wallet already got test USDC in the last 24 hours.",
+  ip_limit: "Too many requests from your network today.",
+  faucet_low: "The faucet is empty right now. Sell some XLM for USDC or use Circle's faucet instead.",
+  limits_unavailable: "The faucet can't check its limits right now. Try again later.",
+  not_testnet: "The faucet only runs on testnet.",
+  not_configured: "The faucet is not set up yet. Sell some XLM for USDC or use Circle's faucet instead.",
+  network: "The faucet could not reach the network. Try again in a minute.",
+  send_failed: "The network rejected the faucet payment. Try again in a minute.",
+  send_unknown: "The faucet sent a payment but did not hear back. Check your USDC balance in a minute before asking again.",
+};
+const waitText = (s) => (s >= 3600 ? `${Math.ceil(s / 3600)} h` : `${Math.max(1, Math.ceil(s / 60))} min`);
+async function faucetUsdc() {
+  if (FAUCET.asking || !(await needWallet())) return;
+  if (!FAUCET.trust) {
+    log(FAUCET.funded ? "Add the USDC trustline first (step 2), then ask again." : "Do step 1 and step 2 first: get test XLM, then add the USDC trustline.", "err");
+    $(FAUCET.funded ? "fs-2" : "fs-1").scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+  let token = null;
+  try {
+    token = localStorage.getItem("iora-access");
+  } catch {}
+  FAUCET.asking = true;
+  $("faucet-usdc").disabled = true;
+  log("Asking the faucet for test USDC…", "wait");
+  try {
+    const r = await fetch("/api/faucet", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: me, token }), cache: "no-store" });
+    let j = {};
+    try {
+      j = await r.json();
+    } catch {}
+    if (j.ok && /^[0-9a-f]{64}$/.test(String(j.hash))) {
+      log(`${esc(String(j.amount || ""))} test USDC received · <a href="${EXPLORER}/tx/${j.hash}" target="_blank" rel="noopener">transaction</a>`, "ok");
+    } else {
+      const base = FAUCET_ERRORS[j.error] || "The faucet could not send USDC right now. Try again later, or sell some XLM for USDC.";
+      const wait = (j.error === "wallet_limit" || j.error === "ip_limit") && Number(j.retryAfter) > 0 ? ` Try again in ${waitText(Number(j.retryAfter))}.` : "";
+      log(base + wait, "err");
+    }
+  } catch {
+    log("Could not reach the faucet. Check your connection and try again.", "err");
+  } finally {
+    FAUCET.asking = false;
+    $("faucet-usdc").disabled = false;
   }
   flushReads();
   await refresh();

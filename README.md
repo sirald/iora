@@ -85,14 +85,17 @@ The app has **Markets**, **Trade** (limit, market, scaled and DCA orders, buy an
 |---|---|
 | Vault factory (vault version 13) | `CAFI6QIQUCMDB72YZ3BLSIA2PPFPGLWASMCRG72OE4JOQUR6JPBGBKIZ` |
 | Filler (version 3) | `CA4QUID65J4PINAJSYTQ7O4GUO2WDKVAMDPCOOEAFOTR6GWLXYGS4A7X` |
-| Blend pool | `CCEBVDYM32YNYCVNRXQKDFFPISJJCV557CDZEIRBEE4NCV4KHPQ44HGF` |
+| Blend pool (Iora's own testnet pool) | `CANUGJL73FGXXDE7BVVUCIPM2ETOO2UARG4B3Q2TJKI4FADWJAMLIKXV` |
+| USDC (Circle's testnet USDC) | issuer `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`, token `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
 | Trading venues the keeper routes through | Aquarius router `CBCFTQSPDBAIZ6R6PJQKSQWKNKWH2QIV3I4J72SHWBIK3ADRRAM5A6GD`, Soroswap router `CCJUD55AG6W5HAI5LRVNKAE5WDP5XGZBUDS5WNTIVDU7O264UZZE7BRD` |
 
 The factory deploys vaults from the code hash in `testnet/factory.env`. Factories of earlier versions are listed in
 `testnet/generations.env` and `testnet/old-factories.env`; their vaults keep working, the keeper keeps filling them and
 the app offers their owners a move to the newest vault.
 
-Every market is a coin against USDC. USDC and XLM are reserves of the testnet Blend pool and earn interest. The other
+Every market is a coin against USDC. On testnet USDC is Circle's test USDC, and the app's Test funds page hands out
+100 of it per wallet per day (`web/api/faucet.js`). USDC and XLM are reserves of Iora's own testnet Blend pool and earn
+interest. The other
 test coins are not listed by the pool: they wait in the vault without earning, and their test pools are small.
 
 ## Factory interface
