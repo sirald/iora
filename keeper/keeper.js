@@ -896,7 +896,7 @@ async function ensureWorkers() {
  * is simulated from a pool that holds USDC. If the trustline is missing the keeper adds it itself (its own
  * account, 0.5 XLM reserve); USDC_ISSUER in testnet/addr.env overrides the testnet issuer.
  */
-const USDC_ISSUER = (cfg.USDC_ISSUER || (PASSPHRASE === Networks.TESTNET ? "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56" : "")).trim();
+const USDC_ISSUER = (cfg.USDC_ISSUER || (PASSPHRASE === Networks.TESTNET ? "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" : "")).trim();
 async function ensureFeeTrustline() {
   try {
     const holder = await poolOf(USDC, XLM);

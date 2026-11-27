@@ -36,7 +36,7 @@ const C = {
   xlm: import.meta.env.VITE_XLM,
   router: import.meta.env.VITE_ROUTER,
   usdcIssuer: import.meta.env.VITE_USDC_ISSUER,
-  pool: import.meta.env.VITE_POOL || "CCEBVDYM32YNYCVNRXQKDFFPISJJCV557CDZEIRBEE4NCV4KHPQ44HGF",
+  pool: import.meta.env.VITE_POOL || "CANUGJL73FGXXDE7BVVUCIPM2ETOO2UARG4B3Q2TJKI4FADWJAMLIKXV",
 };
 const PASS = Networks.TESTNET;
 // The fast RPC first, the fallback if there is a problem (see rpc.js)
@@ -349,7 +349,7 @@ async function buildCall(contractId, method, args) {
 
 // A read does not need the account's sequence number: getAccount is not called before every read (halves the RPC calls).
 // An account that always exists (the USDC issuer) is used so that reads work without a connected wallet.
-const READ_SOURCE = import.meta.env.VITE_USDC_ISSUER || "GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56";
+const READ_SOURCE = import.meta.env.VITE_USDC_ISSUER || "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 function readCall(contractId, method, args) {
   // A read gives the same answer whoever asks. Asked in the name of one fixed account, the same question before
   // and after the wallet connects is one question, and rpc.js shares it. The exception is the swap probe, which
@@ -1159,7 +1159,7 @@ let balanceUnits = null;
 let openOrders = [];
 const orderTimes = {}; // order id -> { placed, ended } (seconds)
 let waitEarned = 0; // estimated interest the orders earned while waiting
-let supplyApr = null; // estimated yearly interest on Blend USDC (0.05 = 5%)
+let supplyApr = null; // estimated yearly interest on USDC in the Blend pool (0.05 = 5%)
 let walletUsdc = null; // USDC in the wallet
 let walletXlm = null; // the traded coin in the wallet (XLM for the XLM pair)
 let walletNative = null; // XLM in the wallet (network fees)

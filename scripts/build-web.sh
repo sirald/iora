@@ -34,7 +34,7 @@ VITE_VAULT_V=${VAULT_V:-3}
 VITE_MARKETS=${MARKETS:-}
 VITE_PAIRS=${PAIRS:-}
 # Pool guard: above this utilisation new deposits and orders stop. 0 on testnet (warn only), because the
-# test pool sits at 88-95% utilisation; set to 1 on mainnet (UTIL_ENFORCE=1 in testnet/addr.env).
+# Iora's own testnet pool is kept at 50-70% utilisation by the borrower bot, so it is on (UTIL_ENFORCE in testnet/addr.env).
 VITE_UTIL_ENFORCE=${UTIL_ENFORCE:-0}
 VITE_USDC=$USDC
 VITE_XLM=$XLM
@@ -42,7 +42,7 @@ VITE_ROUTER=$ROUTER
 VITE_AQUA_ROUTER=${AQUA_ROUTER:-}
 VITE_FILLER=${FILLER:-}
 VITE_POOL=$POOL
-VITE_USDC_ISSUER=GATALTGTWIOT6BUDBCZM3Q4OQ4BO2COLOAZ7IYSKPLC2PMSOPPGF5V56
+VITE_USDC_ISSUER=${USDC_ISSUER:-GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5}
 EOF
 
 # 2) Dependencies and build
