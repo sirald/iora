@@ -1,0 +1,18 @@
+[Unit]
+Description=Iora price bot (testnet): keeps Iora's USDC/XLM reference pool at the Reflector price
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=iora
+WorkingDirectory=/opt/iora/price-bot
+# PRICE_BOT_SECRET (and optional overrides) live here: root:iora, mode 0640. See price-bot.env.example.
+EnvironmentFile=/etc/iora/price-bot.env
+ExecStart=/usr/bin/node price-bot.js
+TimeoutStartSec=100
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/iora/price-bot

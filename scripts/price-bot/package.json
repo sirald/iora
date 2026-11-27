@@ -1,0 +1,14 @@
+{
+  "name": "iora-price-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Iora testnet bot: keeps Iora's USDC/XLM reference pool on Aquarius at the Reflector price",
+  "main": "price-bot.js",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

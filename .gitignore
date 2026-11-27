@@ -52,3 +52,4 @@ testnet/*
 !testnet/blend-pool.env
 !testnet/iora-coins.retired.env
 !testnet/mover.env
+!testnet/ref-pool.env
