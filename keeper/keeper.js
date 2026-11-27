@@ -46,7 +46,10 @@ import {
   LoopWatch,
   WorkBudget,
   acquireLock,
+  bestQuote,
+  boardPlan,
   cometMaxPrice,
+  fastRouteOk,
   crossPairs,
   forgetOrder,
   inclusionFeeFrom,
@@ -166,7 +169,20 @@ const TX_POLL_MS = Math.max(250, Number(cfg.TX_POLL_MS || 750));
 // logged with the stage it is stuck in, and the fast paths (ledger stream, spread reads, background yielding) are
 // switched off for 10 minutes, so the keeper falls back to plain RPC polling and recovers by itself.
 const LOOP_STALL_SEC = Math.max(5, Number(cfg.LOOP_STALL_SEC || 60));
-const ROUTE_SHAPE_SEC = Number(cfg.ROUTE_SHAPE_SEC ?? 60) >= 0 && cfg.ROUTE_SHAPE_SEC !== "" ? Number(cfg.ROUTE_SHAPE_SEC ?? 60) : 60;
+// 300 s (was 60: two orders on the same pair 165 s apart found the shape expired and searched again, ~8 s).
+const ROUTE_SHAPE_SEC = cfg.ROUTE_SHAPE_SEC === undefined || cfg.ROUTE_SHAPE_SEC === "" ? 300 : Math.max(0, Number(cfg.ROUTE_SHAPE_SEC) || 0);
+// ----- price board -----
+// Venue quotes for every allowed pair (USDC with XLM and each market coin, both ways) at a reference amount worth
+// BOARD_REF_USDC, kept warm in the background at background priority: pairs with an order near its limit on every
+// ledger, pairs with any open order every 2 ledgers, the rest every BOARD_COLD_LEDGERS; at most BOARD_MAX_QUOTES
+// quotes per ledger. A fill up to BOARD_FAST_MULT times the reference amount then uses the board's best venue as a
+// single leg: one quote at the real amount (its minimum output from that quote), no route search.
+const BOARD_ON = String(cfg.BOARD || "on").toLowerCase() !== "off";
+const BOARD_REF_USDC = Math.max(1, Number(cfg.BOARD_REF_USDC || 20));
+const BOARD_FAST_MULT = Math.max(1, Number(cfg.BOARD_FAST_MULT || 5));
+const BOARD_MAX_AGE_SEC = Math.max(10, Number(cfg.BOARD_MAX_AGE_SEC || 90));
+const BOARD_COLD_LEDGERS = Math.max(2, Number(cfg.BOARD_COLD_LEDGERS || 12));
+const BOARD_MAX_QUOTES = Math.max(1, Number(cfg.BOARD_MAX_QUOTES || 10));
 // ----- adaptive scan interval (SCAN_MODE=ledger) -----
 // While no open order is within SCAN_NEAR_PCT percent of its limit (and none can cross, none is due), a full scan
 // runs only every SCAN_IDLE_SEC; between them only the order events are read on each ledger (2 requests), and a new
@@ -211,7 +227,9 @@ const MAX_FEE_XLM_PER_ROUND = Number(cfg.MAX_FEE_XLM_PER_ROUND || 5);
 // The most one transaction may cost in total (inclusion + resource fee, XLM); a dearer one is not sent.
 const MAX_FEE_XLM = Number(cfg.MAX_FEE_XLM || 2);
 // The inclusion fee bid: this percentile of recent Soroban inclusion fees (getFeeStats), never below BASE_FEE.
-const FEE_PERCENTILE = String(cfg.FEE_PERCENTILE || "p70");
+// p90 (was p70): a little headroom so a fill gets into the very next ledger; on an uncongested network every
+// percentile is the base fee anyway, and MAX_FEE_XLM still caps the total.
+const FEE_PERCENTILE = String(cfg.FEE_PERCENTILE || "p90");
 // Only one keeper per key: a lock file holding the PID (taken over if that process is gone).
 const LOCK_FILE = cfg.KEEPER_LOCK_FILE || path.join(here, "keeper.lock");
 for (const k of ["FACTORY", "USDC", "XLM", "ROUTER", "KEEPER_SECRET"]) {
@@ -227,6 +245,15 @@ const { FACTORY, USDC, XLM, ROUTER } = cfg;
 const MARKET_FACTORIES = String(cfg.MARKETS || "").split(",").map((x) => x.split(":")[2]).filter(Boolean);
 const FACTORIES = [...new Set([FACTORY, cfg.FACTORY_SELL, ...MARKET_FACTORIES, ...String(cfg.OLD_FACTORIES || "").split(",")].filter(Boolean).map((s) => s.trim()).filter(Boolean))];
 const SYM = { [USDC]: "USDC", [XLM]: "XLM" };
+// The coins of the extra markets (MARKETS=SYMBOL:token:factory,...): quoted against USDC on the price board.
+const MARKET_TOKENS = [];
+for (const m of String(cfg.MARKETS || "").split(",")) {
+  const [symbol, token] = m.split(":").map((x) => (x || "").trim());
+  if (token && token !== USDC && !MARKET_TOKENS.includes(token)) {
+    MARKET_TOKENS.push(token);
+    if (symbol && !SYM[token]) SYM[token] = symbol;
+  }
+}
 const sym = (a) => SYM[a] || short(a);
 const kp = Keypair.fromSecret(cfg.KEEPER_SECRET);
 const server = makeServer(RPC_URLS);
@@ -394,11 +421,16 @@ function spreadFailed(idx, lim, e, tookMs) {
 
 /** Waits for this server's turn under its rate limit (time spent here never counts towards the RPC timeout). */
 async function rpcTurn(lim) {
-  // Background work yields to the fill path only when this server is actually congested (a wait for its rate limit)
-  // and a fill-path request is in flight; at most 1 s, and never while the watchdog has the fast paths off.
-  // (Before: up to 3 s for EVERY background request whenever any fill-path request was in flight anywhere.)
+  // Background work (sweep, balance, vault list, TTL, workers, the price board) takes a token only when one is free
+  // right now: it never builds the queue a fill-path request would have to wait behind. After 10 s it queues anyway.
   if (rpcLowCtx.getStore() && !loopWatch.safe()) {
-    for (let i = 0; i < 10 && rpcHighInFlight > 0 && lim.bucket.peek() > 0; i++) await sleep(100);
+    const until = Date.now() + 10_000;
+    while (Date.now() < until) {
+      const now = Date.now();
+      lim.bucket.setRate(lim.aimd.rate(now), now);
+      if (lim.bucket.tryTake(now)) return;
+      await sleep(Math.min(250, Math.max(50, lim.bucket.peek(now))));
+    }
   }
   for (let i = 0; i < 5; i++) {
     const now = Date.now();
@@ -640,6 +672,9 @@ let feeStatsCache = { at: 0, fee: Number(BASE_FEE) };
 /** The inclusion fee to bid now (stroops): from getFeeStats, kept for 30 s; BASE_FEE when the stats cannot be read. */
 async function inclusionFee() {
   if (Date.now() - feeStatsCache.at < 30_000) return feeStatsCache.fee;
+  return fetchInclusionFee();
+}
+async function fetchInclusionFee() {
   let fee = Number(BASE_FEE);
   try {
     fee = inclusionFeeFrom(await server.getFeeStats(), { base: Number(BASE_FEE), percentile: FEE_PERCENTILE, max: MAX_FEE_STROOPS });
@@ -647,6 +682,7 @@ async function inclusionFee() {
   feeStatsCache = { at: Date.now(), fee };
   return fee;
 }
+let feeRefreshing = false;
 
 let budgetSaidAt = 0;
 /** A fee budget is used up: said in the log at most every 10 minutes, on Telegram at most once an hour. */
@@ -2045,6 +2081,113 @@ async function venueRoute(fill, tin, tout, forceShare = null, only = null, need 
   }
 }
 
+// ----- price board -----
+function boardSummary(now) {
+  const entries = [...board.values()];
+  const fresh = entries.filter((e) => e.best && now - e.at <= BOARD_MAX_AGE_SEC * 1000).length;
+  const oldest = entries.length ? Math.round((now - Math.min(...entries.map((e) => e.at))) / 1000) : null;
+  return { directions: 2 * (1 + MARKET_TOKENS.length), quoted: entries.length, fresh, oldest_sec: oldest, quotes_total: boardQuotes };
+}
+const board = new Map(); // "tin|tout" -> { ref, at, ledger, best: { label, q }, n (sources), quotes }
+let boardBusy = false;
+let boardQuotes = 0; // quotes asked for the board (for status.json)
+
+/** The reference amount of `tin` for the board: BOARD_REF_USDC worth of it (from the USDC -> tin entry). */
+function boardRef(tin) {
+  if (tin === USDC) return BigInt(Math.round(BOARD_REF_USDC * 1e7));
+  const fwd = board.get(`${USDC}|${tin}`);
+  return fwd && fwd.best && Date.now() - fwd.at < 10 * 60_000 ? fwd.best.q : null;
+}
+
+/** Quotes every source of one pair direction at the reference amount and keeps the best one. */
+async function refreshBoard(tin, tout) {
+  const ref = boardRef(tin);
+  if (!ref || ref <= 0n) return;
+  const sources = await sourcesFor(tin, tout);
+  if (!sources.length) {
+    board.set(`${tin}|${tout}`, { ref, at: Date.now(), ledger: lastLedger || latestCache.seq, best: null, n: 0, quotes: [] });
+    return;
+  }
+  const qs = await Promise.all(sources.map((src) => src.quote(ref).catch(() => null)));
+  boardQuotes += sources.length;
+  const quotes = sources.map((src, i) => [src.label, qs[i]]);
+  const best = bestQuote(quotes);
+  board.set(`${tin}|${tout}`, { ref, at: Date.now(), ledger: lastLedger || latestCache.seq, best, n: sources.length, quotes });
+  // The best venue's way of taking the token (an auth template, read once and kept 6 h) is learned now, not at fill time.
+  if (best) {
+    const src = sources.find((x) => x.label === best.label);
+    if (src && !src.soroswap) await src.step(ref, 0n).catch(() => null);
+  }
+}
+
+/** The pair directions of the board with their priority: hot (an order near its limit), active (an open order), cold. */
+function boardDirections() {
+  const hot = new Set();
+  const active = new Set();
+  for (const [v, st] of book) {
+    const pc = pairOf.get(v);
+    if (!pc || !st.orders) continue;
+    for (const id of st.open) {
+      const o = st.orders.get(id);
+      if (!o) continue;
+      const k = `${pc.v7 ? String(o.sell) : pc.tin}|${pc.v7 ? String(o.buy) : pc.tout}`;
+      active.add(k);
+      const ok = `${v}:${id}`;
+      if (proximity.checked.has(ok) && !proximity.far.has(ok)) hot.add(k);
+    }
+  }
+  const dirs = [];
+  for (const t of [XLM, ...MARKET_TOKENS]) {
+    for (const [tin, tout] of [
+      [USDC, t],
+      [t, USDC],
+    ]) {
+      const key = `${tin}|${tout}`;
+      const e = board.get(key);
+      dirs.push({ key, tin, tout, priority: hot.has(key) ? "hot" : active.has(key) ? "active" : "cold", lastLedger: e ? e.ledger : 0, cost: e ? Math.max(1, e.n) : 3 });
+    }
+  }
+  return dirs;
+}
+
+/** Once per ledger (main loop): refreshes what is due on the board, in the background, at background priority. */
+function boardTick() {
+  if (!BOARD_ON || !VENUES || boardBusy || Date.now() < venueState.offUntil) return;
+  const pick = boardPlan(boardDirections(), { ledger: lastLedger || latestCache.seq, maxQuotes: BOARD_MAX_QUOTES, coldEvery: BOARD_COLD_LEDGERS });
+  if (!pick.length) return;
+  boardBusy = true;
+  low(async () => {
+    // forward directions (from USDC) first: the reverse ones take their reference amount from them
+    for (const d of pick.filter((x) => x.tin === USDC)) await refreshBoard(d.tin, d.tout).catch(() => {});
+    await Promise.all(pick.filter((x) => x.tin !== USDC).map((d) => refreshBoard(d.tin, d.tout).catch(() => {})));
+  })
+    .catch(() => {})
+    .finally(() => {
+      boardBusy = false;
+    });
+}
+
+/**
+ * A fill small enough for the board (see fastRouteOk): the board's best venue as a single leg. One quote at the
+ * real amount; the leg's minimum output from that quote (never below what the vault's limit needs). null when the
+ * board has no fresh entry, the fill is too large, or the venue cannot meet the limit now: the route search runs.
+ */
+async function boardRoute(fill, tin, tout, need) {
+  if (!BOARD_ON || !VENUES) return null;
+  const e = board.get(`${tin}|${tout}`);
+  if (!fastRouteOk(e, fill, { maxAgeMs: BOARD_MAX_AGE_SEC * 1000, mult: BOARD_FAST_MULT })) return null;
+  const sources = await sourcesFor(tin, tout);
+  const src = sources.find((x) => x.label === e.best.label);
+  if (!src) return null;
+  const q = await src.quote(fill);
+  if (q === null || q <= 0n) return null;
+  const mins = splitMins([q], need, SLIPPAGE_BPS);
+  if (!mins) return null;
+  const step = await src.step(fill, mins[0]);
+  if (!step) return null;
+  return { q, route: xdr.ScVal.scvVec([step]), text: `${src.label} (price board)` };
+}
+
 // pair + fill size class -> the shape of the last best route: { kind: "split", labels, shares } | { kind: "via", mid, l1, l2 }
 const routeShapes = new Map();
 /**
@@ -2270,6 +2413,8 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
 
   // If even the smallest fill does not meet the limit, larger ones will not either (a larger trade gets a worse price
   // in the pool): a waiting order costs one price query per ledger.
+  // The price board's single-leg route for the largest size, started now in parallel with the Soroswap quote below.
+  const boardFirst = useVenues ? boardRoute(sizes[0], tin, tout, minOut(sizes[0], limit)).catch(() => null) : null;
   const rSmall = await bestRoute(smallest, tin, tout, vias);
   // Without a Soroswap quote the order can still fill elsewhere when other venues are in play.
   const qSmall = rSmall ? rSmall.q : useVenues ? 0n : null;
@@ -2299,9 +2444,11 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
   let note = "";
   let rejected = null; // the first fill the contract rejected (smaller ones are tried in the same round)
   for (const fill of sizes) {
-    const route = fill === smallest ? rSmall : await bestRoute(fill, tin, tout, vias);
-    const qSoro = route ? route.q : useVenues ? 0n : null;
-    const via = route ? route.via : null;
+    const fromBoard = fill === sizes[0] && boardFirst ? await boardFirst : null;
+    // With a board route the vault's own route is only quoted if the board route is refused (below).
+    let route = fill === smallest ? rSmall : fromBoard ? null : await bestRoute(fill, tin, tout, vias);
+    let qSoro = route ? route.q : useVenues ? 0n : null;
+    let via = route ? route.via : null;
     if (qSoro === null) {
       log(`${tag} no price available`);
       return "error";
@@ -2309,7 +2456,7 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
     // Version 13 vaults fill through our own router (the filler contract): the best route over every pool of
     // every venue, with no venue preferred. The vault's built-in single-venue route (`execute`) is only the
     // fallback: when the router has no route, when its route is refused, or when that built-in route pays more.
-    let alt = useVenues ? await venueRoute(fill, tin, tout, null, null, minOut(fill, limit)) : null;
+    let alt = fromBoard || (useVenues ? await venueRoute(fill, tin, tout, null, null, minOut(fill, limit)) : null);
     if (alt && alt.q < qSoro) alt = null;
     let q = alt ? alt.q : qSoro;
     if (q < minOut(fill, limit)) {
@@ -2386,6 +2533,12 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
         log(`${tag} ${why}; trying the vault's built-in route`);
       }
       alt = null;
+      if (!route && fill !== smallest) {
+        // the board route was refused: the vault's own route is quoted now
+        route = await bestRoute(fill, tin, tout, vias);
+        qSoro = route ? route.q : 0n;
+        via = route ? route.via : null;
+      }
       q = qSoro;
       if (q < minOut(fill, limit)) {
         note = note || priceNoteFor(tin, tout, fill, q, limit);
@@ -2621,7 +2774,7 @@ const crossKey = (a, b) => (a.key < b.key ? `x:${a.key}|${b.key}` : `x:${b.key}|
 // CROSS_MAX_MS. Where it stops, the next scan goes on (rotating vault cursor and order offset), so the pool pass,
 // the heartbeat and TTL upkeep always get their turn.
 const crossState = { cursor: 0, offset: 0, lastCut: 0 };
-async function crossPass(vaults) {
+async function crossPass(vaults, maxMs = CROSS_MAX_MS) {
   crossedNow.clear();
   if (!CROSS) return 0;
   const now = Math.floor(Date.now() / 1000);
@@ -2659,7 +2812,7 @@ async function crossPass(vaults) {
   if (list.length < 2) return 0;
   const used = new Set();
   const skipA = new Set(); // the network did not take a cross for this order: its other partners wait for the next ledger
-  const budget = new WorkBudget({ pairs: CROSS_MAX_PAIRS, quotes: CROSS_MAX_QUOTES, ms: CROSS_MAX_MS });
+  const budget = new WorkBudget({ pairs: CROSS_MAX_PAIRS, quotes: CROSS_MAX_QUOTES, ms: maxMs });
   let done = 0;
   let lastIndex = null;
   let cut = false;
@@ -2920,7 +3073,8 @@ async function scan() {
   loopWatch.stage("scan: crossing");
   // 2) Opposite orders that can fill each other are crossed first (version 10 vaults), with no pool in between.
   try {
-    if (!budgetBlock) filled += 2 * (await crossPass(vaults));
+    // With a new order waiting, crossing gets at most 0.8 s: the new order is filled first, crossing goes on next ledger.
+    if (!budgetBlock) filled += 2 * (await crossPass(vaults, urgent.size ? Math.min(800, CROSS_MAX_MS) : CROSS_MAX_MS));
   } catch (e) {
     log(`ERROR crossing: ${e.message}`);
   }
@@ -3051,6 +3205,7 @@ function writeStatus() {
           fill_latency: fillStats.summary(),
           last_fill_timing: lastFillTiming,
           ledger_stream: LEDGER_STREAM ? (ledgerStreamUp() ? "up" : "down (asking the RPC)") : "off",
+          price_board: BOARD_ON && VENUES ? boardSummary(now) : "off",
           loop_stage: loopWatch.stageName,
           loop_stalls: loopWatch.stalls,
           fast_paths: loopWatch.safe() ? `off until ${new Date(loopWatch.safeUntil).toISOString()} (watchdog)` : "on",
@@ -3158,7 +3313,8 @@ async function main() {
   log(`keeper started: ${kp.publicKey()} factories=${FACTORIES.map(short).join(",")} rpc=${RPC_URLS.join(" | ")}`);
   log(
     `fill latency: ledger stream ${LEDGER_STREAM ? HORIZON_URL : "off"}, reads spread over the RPC servers ${RPC_SPREAD_READS ? "on" : "off"}, ` +
-      `result looked up ${LEDGER_STREAM ? "after each ledger" : `every ${TX_POLL_MS} ms`}, prepared route shapes ${ROUTE_SHAPE_SEC} s; ` +
+      `result looked up ${LEDGER_STREAM ? "after each ledger" : `every ${TX_POLL_MS} ms`}, prepared route shapes ${ROUTE_SHAPE_SEC} s, ` +
+      `price board ${BOARD_ON && VENUES ? `on (${2 * (1 + MARKET_TOKENS.length)} directions, ${BOARD_REF_USDC} USDC reference, single leg up to ${BOARD_FAST_MULT}x, <= ${BOARD_MAX_QUOTES} quotes/ledger)` : "off"}; ` +
       `each fill logs "fill timing: ..."`,
   );
   log(
@@ -3258,6 +3414,16 @@ async function main() {
       if (failedScansInRow >= 3) {
         await notify(`${failedScansInRow} scans failed in a row: ${e.message}`, { topic: "scan", everySec: 3600 });
       }
+    }
+    boardTick(); // the price board, in the background
+    // The inclusion fee is refreshed here, in the background, so a fill never waits for getFeeStats.
+    if (Date.now() - feeStatsCache.at > 20_000 && !feeRefreshing) {
+      feeRefreshing = true;
+      low(() => fetchInclusionFee())
+        .catch(() => {})
+        .finally(() => {
+          feeRefreshing = false;
+        });
     }
     // One-time venue notes are said again once a day (and the set cannot grow without end).
     if (Date.now() - saidResetAt > 24 * 3600_000) {

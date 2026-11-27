@@ -337,6 +337,16 @@ export class TokenBucket {
     return Math.max(0, Math.ceil(Math.max(this.at, now) + (Math.max(0, -after) / this.rate) * 1000 - now));
   }
 
+  /** Takes a token only if one is free right now (no waiting, no debt): background work never queues ahead. */
+  tryTake(now = Date.now()) {
+    this._refill(now);
+    if (this.tokens >= 1 && this.at <= now) {
+      this.tokens -= 1;
+      return true;
+    }
+    return false;
+  }
+
   /** Nothing goes out before `until`, and no tokens build up meanwhile (after a 429: no burst when it ends). */
   drain(until) {
     this.tokens = Math.min(this.tokens, 0);
@@ -858,4 +868,56 @@ export class LoopWatch {
     this.safeUntil = at + this.safeMs;
     return { stage: this.stageName, stalledMs: d };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Price board: venue quotes for every allowed pair, kept warm ahead of the orders
+// ---------------------------------------------------------------------------
+
+const BOARD_RANK = { hot: 0, active: 1, cold: 2 };
+
+/**
+ * Which pair directions to quote again on this ledger. dirs: [{ key, priority: "hot" | "active" | "cold",
+ * lastLedger (0 = never), cost (quotes it takes) }]. Due: hot every ledger, active every `activeEvery`, cold every
+ * `coldEvery` (never quoted: due at once). The due ones go hot first, then the most overdue, while their cost fits
+ * in `maxQuotes` (one that alone is dearer than the budget still goes when nothing else was picked).
+ */
+export function boardPlan(dirs, { ledger, maxQuotes = 10, activeEvery = 2, coldEvery = 12 } = {}) {
+  const every = { hot: 1, active: activeEvery, cold: coldEvery };
+  const due = dirs
+    .filter((d) => !d.lastLedger || ledger - d.lastLedger >= (every[d.priority] ?? coldEvery))
+    .map((d) => ({ ...d, overdue: d.lastLedger ? ledger - d.lastLedger - (every[d.priority] ?? coldEvery) : Infinity }))
+    .sort((a, b) => (BOARD_RANK[a.priority] ?? 2) - (BOARD_RANK[b.priority] ?? 2) || b.overdue - a.overdue);
+  const pick = [];
+  let used = 0;
+  for (const d of due) {
+    const c = Math.max(1, d.cost || 1);
+    if (used + c > maxQuotes && pick.length) continue;
+    pick.push(d);
+    used += c;
+  }
+  return pick;
+}
+
+/** The best quote among sources: [[label, quote|null], ...] -> { label, q } or null. */
+export function bestQuote(quotes) {
+  let best = null;
+  for (const [label, q] of quotes) {
+    if (q === null || q === undefined) continue;
+    const v = BigInt(q);
+    if (v > 0n && (!best || v > best.q)) best = { label, q: v };
+  }
+  return best;
+}
+
+/**
+ * May a fill use the board's best venue as a single leg, without a route search? Only with a fresh entry (younger
+ * than maxAgeMs), a best venue, and a fill no larger than `mult` times the board's reference amount (larger fills
+ * move the price enough that a split over pools can pay more).
+ */
+export function fastRouteOk(entry, fill, { now = Date.now(), maxAgeMs = 90_000, mult = 5 } = {}) {
+  if (!entry || !entry.best || !entry.ref || entry.ref <= 0n) return false;
+  if (now - entry.at > maxAgeMs) return false;
+  const f = BigInt(fill);
+  return f > 0n && f <= entry.ref * BigInt(Math.max(1, Math.round(mult)));
 }
