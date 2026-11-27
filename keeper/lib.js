@@ -921,3 +921,138 @@ export function fastRouteOk(entry, fill, { now = Date.now(), maxAgeMs = 90_000, 
   const f = BigInt(fill);
   return f > 0n && f <= entry.ref * BigInt(Math.max(1, Math.round(mult)));
 }
+/**
+ * How a fill may use the price board: "board" (a fresh entry: its best venue as a single leg, one quote),
+ * "quick" (no entry, or a stale one: every venue of the pair quoted ONCE at the real amount, in parallel, and the best
+ * one as a single leg; no route search), or null (too large for a single leg: the route search runs).
+ * The size limit is `mult` times the reference amount: the entry's own (any age), else `refHint` (the reference
+ * amount known from the other direction); with neither the fill is taken as small (a new coin with no board yet).
+ */
+export function boardMode(entry, fill, { now = Date.now(), maxAgeMs = 90_000, mult = 5, refHint = null } = {}) {
+  const f = BigInt(fill);
+  if (f <= 0n) return null;
+  const ref = entry && entry.ref > 0n ? entry.ref : refHint && refHint > 0n ? refHint : null;
+  if (ref && f > ref * BigInt(Math.max(1, Math.round(mult)))) return null;
+  if (entry && entry.best && entry.ref > 0n && now - entry.at <= maxAgeMs) return "board";
+  return "quick";
+}
+
+/**
+ * The same signed transaction sent to several RPC servers at once (same hash: it can be applied once at most).
+ * tasks[i]: a promise of the i-th server's sendTransaction answer (index 0 = the usual server). Resolves with the
+ * first answer that says the network took it (PENDING, or DUPLICATE: already queued through another server). If
+ * none does, it waits for every answer (but at most `graceMs` after the first one) and gives the first server's
+ * answer if it has one, else any answer; it throws only when every server threw.
+ * Resolves { res, idx, answers } (answers: how many servers had answered by then).
+ */
+export function firstAccepted(tasks, { graceMs = 3000, accepted = (r) => r && (r.status === "PENDING" || r.status === "DUPLICATE") } = {}) {
+  return new Promise((resolve, reject) => {
+    const n = tasks.length;
+    if (!n) return reject(new Error("no server to send to"));
+    const got = new Array(n).fill(undefined); // { ok, value } | { ok: false, error }
+    let settled = 0;
+    let done = false;
+    let timer = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const answered = got.map((g, i) => [g, i]).filter(([g]) => g && g.ok);
+      const pick = answered.find(([, i]) => i === 0) || answered[0];
+      if (pick) return resolve({ res: pick[0].value, idx: pick[1], answers: settled });
+      const err = got.find((g) => g && !g.ok);
+      reject(err ? err.error : new Error("no server answered"));
+    };
+    tasks.forEach((p, i) => {
+      Promise.resolve(p).then(
+        (value) => {
+          if (done) return;
+          got[i] = { ok: true, value };
+          settled++;
+          if (accepted(value)) {
+            done = true;
+            clearTimeout(timer);
+            return resolve({ res: value, idx: i, answers: settled });
+          }
+          if (settled === n) return finish();
+          if (!timer) timer = setTimeout(finish, graceMs);
+        },
+        (error) => {
+          if (done) return;
+          got[i] = { ok: false, error };
+          settled++;
+          if (settled === n) return finish();
+          // a server that threw is no answer: the others are still waited for (each has its own timeout)
+        },
+      );
+    });
+  });
+}
+
+/**
+ * Which source announces a new ledger first: Horizon's ledger stream or the RPC (getLatestLedger). seen(seq,
+ * source, at, closedAt) is called for every sighting (closedAt: the ledger's close time if the source gives it, ms;
+ * Horizon gives it to the second). summary() over the ledgers since the last reset: how often each source was first,
+ * its delay after the close (p50/p90; the close time is whole seconds, so this reads up to 1 s high), and by how
+ * much the RPC came before (+) or after (-) the stream when both saw a ledger.
+ */
+export class LedgerRace {
+  constructor({ keep = 400 } = {}) {
+    this.keep = keep;
+    this.ledgers = new Map(); // seq -> { stream, rpc, closedAt }
+    this.recent = []; // the last `keep` ledgers both sources saw: rpc - stream (ms)
+  }
+  seen(seq, source, at, closedAt = null) {
+    if (!(seq > 0) || (source !== "stream" && source !== "rpc")) return;
+    let e = this.ledgers.get(seq);
+    if (!e) {
+      e = { stream: null, rpc: null, closedAt: null };
+      this.ledgers.set(seq, e);
+      if (this.ledgers.size > this.keep) this.ledgers.delete(this.ledgers.keys().next().value);
+    }
+    if (closedAt && !e.closedAt) e.closedAt = closedAt;
+    if (e[source] !== null) return; // only the first sighting counts
+    e[source] = at;
+    if (e.stream !== null && e.rpc !== null) {
+      this.recent.push(e.stream - e.rpc);
+      if (this.recent.length > this.keep) this.recent.shift();
+    }
+  }
+  /** Has the RPC been first often enough lately (>= minShare of the last `window` ledgers both saw) to poll it? */
+  rpcUseful({ window = 60, minShare = 0.1, minSamples = 20 } = {}) {
+    const r = this.recent.slice(-window);
+    if (r.length < minSamples) return true; // not known yet: keep measuring
+    return r.filter((d) => d > 0).length / r.length >= minShare;
+  }
+  summary() {
+    const all = [...this.ledgers.values()];
+    const both = all.filter((e) => e.stream !== null && e.rpc !== null);
+    const lead = both.map((e) => e.stream - e.rpc).sort((a, b) => a - b);
+    const delay = (src) =>
+      all
+        .filter((e) => e[src] !== null && e.closedAt)
+        .map((e) => e[src] - e.closedAt)
+        .sort((a, b) => a - b);
+    const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * arr.length))] : null);
+    const ds = delay("stream");
+    const dr = delay("rpc");
+    return {
+      ledgers: all.length,
+      both: both.length,
+      stream_first: both.filter((e) => e.stream < e.rpc).length,
+      rpc_first: both.filter((e) => e.rpc < e.stream).length,
+      only_stream: all.filter((e) => e.stream !== null && e.rpc === null).length,
+      only_rpc: all.filter((e) => e.rpc !== null && e.stream === null).length,
+      rpc_lead_p50_ms: q(lead, 0.5),
+      rpc_lead_p10_ms: q(lead, 0.1),
+      rpc_lead_p90_ms: q(lead, 0.9),
+      stream_after_close_p50_ms: q(ds, 0.5),
+      stream_after_close_p90_ms: q(ds, 0.9),
+      rpc_after_close_p50_ms: q(dr, 0.5),
+      rpc_after_close_p90_ms: q(dr, 0.9),
+    };
+  }
+  reset() {
+    this.ledgers.clear();
+  }
+}

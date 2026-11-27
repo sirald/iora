@@ -108,9 +108,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(here, "..", "keeper.js"), "utf8").replace(/\r\n/g, "\n");
 const start = src.indexOf("// ----- price board -----\nfunction boardSummary");
 const end = src.indexOf("// pair + fill size class", start);
-const boardCode = src.slice(start, end).replace(/^const board = /m, "var board = ").replace(/^let (boardBusy|boardQuotes) = /gm, "var $1 = ");
+const boardCode = src.slice(start, end).replace(/^const (board|boardWant) = /gm, "var $1 = ").replace(/^let (\w+) = /gm, "var $1 = ");
 
-function sandbox({ sources }) {
+function sandbox({ sources, quick = true, allowed = {}, symbols = {} }) {
   const calls = [];
   const USDC = "USDC";
   const XLM = "XLM";
@@ -132,6 +132,19 @@ function sandbox({ sources }) {
     USDC,
     XLM,
     MARKET_TOKENS: [BTC],
+    PAIR_TOKENS: [],
+    allowedTokens: new Set(),
+    FACTORIES: Object.keys(allowed),
+    SYM: { USDC: "USDC", XLM: "XLM", BTC: "BTC" },
+    sym: (a) => a,
+    log: (line) => calls.push(`log ${line}`),
+    read: async (contract, method) => {
+      calls.push(`read ${contract} ${method}`);
+      if (method === "allowed_tokens") return allowed[contract] ? { ok: true, value: allowed[contract] } : { ok: false, error: "no such function" };
+      if (method === "symbol") return symbols[contract] ? { ok: true, value: symbols[contract] } : { ok: false };
+      return { ok: false };
+    },
+    BOARD_QUICK: quick,
     BOARD_ON: true,
     VENUES: true,
     BOARD_REF_USDC: 20,
@@ -201,11 +214,63 @@ describe("price board in keeper.js (sandbox)", () => {
     assert.equal(await ctx.boardRoute(500_000_000n, "USDC", "XLM", 5_000_000_001n), null);
   });
 
-  test("too large (over 5x) or no entry: no board route (the route search runs)", async () => {
+  test("too large (over 5x): no board route (the route search runs)", async () => {
     const { ctx } = sandbox({ sources });
     await ctx.refreshBoard("USDC", "XLM");
     assert.equal(await ctx.boardRoute(1_000_000_001n, "USDC", "XLM", 0n), null);
-    assert.equal(await ctx.boardRoute(1n, "USDC", "BTC", 0n), null);
+    // no entry yet, but USDC in: the size limit is known (5 x 20 USDC)
+    assert.equal(await ctx.boardRoute(1_000_000_001n, "USDC", "BTC", 0n), null);
+  });
+
+  test("no board entry: one quick round of quotes at the real amount, best venue as a single leg, no search", async () => {
+    const { ctx, calls } = sandbox({ sources });
+    const r = await ctx.boardRoute(100_000_000n, "USDC", "XLM", 0n); // 10 USDC, the pair never quoted
+    assert.equal(r.text, "Aquarius 1a2b (price board, quick quote)");
+    assert.equal(r.q, 1_000_000_000n);
+    assert.deepEqual(calls.filter((c) => c.startsWith("quote")).sort(), ["quote Aquarius 1a2b 100000000", "quote Soroswap 100000000"]);
+    assert.deepEqual(calls.filter((c) => c.startsWith("step")), ["step Aquarius 1a2b 100000000 min 995000000"]);
+    assert.ok(ctx.boardWant.has("USDC|XLM"), "the direction is refreshed on the next tick");
+    assert.equal(ctx.boardSummary(Date.now()).quick_routes, 1);
+    // the next tick treats it as hot and refreshes it first
+    ctx.boardTick();
+    await new Promise((res) => setTimeout(res, 20));
+    assert.ok(ctx.board.get("USDC|XLM"));
+    assert.equal(ctx.boardWant.has("USDC|XLM"), false);
+  });
+
+  test("a stale entry: the quick quote too; BOARD_QUICK=off: no board route", async () => {
+    const { ctx } = sandbox({ sources });
+    await ctx.refreshBoard("USDC", "XLM");
+    ctx.board.get("USDC|XLM").at -= 91_000;
+    const r = await ctx.boardRoute(500_000_000n, "USDC", "XLM", 0n);
+    assert.match(r.text, /quick quote/);
+    const off = sandbox({ sources, quick: false });
+    assert.equal(await off.ctx.boardRoute(100_000_000n, "USDC", "XLM", 0n), null);
+  });
+
+  test("coin -> USDC with no entry at all: the quick quote (size unknown counts as small)", async () => {
+    const { ctx } = sandbox({ sources });
+    const r = await ctx.boardRoute(5_000n, "BTC", "USDC", 0n);
+    assert.equal(r.text, "Soroswap (price board, quick quote)");
+    assert.equal(r.q, 5_000_000n);
+  });
+
+  test("the factories' allowed tokens join the board, with their symbols; open-order pairs too", async () => {
+    const sources2 = { ...sources, "USDC|ETH": [["Soroswap", 0.01]], "ETH|USDC": [["Soroswap", 100]] };
+    const { ctx } = sandbox({ sources: sources2, allowed: { F1: ["USDC", "XLM", "BTC", "ETH"] }, symbols: { ETH: "ETH" } });
+    assert.equal(ctx.boardDirections().length, 4); // XLM and BTC (MARKETS), both ways
+    await ctx.refreshAllowed();
+    assert.deepEqual([...ctx.allowedTokens].sort(), ["BTC", "ETH", "XLM"]);
+    assert.equal(ctx.SYM.ETH, "ETH");
+    const keys = ctx.boardDirections().map((d) => d.key);
+    assert.equal(keys.length, 6);
+    assert.ok(keys.includes("USDC|ETH") && keys.includes("ETH|USDC"));
+    // an open order on a pair of two coins (no USDC): that pair is quoted too, as active
+    ctx.book.set("V", { orders: new Map([[1, { sell: "SOL", buy: "XLM" }]]), open: [1] });
+    ctx.pairOf.set("V", { v7: true });
+    const d = ctx.boardDirections().find((x) => x.key === "SOL|XLM");
+    assert.equal(d.priority, "active");
+    assert.ok(ctx.boardDirections().some((x) => x.key === "USDC|SOL"), "its reference amount comes from USDC -> SOL");
   });
 
   test("tick: the quote budget holds; what does not fit goes on the next ledger", async () => {

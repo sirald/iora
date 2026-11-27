@@ -47,10 +47,12 @@ import {
   WorkBudget,
   acquireLock,
   bestQuote,
+  boardMode,
   boardPlan,
   cometMaxPrice,
-  fastRouteOk,
   crossPairs,
+  firstAccepted,
+  LedgerRace,
   forgetOrder,
   inclusionFeeFrom,
   isBadSeq,
@@ -102,6 +104,7 @@ const cfg = {
   ...readEnv(path.join(root, "testnet/factory-sell.env")),
   ...readEnv(path.join(root, "testnet/old-factories.env")),
   ...readEnv(path.join(root, "testnet/markets.env")),
+  ...readEnv(path.join(root, "testnet/pairs.env")), // PAIRS=SYMBOL:token,... (the coins traded against USDC)
   ...readEnv(path.join(root, "testnet/batch.env")),
   ...readEnv(path.join(root, "testnet/filler.env")),
   ...readEnv(path.join(here, ".env")),
@@ -172,7 +175,8 @@ const LOOP_STALL_SEC = Math.max(5, Number(cfg.LOOP_STALL_SEC || 60));
 // 300 s (was 60: two orders on the same pair 165 s apart found the shape expired and searched again, ~8 s).
 const ROUTE_SHAPE_SEC = cfg.ROUTE_SHAPE_SEC === undefined || cfg.ROUTE_SHAPE_SEC === "" ? 300 : Math.max(0, Number(cfg.ROUTE_SHAPE_SEC) || 0);
 // ----- price board -----
-// Venue quotes for every allowed pair (USDC with XLM and each market coin, both ways) at a reference amount worth
+// Venue quotes for every allowed pair (USDC with XLM, each MARKETS / PAIRS coin and each token of the factories'
+// allowed_tokens, both ways; and any other pair an open order trades) at a reference amount worth
 // BOARD_REF_USDC, kept warm in the background at background priority: pairs with an order near its limit on every
 // ledger, pairs with any open order every 2 ledgers, the rest every BOARD_COLD_LEDGERS; at most BOARD_MAX_QUOTES
 // quotes per ledger. A fill up to BOARD_FAST_MULT times the reference amount then uses the board's best venue as a
@@ -181,7 +185,23 @@ const BOARD_ON = String(cfg.BOARD || "on").toLowerCase() !== "off";
 const BOARD_REF_USDC = Math.max(1, Number(cfg.BOARD_REF_USDC || 20));
 const BOARD_FAST_MULT = Math.max(1, Number(cfg.BOARD_FAST_MULT || 5));
 const BOARD_MAX_AGE_SEC = Math.max(10, Number(cfg.BOARD_MAX_AGE_SEC || 90));
-const BOARD_COLD_LEDGERS = Math.max(2, Number(cfg.BOARD_COLD_LEDGERS || 12));
+// 24 ledgers (~2 min; was 12): the board now covers every allowed coin, and a pair with no fresh entry gets one quick
+// quote at fill time instead of a route search (BOARD_QUICK), so idle pairs need not be kept as warm.
+const BOARD_COLD_LEDGERS = Math.max(2, Number(cfg.BOARD_COLD_LEDGERS || 24));
+// A fill whose pair has no fresh board entry: every venue of the pair quoted once at the real amount, in parallel,
+// and the best one as a single leg (no route search). BOARD_QUICK=off: the route search runs as before.
+const BOARD_QUICK = String(cfg.BOARD_QUICK || "on").toLowerCase() !== "off";
+// Each signed transaction is sent to every RPC server at once (same hash: it can be applied once at most); the first
+// server that takes it (PENDING) wins. RPC_SEND_ALL=off: the current server only (others on failure, as before).
+const RPC_SEND_ALL = String(cfg.RPC_SEND_ALL || "on").toLowerCase() !== "off";
+// Seeing a ledger close: Horizon's stream and the RPC (getLatestLedger) both, the first one wins. The RPC is asked
+// around the time the next ledger is due (from LEDGER_POLL_EARLY_MS before, every LEDGER_POLL_MS, at most
+// LEDGER_POLL_MAX times per ledger). LEDGER_RACE=auto: while the RPC is almost never first (< 10% of the last 60
+// ledgers both saw), it is asked only on every 6th ledger, to keep measuring. on: every ledger. off: no polling.
+const LEDGER_RACE = String(cfg.LEDGER_RACE || "auto").toLowerCase();
+const LEDGER_POLL_MS = Math.max(100, Number(cfg.LEDGER_POLL_MS || 250));
+const LEDGER_POLL_EARLY_MS = Math.max(0, Number(cfg.LEDGER_POLL_EARLY_MS || 500));
+const LEDGER_POLL_MAX = Math.max(1, Number(cfg.LEDGER_POLL_MAX || 6));
 const BOARD_MAX_QUOTES = Math.max(1, Number(cfg.BOARD_MAX_QUOTES || 10));
 // ----- adaptive scan interval (SCAN_MODE=ledger) -----
 // While no open order is within SCAN_NEAR_PCT percent of its limit (and none can cross, none is due), a full scan
@@ -254,6 +274,17 @@ for (const m of String(cfg.MARKETS || "").split(",")) {
     if (symbol && !SYM[token]) SYM[token] = symbol;
   }
 }
+// The coins of testnet/pairs.env (PAIRS=SYMBOL:token,...), the factories' allowed_tokens (read at start and every
+// 30 min) and every token of an open order: the price board covers all of them against USDC, both ways.
+const PAIR_TOKENS = [];
+for (const m of String(cfg.PAIRS || "").split(",")) {
+  const [symbol, token] = m.split(":").map((x) => (x || "").trim());
+  if (token && /^C[A-Z2-7]{55}$/.test(token) && token !== USDC && token !== XLM && !PAIR_TOKENS.includes(token)) {
+    PAIR_TOKENS.push(token);
+    if (symbol && !SYM[token]) SYM[token] = symbol;
+  }
+}
+const allowedTokens = new Set(); // from the factories' allowed_tokens
 const sym = (a) => SYM[a] || short(a);
 const kp = Keypair.fromSecret(cfg.KEEPER_SECRET);
 const server = makeServer(RPC_URLS);
@@ -406,6 +437,8 @@ let rpcHighInFlight = 0;
 const SPREAD_METHODS = new Set(["simulateTransaction", "getLedgerEntries"]);
 const SPREAD_TIMEOUT_MS = 3000;
 const low = (fn) => rpcLowCtx.run(true, fn);
+// Sends to every server (RPC_SEND_ALL): how many, and how often a copy (not the usual server) took it first.
+const sendAllStats = { sent: 0, firstByCopy: 0 };
 
 /** A spread read failed on server `idx`: leave it out of spread reads for 30 s, doubling up to 10 min; said once in 10 min. */
 function spreadFailed(idx, lim, e, tookMs) {
@@ -479,7 +512,7 @@ function makeServer(urls) {
         if (spreadIdx >= 0 && spreadIdx !== order[0]) order = [spreadIdx, ...order.filter((i) => i !== spreadIdx)];
       }
       for (const idx of order) {
-        const r = await callOn(idx, name, args, label, idx === spreadIdx && idx !== rpcPicker.cur);
+        const r = await callOn(idx, name, args, label, idx === spreadIdx && idx !== rpcPicker.cur ? "spread" : null);
         if (r.ok) return r.value;
         lastErr = r.error;
         if (!r.next) throw r.error;
@@ -494,7 +527,11 @@ function makeServer(urls) {
    * One server: waits for its rate limit, sends, and on HTTP 429 slows down and waits on the SAME server (Retry-After
    * when given). Returns { ok, value } or { ok: false, error, next } (next: try the next server).
    */
-  async function callOn(idx, name, args, label, spread = false) {
+  async function callOn(idx, name, args, label, mode = null) {
+    // mode "spread": a read sent to another server to use its capacity; "mirror": the same signed transaction sent to
+    // another server as well (sendTransactionAll). Neither moves the current server, whatever the answer.
+    const spread = mode === "spread";
+    const mirror = mode === "mirror";
     const lim = rpcLimits[idx];
     let tries429 = 0;
     for (;;) {
@@ -504,7 +541,7 @@ function makeServer(urls) {
       const ac = new AbortController();
       let timer;
       // A read spread to another server gives up early: it is only worth it while that server is quick.
-      const timeoutMs = spread ? Math.min(RPC_TIMEOUT_MS, SPREAD_TIMEOUT_MS) : RPC_TIMEOUT_MS;
+      const timeoutMs = spread ? Math.min(RPC_TIMEOUT_MS, SPREAD_TIMEOUT_MS) : mirror ? Math.min(RPC_TIMEOUT_MS, 5000) : RPC_TIMEOUT_MS;
       try {
         const res = await Promise.race([
           rpcCallCtx.run(ac.signal, () => servers[idx][name](...args)),
@@ -519,6 +556,7 @@ function makeServer(urls) {
         lim.in429 = 0;
         lim.latency.add(Date.now() - sentAt);
         if (!rpcLowCtx.getStore()) loopWatch.progress(); // background (TTL) requests do not count as main-loop progress
+        if (mirror) return { ok: true, value: res };
         if (spread) {
           // a read sent to another server to use its capacity: the current server stays the current one
           rpcPicker.consecutiveErrors = 0;
@@ -541,6 +579,16 @@ function makeServer(urls) {
         if (spread) {
           spreadFailed(idx, lim, e, Date.now() - sentAt);
           return { ok: false, error: e, next: true };
+        }
+        if (mirror) {
+          // the copy of a transaction for another server: a 429 slows that server down, nothing else; never retried
+          if (isRateLimited(e)) {
+            const now = Date.now();
+            rpcUsage.rateLimited(now);
+            lim.aimd.cut(now);
+            lim.bucket.drain(now + (retryAfterMs(e, now) ?? 1000));
+          }
+          return { ok: false, error: e, next: false };
         }
         if (isRateLimited(e)) {
           // Too many requests: slow this server down and wait; this is not a reason to leave it.
@@ -584,11 +632,37 @@ function makeServer(urls) {
     return new Account(address, entry.val.value.seqNum.toString());
   }
 
+  /**
+   * The same signed transaction to every server at once: the usual path (current server, the others on failure) and
+   * a copy to each other server. The first answer that says the network took it (PENDING / DUPLICATE) wins; an
+   * error from one server (DUPLICATE, ERROR, timeout) is no problem while another took it. Same hash everywhere: the
+   * network applies it once at most. Resolves the usual sendTransaction answer, plus `via` (the server's index).
+   */
+  async function sendTransactionAll(tx) {
+    if (urls.length < 2) return call("sendTransaction", [tx]);
+    const cur = rpcPicker.cur;
+    const others = urls.map((_, i) => i).filter((i) => i !== cur);
+    const label = rpcLabelCtx.getStore() || "sendTransaction";
+    const mirrors = others.map((idx) =>
+      callOn(idx, "sendTransaction", [tx], `${label} (copy)`, "mirror").then((r) => {
+        if (r.ok) return r.value;
+        throw r.error;
+      }),
+    );
+    const { res, idx } = await firstAccepted([call("sendTransaction", [tx]), ...mirrors], { graceMs: 1500 });
+    sendAllStats.sent++;
+    if (idx > 0) sendAllStats.firstByCopy++;
+    const r = Object.assign(Object.create(Object.getPrototypeOf(res) || Object.prototype), res);
+    r.via = idx === 0 ? cur : others[idx - 1];
+    return r;
+  }
+
   return new Proxy(
     {},
     {
       get(_, name) {
         if (name === "getAccount") return getAccount;
+        if (name === "sendTransactionAll") return sendTransactionAll;
         const v = servers[0][name];
         if (name === "then" || typeof name === "symbol" || (v !== undefined && typeof v !== "function")) return v;
         return (...args) => call(name, args);
@@ -775,7 +849,7 @@ async function sendAndFollow(tx, hash, maxFee) {
   let sent;
   for (let attempt = 0; ; attempt++) {
     try {
-      sent = await server.sendTransaction(tx);
+      sent = RPC_SEND_ALL ? await server.sendTransactionAll(tx) : await server.sendTransaction(tx);
       break;
     } catch (e) {
       await sleep(2000);
@@ -1294,7 +1368,12 @@ async function latestLedger(maxAgeMs = 0) {
   const raw = typeof server._getLatestLedger === "function" ? await server._getLatestLedger() : await server.getLatestLedger();
   const seq = Number(raw && raw.sequence);
   if (!Number.isInteger(seq) || seq <= 0) throw new Error("the RPC gave no latest ledger");
-  latestCache = { seq, at: Date.now() };
+  const now = Date.now();
+  // closeTime: unix seconds (newer RPCs); measured against when we saw it (see LedgerRace)
+  const closeSec = Number(raw && raw.closeTime);
+  ledgerRace.seen(seq, "rpc", now, Number.isFinite(closeSec) && closeSec > 0 ? closeSec * 1000 : null);
+  if (seq > latestCache.seq) latestCache = { seq, at: now };
+  if (seq > ledgerWatch.seq) onLedger(seq, false); // the RPC saw it first: wake whoever waits for a ledger
   return seq;
 }
 
@@ -2086,11 +2165,51 @@ function boardSummary(now) {
   const entries = [...board.values()];
   const fresh = entries.filter((e) => e.best && now - e.at <= BOARD_MAX_AGE_SEC * 1000).length;
   const oldest = entries.length ? Math.round((now - Math.min(...entries.map((e) => e.at))) / 1000) : null;
-  return { directions: 2 * (1 + MARKET_TOKENS.length), quoted: entries.length, fresh, oldest_sec: oldest, quotes_total: boardQuotes };
+  return {
+    directions: boardDirections().length,
+    coins: boardTokens().map(sym),
+    quoted: entries.length,
+    fresh,
+    oldest_sec: oldest,
+    quotes_total: boardQuotes,
+    quick_routes: boardQuickRoutes,
+  };
 }
 const board = new Map(); // "tin|tout" -> { ref, at, ledger, best: { label, q }, n (sources), quotes }
 let boardBusy = false;
 let boardQuotes = 0; // quotes asked for the board (for status.json)
+let boardQuickRoutes = 0; // fills routed with a quick quote (no fresh board entry)
+const boardWant = new Set(); // directions a fill just needed without a fresh entry: refreshed on the next tick
+let allowedAt = 0;
+let allowedBusy = false;
+
+/** The coins the board quotes against USDC: XLM, MARKETS, PAIRS and the factories' allowed tokens. */
+function boardTokens() {
+  const set = new Set([XLM, ...MARKET_TOKENS, ...PAIR_TOKENS, ...allowedTokens]);
+  set.delete(USDC);
+  return [...set];
+}
+
+/** Reads every factory's allowed_tokens (and the symbol of a coin not named yet); at start and every 30 min. */
+async function refreshAllowed() {
+  allowedAt = Date.now();
+  const added = [];
+  for (const f of FACTORIES) {
+    const r = await read(f, "allowed_tokens").catch(() => null);
+    if (!r || !r.ok || !Array.isArray(r.value)) continue; // an older factory without the list
+    for (const t of r.value.map(String)) {
+      if (t === USDC || allowedTokens.has(t)) continue;
+      allowedTokens.add(t);
+      added.push(t);
+    }
+  }
+  for (const t of added) {
+    if (SYM[t]) continue;
+    const r = await read(t, "symbol").catch(() => null);
+    if (r && r.ok && typeof r.value === "string" && r.value) SYM[t] = r.value;
+  }
+  if (added.length) log(`price board: allowed tokens ${added.map(sym).join(", ")} (now ${boardTokens().map(sym).join(", ")} against USDC)`);
+}
 
 /** The reference amount of `tin` for the board: BOARD_REF_USDC worth of it (from the USDC -> tin entry). */
 function boardRef(tin) {
@@ -2136,28 +2255,45 @@ function boardDirections() {
       if (proximity.checked.has(ok) && !proximity.far.has(ok)) hot.add(k);
     }
   }
+  for (const k of boardWant) hot.add(k);
   const dirs = [];
-  for (const t of [XLM, ...MARKET_TOKENS]) {
-    for (const [tin, tout] of [
-      [USDC, t],
-      [t, USDC],
-    ]) {
-      const key = `${tin}|${tout}`;
-      const e = board.get(key);
-      dirs.push({ key, tin, tout, priority: hot.has(key) ? "hot" : active.has(key) ? "active" : "cold", lastLedger: e ? e.ledger : 0, cost: e ? Math.max(1, e.n) : 3 });
-    }
+  const add = (tin, tout) => {
+    const key = `${tin}|${tout}`;
+    if (tin === tout || dirs.some((d) => d.key === key)) return;
+    const e = board.get(key);
+    dirs.push({ key, tin, tout, priority: hot.has(key) ? "hot" : active.has(key) ? "active" : "cold", lastLedger: e ? e.ledger : 0, cost: e ? Math.max(1, e.n) : 3 });
+  };
+  for (const t of boardTokens()) {
+    add(USDC, t);
+    add(t, USDC);
+  }
+  // any other pair an open order trades (a coin not in the lists yet, or two coins without USDC)
+  for (const k of active) {
+    const [tin, tout] = k.split("|");
+    if (tin !== USDC && tout !== USDC) add(USDC, tin); // its reference amount comes from the USDC -> tin entry
+    add(tin, tout);
   }
   return dirs;
 }
 
 /** Once per ledger (main loop): refreshes what is due on the board, in the background, at background priority. */
 function boardTick() {
-  if (!BOARD_ON || !VENUES || boardBusy || Date.now() < venueState.offUntil) return;
+  if (!BOARD_ON || !VENUES || Date.now() < venueState.offUntil) return;
+  if (!allowedBusy && Date.now() - allowedAt > 30 * 60_000) {
+    allowedBusy = true;
+    low(() => refreshAllowed())
+      .catch(() => {})
+      .finally(() => {
+        allowedBusy = false;
+      });
+  }
+  if (boardBusy) return;
   const pick = boardPlan(boardDirections(), { ledger: lastLedger || latestCache.seq, maxQuotes: BOARD_MAX_QUOTES, coldEvery: BOARD_COLD_LEDGERS });
   if (!pick.length) return;
   boardBusy = true;
   low(async () => {
     // forward directions (from USDC) first: the reverse ones take their reference amount from them
+    for (const d of pick) boardWant.delete(d.key);
     for (const d of pick.filter((x) => x.tin === USDC)) await refreshBoard(d.tin, d.tout).catch(() => {});
     await Promise.all(pick.filter((x) => x.tin !== USDC).map((d) => refreshBoard(d.tin, d.tout).catch(() => {})));
   })
@@ -2168,24 +2304,45 @@ function boardTick() {
 }
 
 /**
- * A fill small enough for the board (see fastRouteOk): the board's best venue as a single leg. One quote at the
- * real amount; the leg's minimum output from that quote (never below what the vault's limit needs). null when the
- * board has no fresh entry, the fill is too large, or the venue cannot meet the limit now: the route search runs.
+ * A fill small enough for a single leg (see boardMode). With a fresh board entry: the board's best venue, one quote
+ * at the real amount. Without one (a pair not on the board yet, or a stale entry): a quick quote, every venue of the
+ * pair asked once at the real amount, in parallel, and the best one taken; the direction is refreshed on the next
+ * tick. Either way the leg's minimum output comes from that real quote (never below what the vault's limit needs)
+ * and there is no route search. null when the fill is too large or the venue cannot meet the limit now: the route
+ * search runs.
  */
 async function boardRoute(fill, tin, tout, need) {
   if (!BOARD_ON || !VENUES) return null;
-  const e = board.get(`${tin}|${tout}`);
-  if (!fastRouteOk(e, fill, { maxAgeMs: BOARD_MAX_AGE_SEC * 1000, mult: BOARD_FAST_MULT })) return null;
+  const key = `${tin}|${tout}`;
+  const e = board.get(key);
+  const fwd = tin === USDC ? null : board.get(`${USDC}|${tin}`);
+  const refHint = tin === USDC ? BigInt(Math.round(BOARD_REF_USDC * 1e7)) : fwd && fwd.best ? fwd.best.q : null;
+  const mode = boardMode(e, fill, { maxAgeMs: BOARD_MAX_AGE_SEC * 1000, mult: BOARD_FAST_MULT, refHint });
+  if (!mode || (mode === "quick" && !BOARD_QUICK)) return null;
   const sources = await sourcesFor(tin, tout);
-  const src = sources.find((x) => x.label === e.best.label);
-  if (!src) return null;
-  const q = await src.quote(fill);
-  if (q === null || q <= 0n) return null;
+  let src = mode === "board" ? sources.find((x) => x.label === e.best.label) : null;
+  let q = src ? await src.quote(fill) : null;
+  let quick = false;
+  if (q === null || q <= 0n) {
+    // no fresh entry, or the board's venue cannot quote now: one round of quotes over every venue of the pair
+    if (!BOARD_QUICK) return null;
+    const rest = sources.filter((x) => x !== src);
+    if (!rest.length) return null;
+    const qs = await Promise.all(rest.map((x) => x.quote(fill).catch(() => null)));
+    boardQuotes += rest.length;
+    boardWant.add(key);
+    const best = bestQuote(rest.map((x, i) => [x.label, qs[i]]));
+    if (!best) return null;
+    src = rest.find((x) => x.label === best.label);
+    q = best.q;
+    quick = true;
+  }
   const mins = splitMins([q], need, SLIPPAGE_BPS);
   if (!mins) return null;
   const step = await src.step(fill, mins[0]);
   if (!step) return null;
-  return { q, route: xdr.ScVal.scvVec([step]), text: `${src.label} (price board)` };
+  if (quick) boardQuickRoutes++;
+  return { q, route: xdr.ScVal.scvVec([step]), text: `${src.label} (price board${quick ? ", quick quote" : ""})` };
 }
 
 // pair + fill size class -> the shape of the last best route: { kind: "split", labels, shares } | { kind: "via", mid, l1, l2 }
@@ -2432,7 +2589,9 @@ async function tryOrder(vault, o, ctx = { net: 0 }) {
       log(`the local price estimate was off for ${sym(tin)}->${sym(tout)} (local ${est}, network ${qSmall}); this pair is quoted over the network for 30 min`);
     }
   }
-  if (qSmall < minOut(smallest, limit)) {
+  // The board route (one quote at the largest size) already meets the limit: no need to ask other venues for the smallest.
+  const boardMeets = boardFirst && qSmall < minOut(smallest, limit) ? await boardFirst.then((b) => !!b && b.q >= minOut(sizes[0], limit)) : false;
+  if (qSmall < minOut(smallest, limit) && !boardMeets) {
     // Soroswap alone does not reach the limit; another venue might. The cheap near-spot estimate is asked first,
     // so that an order waiting far from its limit does not cost a full route search on every ledger.
     const top = useVenues ? await venueEst(smallest, tin, tout) : null;
@@ -3206,6 +3365,10 @@ function writeStatus() {
           last_fill_timing: lastFillTiming,
           ledger_stream: LEDGER_STREAM ? (ledgerStreamUp() ? "up" : "down (asking the RPC)") : "off",
           price_board: BOARD_ON && VENUES ? boardSummary(now) : "off",
+          // which source saw the ledgers first over the last 10 minutes (stream / RPC), and how long after the close
+          ledger_sources: lastLedgerRace || { ...ledgerRace.summary(), so_far: true },
+          last_ledger_seen_by: ledgerWatch.by || null,
+          send_all: RPC_SEND_ALL && RPC_URLS.length > 1 ? sendAllStats : "off",
           loop_stage: loopWatch.stageName,
           loop_stalls: loopWatch.stalls,
           fast_paths: loopWatch.safe() ? `off until ${new Date(loopWatch.safeUntil).toISOString()} (watchdog)` : "on",
@@ -3314,7 +3477,9 @@ async function main() {
   log(
     `fill latency: ledger stream ${LEDGER_STREAM ? HORIZON_URL : "off"}, reads spread over the RPC servers ${RPC_SPREAD_READS ? "on" : "off"}, ` +
       `result looked up ${LEDGER_STREAM ? "after each ledger" : `every ${TX_POLL_MS} ms`}, prepared route shapes ${ROUTE_SHAPE_SEC} s, ` +
-      `price board ${BOARD_ON && VENUES ? `on (${2 * (1 + MARKET_TOKENS.length)} directions, ${BOARD_REF_USDC} USDC reference, single leg up to ${BOARD_FAST_MULT}x, <= ${BOARD_MAX_QUOTES} quotes/ledger)` : "off"}; ` +
+      `price board ${BOARD_ON && VENUES ? `on (${boardTokens().map(sym).join(", ")} against USDC, both ways, more from the factories' allowed tokens; ${BOARD_REF_USDC} USDC reference, single leg up to ${BOARD_FAST_MULT}x, <= ${BOARD_MAX_QUOTES} quotes/ledger, idle pairs every ${BOARD_COLD_LEDGERS} ledgers, quick quote without a fresh entry ${BOARD_QUICK ? "on" : "off"})` : "off"}; ` +
+      `transactions sent to ${RPC_SEND_ALL && RPC_URLS.length > 1 ? `every RPC server at once (${RPC_URLS.length})` : "the current RPC server"}; ` +
+      `ledger race (stream vs RPC) ${LEDGER_STREAM && LEDGER_RACE !== "off" ? LEDGER_RACE : "off"}; ` +
       `each fill logs "fill timing: ..."`,
   );
   log(
@@ -3345,6 +3510,7 @@ async function main() {
     return;
   }
   if (LEDGER_STREAM && SCAN_MODE === "ledger") ledgerStreamLoop(); // runs for good in the background
+  if (LEDGER_STREAM && SCAN_MODE === "ledger" && LEDGER_RACE !== "off") ledgerPollLoop(); // the RPC side of the race
   if (!DO_TTL) {
     log("WARNING TTL upkeep is OFF (started without --ttl): quiet vaults and orders are not extended and can be archived. Start with: node keeper.js --ttl");
   }
@@ -3433,6 +3599,7 @@ async function main() {
     if (Date.now() - usageLogAt >= 10 * 60_000) {
       usageLogAt = Date.now();
       logRpcUsage();
+      logLedgerRace();
     }
     if (SCAN_MODE !== "ledger") {
       await sleep(INTERVAL_SEC * 1000);
@@ -3475,10 +3642,17 @@ let ttlBusy = false; // a TTL job is running in the background
 // ledgerWatch: the newest ledger the keeper knows of, from Horizon's stream or from the RPC, and who waits for one.
 const ledgerWatch = { seq: 0, at: 0, waiters: new Set(), streamAt: 0, connected: false, failures: 0, saidAt: 0, since: 0 };
 const ledgerSeen = new Map(); // ledger -> when the keeper saw it (the last 60), for the fill timing
-function onLedger(seq, fromStream) {
+// Which source announces each ledger first (Horizon's stream or the RPC) and how long after the close: logged every
+// 10 minutes ("ledger sources") and in status.json.
+const ledgerRace = new LedgerRace();
+let lastLedgerRace = null;
+let ledgerPolls = 0;
+function onLedger(seq, fromStream, closedAt = null) {
+  if (fromStream) ledgerRace.seen(seq, "stream", Date.now(), closedAt);
   if (!(seq > ledgerWatch.seq)) return;
   const now = Date.now();
   ledgerWatch.seq = seq;
+  ledgerWatch.by = fromStream ? "stream" : "rpc";
   ledgerWatch.at = now;
   if (fromStream) ledgerWatch.streamAt = now;
   ledgerSeen.set(seq, now);
@@ -3540,7 +3714,7 @@ async function ledgerStreamLoop() {
         buf = rest.length > 1_000_000 ? "" : rest;
         for (const ev of events) {
           const l = ledgerFromSse(ev);
-          if (l) onLedger(l.sequence, true);
+          if (l) onLedger(l.sequence, true, l.closedAt);
         }
       }
       throw new Error("the stream ended");
@@ -3558,6 +3732,59 @@ async function ledgerStreamLoop() {
     }
     await sleep(ledgerWatch.failures ? Math.min(60_000, 1000 * 2 ** Math.min(6, ledgerWatch.failures)) : 250);
   }
+}
+
+/**
+ * The RPC side of the ledger race (while the stream is up; without it waitNextLedger asks the RPC anyway): from
+ * LEDGER_POLL_EARLY_MS before the next ledger is due, getLatestLedger every LEDGER_POLL_MS until the RPC has it (at
+ * most LEDGER_POLL_MAX asks). Whichever source sees the ledger first wakes the main loop (onLedger). With
+ * LEDGER_RACE=auto the RPC is asked on every 6th ledger only while it is almost never first.
+ */
+async function ledgerPollLoop() {
+  let n = 0;
+  for (;;) {
+    try {
+      if (!ledgerStreamUp() || !ledgerWatch.seq) {
+        await sleep(1000);
+        continue;
+      }
+      const seq = ledgerWatch.seq;
+      const at = ledgerWatch.at;
+      n++;
+      const every = LEDGER_RACE === "on" || ledgerRace.rpcUseful() ? 1 : 6;
+      if (n % every === 0) {
+        const due = at + LEDGER_MS - LEDGER_POLL_EARLY_MS;
+        if (due > Date.now()) await sleep(due - Date.now());
+        for (let k = 0; k < LEDGER_POLL_MAX; k++) {
+          ledgerPolls++;
+          const got = await rpcLabelCtx.run("getLatestLedger:race", () => latestLedger(0)).catch(() => 0);
+          if (got > seq) break;
+          await sleep(LEDGER_POLL_MS);
+        }
+      }
+      await nextLedgerAfter(seq, LEDGER_MS * 3);
+    } catch {
+      await sleep(1000);
+    }
+  }
+}
+
+/** One log line every 10 minutes: which source saw the ledgers first and how long after their close. */
+function logLedgerRace() {
+  const s = ledgerRace.summary();
+  ledgerRace.reset();
+  lastLedgerRace = { ...s, rpc_polls: ledgerPolls, at: new Date().toISOString() };
+  ledgerPolls = 0;
+  if (!s.ledgers) return;
+  const ms = (v) => (v === null ? "-" : `${v}`);
+  log(
+    `ledger sources, last 10 min: ${s.ledgers} ledgers, ${s.both} seen by both: stream first ${s.stream_first}, RPC first ${s.rpc_first}; ` +
+      `RPC ahead of the stream p10/p50/p90 ${ms(s.rpc_lead_p10_ms)}/${ms(s.rpc_lead_p50_ms)}/${ms(s.rpc_lead_p90_ms)} ms; ` +
+      `after the close (close times are whole seconds: up to 1 s high) stream p50/p90 ${ms(s.stream_after_close_p50_ms)}/${ms(s.stream_after_close_p90_ms)} ms, ` +
+      `RPC p50/p90 ${ms(s.rpc_after_close_p50_ms)}/${ms(s.rpc_after_close_p90_ms)} ms; RPC asked ${lastLedgerRace.rpc_polls} times ` +
+      `(${LEDGER_RACE === "on" || ledgerRace.rpcUseful() ? "every ledger" : "every 6th ledger: the RPC is rarely first"}); ` +
+      `transactions sent to every server: ${sendAllStats.sent}, taken first by a copy: ${sendAllStats.firstByCopy}`,
+  );
 }
 
 /**

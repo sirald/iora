@@ -13,8 +13,9 @@ export const FAKE_PASSPHRASE = "Iora fake network for tests ; 2026";
  */
 // vaults: how many (empty) vaults the factory lists (< 50: one page); secondRpc: "hang" adds a second RPC server that
 // takes requests and never answers (a stuck fallback such as a slow public RPC).
-// latencyMs: how long the main RPC takes to answer.
-export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDropAfter = 0, stream = true, vaults = 0, secondRpc = null, latencyMs = 0 } = {}) {
+// latencyMs: how long the main RPC takes to answer. streamDelayMs: Horizon announces each ledger this long after the
+// RPC has it (the RPC can then be first).
+export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDropAfter = 0, stream = true, vaults = 0, secondRpc = null, latencyMs = 0, streamDelayMs = 0 } = {}) {
   const vaultIds = Array.from({ length: vaults }, () => StrKey.encodeContract(crypto.randomBytes(32)));
   // hang: the RPC takes requests but never answers; tooMany: the RPC answers HTTP 429 (with Retry-After: 1)
   const state = { ledger: 1000, calls: {}, streamConnections: 0, streamClients: new Set(), events: [], hang: false, tooMany: false };
@@ -23,14 +24,20 @@ export async function startFakeNet({ ledgerMs = 400, rpcLagLedgers = 0, streamDr
 
   const tick = setInterval(() => {
     state.ledger++;
-    for (const c of [...state.streamClients]) {
-      c.res.write(`id: ${state.ledger}-0\ndata: {"sequence": ${state.ledger}, "closed_at": "${new Date().toISOString()}"}\n\n`);
-      c.sent++;
-      if (streamDropAfter && c.sent >= streamDropAfter) {
-        state.streamClients.delete(c);
-        c.res.end();
+    const seq = state.ledger;
+    const closedAt = new Date().toISOString();
+    const announce = () => {
+      for (const c of [...state.streamClients]) {
+        c.res.write(`id: ${seq}-0\ndata: {"sequence": ${seq}, "closed_at": "${closedAt}"}\n\n`);
+        c.sent++;
+        if (streamDropAfter && c.sent >= streamDropAfter) {
+          state.streamClients.delete(c);
+          c.res.end();
+        }
       }
-    }
+    };
+    if (streamDelayMs > 0) setTimeout(announce, streamDelayMs);
+    else announce();
   }, ledgerMs);
 
   const emptyData = new SorobanDataBuilder().build().toXDR("base64");

@@ -153,6 +153,29 @@ describe("main loop end to end (fake RPC + fake Horizon)", { timeout: 180_000 },
     );
   });
 
+  test("ledger race: Horizon 600 ms behind the RPC: the RPC poll sees the ledgers first and wakes the loop", async () => {
+    await withKeeper({ ledgerMs: 1000, streamDelayMs: 600 }, { LEDGER_POLL_MS: "100", LEDGER_POLL_EARLY_MS: "300" }, async (k, net) => {
+      await sleep(10000);
+      const s = k.status().ledger_sources;
+      assert.ok(s.both >= 4, `only ${s.both} ledgers seen by both\n${JSON.stringify(s)}`);
+      assert.ok(s.rpc_first >= s.both / 2, `the RPC was first ${s.rpc_first} of ${s.both}\n${JSON.stringify(s)}`);
+      assert.ok(s.rpc_lead_p50_ms > 200, `RPC lead ${s.rpc_lead_p50_ms} ms`);
+      assert.ok(s.stream_after_close_p50_ms >= 400, `stream after close ${s.stream_after_close_p50_ms} ms`);
+      assert.ok(scansBetween(k, 3000, 10000) >= 5, `only ${scansBetween(k, 3000, 10000)} scans in 7 s\n${k.output()}`);
+      assert.ok((net.state.calls.getLatestLedger || 0) < 10 * 12, `${net.state.calls.getLatestLedger} getLatestLedger calls`);
+    });
+  });
+
+  test("ledger race: the stream first: the loop follows the stream, the RPC is still measured", async () => {
+    await withKeeper({ ledgerMs: 1000 }, { LEDGER_POLL_MS: "100" }, async (k) => {
+      await sleep(8000);
+      const s = k.status();
+      assert.equal(s.ledger_stream, "up");
+      assert.ok(s.ledger_sources.ledgers >= 5, JSON.stringify(s.ledger_sources));
+      assert.ok(scansBetween(k, 3000, 8000) >= 4, `only ${scansBetween(k, 3000, 8000)} scans in 5 s\n${k.output()}`);
+    });
+  });
+
   test("HTTP 429 for 4 s: the keeper slows down and carries on afterwards", async () => {
     await withKeeper({ ledgerMs: 1000 }, {}, async (k, net) => {
       await sleep(3000);

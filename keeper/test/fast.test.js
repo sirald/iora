@@ -2,7 +2,7 @@
 // No network.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { Ewma, FillStats, FillTimer, TokenBucket, ledgerFromSse, parseSse, percentile, pickReadServer, scaleShares, shapeKey, sharesOf } from "../lib.js";
+import { Ewma, FillStats, FillTimer, LedgerRace, TokenBucket, boardMode, firstAccepted, ledgerFromSse, parseSse, percentile, pickReadServer, scaleShares, shapeKey, sharesOf } from "../lib.js";
 
 describe("fill timer", () => {
   test("marks are ms after the trigger ledger was seen; the first mark of a stage counts", () => {
@@ -164,5 +164,89 @@ describe("main-loop watchdog", () => {
     w.stage("waiting for the next ledger");
     t += 61_000;
     assert.equal(w.check().stage, "waiting for the next ledger"); // a new stall is reported again
+  });
+});
+
+describe("board mode: board entry, quick quote or route search", () => {
+  const e = { ref: 200_000_000n, at: 1_000_000, best: { label: "Soroswap", q: 1n } };
+  const o = { now: 1_030_000, maxAgeMs: 90_000, mult: 5 };
+  test("fresh entry and small fill: board; stale or missing: quick; too large: search", () => {
+    assert.equal(boardMode(e, 500_000_000n, o), "board");
+    assert.equal(boardMode(e, 500_000_000n, { ...o, now: 1_000_000 + 90_001 }), "quick");
+    assert.equal(boardMode({ ...e, best: null }, 1n, o), "quick"); // quoted, but no venue had a price then
+    assert.equal(boardMode(undefined, 1n, o), "quick");
+    assert.equal(boardMode(e, 1_000_000_001n, o), null);
+    assert.equal(boardMode(e, 0n, o), null);
+  });
+  test("with no entry the size limit comes from refHint; with neither the fill counts as small", () => {
+    assert.equal(boardMode(undefined, 1_000_000_001n, { ...o, refHint: 200_000_000n }), null);
+    assert.equal(boardMode(undefined, 1_000_000_000n, { ...o, refHint: 200_000_000n }), "quick");
+    assert.equal(boardMode(undefined, 10n ** 15n, o), "quick");
+    // a stale entry keeps its own reference amount for the size limit
+    assert.equal(boardMode({ ...e, at: 0 }, 1_000_000_001n, o), null);
+  });
+});
+
+describe("one transaction sent to every RPC server", () => {
+  const later = (ms, v, fail = false) => new Promise((res, rej) => setTimeout(() => (fail ? rej(v) : res(v)), ms));
+  test("the first PENDING wins, even from a copy", async () => {
+    const r = await firstAccepted([later(80, { status: "PENDING", hash: "h" }), later(10, { status: "PENDING", hash: "h" })]);
+    assert.equal(r.idx, 1);
+    assert.equal(r.res.status, "PENDING");
+  });
+  test("an error on one server (DUPLICATE / ERROR / timeout) is no problem while another took it", async () => {
+    const dup = await firstAccepted([later(5, { status: "ERROR" }), later(30, { status: "PENDING" })]);
+    assert.equal(dup.idx, 1);
+    const thrown = await firstAccepted([later(5, new Error("timeout"), true), later(20, { status: "DUPLICATE" })]);
+    assert.equal(thrown.idx, 1);
+    assert.equal(thrown.res.status, "DUPLICATE");
+  });
+  test("nobody took it: the usual server's answer (e.g. its ERROR), waiting at most graceMs for the others", async () => {
+    const t0 = Date.now();
+    const r = await firstAccepted([later(5, { status: "ERROR", why: "bad seq" }), new Promise(() => {})], { graceMs: 50 });
+    assert.equal(r.idx, 0);
+    assert.equal(r.res.why, "bad seq");
+    assert.ok(Date.now() - t0 < 1000);
+    const copy = await firstAccepted([later(5, new Error("down"), true), later(10, { status: "TRY_AGAIN_LATER" })]);
+    assert.equal(copy.idx, 1);
+  });
+  test("every server threw: the error comes through", async () => {
+    await assert.rejects(firstAccepted([later(5, new Error("a"), true), later(10, new Error("b"), true)]), /a/);
+  });
+});
+
+describe("ledger race: stream vs RPC", () => {
+  test("who saw each ledger first, by how much, and how long after the close", () => {
+    const r = new LedgerRace();
+    for (let i = 0; i < 10; i++) {
+      const close = 100_000 + i * 5000;
+      r.seen(500 + i, "stream", close + 1800, close);
+      r.seen(500 + i, "rpc", close + (i < 7 ? 1200 : 2500));
+      r.seen(500 + i, "rpc", close + 9999); // a later sighting does not count
+    }
+    const s = r.summary();
+    assert.equal(s.ledgers, 10);
+    assert.equal(s.both, 10);
+    assert.equal(s.rpc_first, 7);
+    assert.equal(s.stream_first, 3);
+    assert.equal(s.rpc_lead_p50_ms, 600);
+    assert.equal(s.stream_after_close_p50_ms, 1800);
+    assert.equal(s.rpc_after_close_p50_ms, 1200); // the close time from the stream serves the RPC sighting too
+    r.reset();
+    assert.equal(r.summary().ledgers, 0);
+  });
+  test("the RPC is worth polling only while it is first now and then (auto mode)", () => {
+    const r = new LedgerRace();
+    assert.equal(r.rpcUseful(), true); // not measured yet
+    for (let i = 0; i < 60; i++) {
+      r.seen(i + 1, "stream", 1000);
+      r.seen(i + 1, "rpc", 1500);
+    }
+    assert.equal(r.rpcUseful(), false);
+    for (let i = 60; i < 70; i++) {
+      r.seen(i + 1, "rpc", 1000);
+      r.seen(i + 1, "stream", 1300);
+    }
+    assert.equal(r.rpcUseful(), true);
   });
 });
