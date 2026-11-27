@@ -2159,7 +2159,17 @@ function pfLegacyNote(items) {
   const parts = items.filter((i) => i.b >= LEGACY_DUST).map((i) => `<b>${fmt(i.b, 2)} ${esc(i.name || i.tok)}</b>`);
   const what = parts.length ? `${parts.join(" and ")} ${parts.length > 1 ? "are" : "is"} still in your old vault${items.length > 1 ? "s" : ""}` : "You still have open orders in an old vault";
   el.innerHTML = `<span>${what}. It is safe and still earning, but it is not counted in the totals below.</span><button class="btn" type="button">Move or withdraw</button>`;
-  el.querySelector("button").onclick = () => $("legacy").scrollIntoView({ behavior: "smooth", block: "start" });
+  el.querySelector("button").onclick = () => {
+    const box = $("legacy");
+    syncLegacy();
+    // Never scroll to a hidden box (the button did nothing): show every old vault if the view hid them all.
+    if (box.hidden) {
+      for (const it of box.querySelectorAll(".legacy-item")) it.hidden = false;
+      box.hidden = !box.querySelector(".legacy-item");
+    }
+    if (!box.hidden) box.scrollIntoView({ behavior: "smooth", block: "start" });
+    else renderLegacy().then(() => { syncLegacy(); if (!box.hidden) box.scrollIntoView({ behavior: "smooth", block: "start" }); });
+  };
 }
 async function renderLegacy() {
   const box = $("legacy");
@@ -2219,14 +2229,17 @@ async function renderLegacy() {
   for (const b of box.querySelectorAll("[data-migrate]")) b.onclick = () => migrateLegacy(b.dataset.migrate, b.dataset.tok, b.dataset.token || null);
 }
 
-/** The old buy vault shows only on the Buy vault tab, the old sell vault only on the Sell vault tab. */
+/** The old buy vault shows on the Buy vault tab, the old sell vault on the Sell vault tab, and both on Portfolio
+    (its "Move or withdraw" note scrolls here, so the box must be visible there). */
 function syncLegacy() {
   const box = $("legacy");
   if (!box) return;
-  const kind = document.body.classList.contains("xmarket") ? "" : { vault: "buy", sell: "sell" }[document.body.dataset.view] || "";
+  const view = document.body.dataset.view;
+  const all = view === "portfolio";
+  const kind = document.body.classList.contains("xmarket") ? "" : { vault: "buy", sell: "sell" }[view] || "";
   let shown = 0;
   for (const it of box.querySelectorAll(".legacy-item")) {
-    it.hidden = it.dataset.kind !== kind;
+    it.hidden = !all && it.dataset.kind !== kind;
     if (!it.hidden) shown++;
   }
   box.hidden = shown === 0;
