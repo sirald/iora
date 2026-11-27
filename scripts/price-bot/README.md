@@ -1,56 +1,83 @@
 # Iora price bot (testnet)
 
-Testnet's Soroswap (~0.60 USD) and Aquarius standard (~0.37–0.63 USD) USDC/XLM pools are far from the real XLM
-price (Reflector, ~0.127 USD). Iora has its own reference pool instead (`scripts/create-ref-pool.sh`, addresses in
-`testnet/ref-pool.env`). It is an Aquarius *concentrated* pool (fee 30 bps) with full-range liquidity, which prices
-like a constant-product pool. The router accepts only fees of 10, 30 and 100 bps for standard pools, and all three
-already exist for USDC/XLM. The filler, keeper and web reach the pool through the Aquarius router
-(`get_pools` / `estimate_swap` / `swap` with the pool index).
+Testnet's own USDC/XLM pools are far from the real XLM price:
+- Soroswap ~0.60 USD
+- Aquarius standard pools ~0.37–0.63 USD
+- Reflector (the real price) ~0.127 USD
 
-This bot keeps that pool at Reflector's price. Each run does the following:
+Iora keeps its own pools at the real (Reflector) price instead, and this bot looks after all of them:
 
-1. It reads the pool price (`get_slot0`) and its active liquidity.
-2. It reads the oracle adapter's XLM and USDC prices (`lastprice`). The reference is XLM USD / USDC USD.
-3. When the deviation is above `THRESHOLD` (default 0.5%), it swaps through the Aquarius router exactly as much as
-   brings the pool back to the reference. If the pool is too expensive it sells XLM; if too cheap it buys XLM.
-   The amount comes from the v3 formulas and is grossed up by the pool fee.
+- **XLM**: the reference pool `scripts/create-ref-pool.sh`, addresses in `testnet/ref-pool.env`.
+  - It is an Aquarius *concentrated* pool with a 30 bps fee and full-range liquidity, so it prices like a
+    constant-product pool.
+  - The router accepts only 10, 30 and 100 bps for standard pools, and all three already exist for USDC/XLM.
+- **iBTC, iETH, iSOL, iAVAX, iXRP**: Iora's own coins (`scripts/create-iora-coins.sh`, addresses in
+  `testnet/iora-coins.env`). Each has a Soroswap pair against Circle USDC.
+
+The filler, the keeper and the web reach these pools through the routers: Aquarius `get_pools` / `estimate_swap` /
+`swap` with the pool index, and Soroswap as any pair.
+
+`pools.json` lists the pools. `make-pools.sh` writes it from the two address files.
+
+Each run, for every pool:
+
+1. Read the pool price. For XLM: `get_slot0` and its active liquidity. For a Soroswap pair: its reserves.
+2. Read the oracle adapter's price of the coin and of USDC (`lastprice`). The reference is coin USD / USDC USD.
+3. When the deviation is above `THRESHOLD` (default 0.5%), swap through the pool's router exactly as much as brings
+   the pool back to the reference. If the pool is too expensive, the bot sells the coin; if too cheap, it buys the
+   coin with USDC. The amount comes from the constant-product formulas, grossed up by the pool fee.
 
 Limits:
-- **Trade size:** at most `MAX_TRADE_USD` per run, and never more than the bot's own USDC / XLM inventory.
-  `XLM_RESERVE` is never sold.
-- **Inventory warning:** a `WARN inventory low` line when the bot holds less than `WARN_USDC` / `WARN_XLM`.
-  A `WARN inventory short` line when the inventory limited a trade.
-- **Missing or stale price:** if an oracle price is missing or older than `MAX_PRICE_AGE`, nothing is done.
-- **Fair-price check:** if the router's estimate is worse than "reference less fee", nothing is sent. Every swap
-  moves the pool toward the reference, so it never pays worse than that.
+
+- **Size:** at most `MAX_TRADE_USD` per pool and run, and never more than the bot's own inventory. `XLM_RESERVE` is
+  never sold.
+- **Inventory warnings:** a `WARN inventory low` line when the bot holds less than `WARN_USDC` USDC, or less than
+  `WARN_COIN_USD` worth of a coin. A `WARN inventory short` line when the inventory limited a trade.
+- **Stale prices:** when a price is missing or older than `MAX_PRICE_AGE`, that pool is left alone.
+- **Fair-price check:** when the router's estimate is worse than "reference less fee", nothing is sent. Every swap
+  moves a pool toward the reference, so it never pays worse than that.
 - **Slippage:** the minimum output is the estimate less `SLIPPAGE`.
+- **Errors:** an error on one pool does not stop the others. The run then ends with exit code 1.
 
-Separate from the keeper: own directory, own account, own key, own systemd unit. Testnet only (it checks the RPC's
-network passphrase).
+The bot is separate from the keeper: its own directory, account, key and systemd unit. It runs on testnet only
+(it checks the RPC's network passphrase).
 
-- `price-bot.js`: one run. `--dry-run` only prints the decision; `--setup` also adds the Circle USDC trustline.
-- `logic.js`: the decision, with no network access. Run its tests with `npm test`.
-- `iora-price-bot.service` / `.timer`: a oneshot service that runs every 2 minutes.
+- `price-bot.js`: one run. `--dry-run` only prints the decisions. `--setup` also adds the missing trustlines
+  (Circle USDC and every coin in `pools.json`). `ONLY=XLM,iBTC` limits a run to those pools.
+- `logic.js`: the decision, with no network access. Tests: `npm test`.
+- `pools.json` / `make-pools.sh`: the pools.
+- `fund-bot.sh`: fills the inventory (see below).
+- `iora-price-bot.service` / `.timer`: a oneshot service every 2 minutes.
 - `price-bot.env.example`: the settings. The real file is `/etc/iora/price-bot.env`.
 
 ## Inventory
 
-The bot trades only from its own account. The suggested start is **1000 USDC + 8000 XLM** (~2000 USD). For scale, on
-the 3000 USDC pool:
-- A 1% correction is about 15 USDC.
-- A 10% correction is about 145 USDC.
+The bot trades only from its own account and does **not** mint. It holds:
 
-The money comes from `iora-lp`, which also holds the pool's shares. That account's keys are in the stellar CLI
-keystore on the development machine, not on the server.
+- XLM from friendbot.
+- USDC, for buying coins whose pool is too cheap.
+- Each coin, for selling when its pool is too expensive. The coins are minted ahead of time by `fund-bot.sh`, which
+  is run on the development machine: the issuer pays the coins to the bot and `iora-lp` pays the USDC.
 
-**Arbitrage:** anyone can buy XLM in this pool at ~0.127 and sell it in the far-off Soroswap pool (~0.60). The bot
-then sells XLM back into the pool, so such arbitrage drains its XLM. Each run is capped by `MAX_TRADE_USD`, and the
-`WARN` lines show when the inventory runs low. Refill it from `iora-lp`, or stop the timer.
+The issuer's key stays off the server. Whoever holds that key can mint any amount, and the coins are (or soon
+will be) collateral in Iora's Blend pool, up to their supply caps.
+
+Suggested start: **500 USD of each coin + 1500 USDC + friendbot's 10,000 XLM**. For scale:
+
+- A 2% correction on a 1500 USDC pair is about 15 USD.
+- A 2% correction on the 3000 USDC XLM pool is about 30 USD.
+
+Top up with `fund-bot.sh` when the WARN lines appear. The script only tops up to the given amounts, so running it
+again is safe.
+
+**Arbitrage:** anyone can buy XLM in the reference pool at ~0.127 and sell it in the far-off Soroswap XLM pool
+(~0.60). The bot then sells XLM back into its pool, so that arbitrage drains its XLM. Each run is capped by
+`MAX_TRADE_USD`, and the WARN lines show when the inventory runs low. Refill it, or stop the timer.
 
 ## Install on the server (done by the operator)
 
-Run these steps as root on the server. The server layout is the keeper's (`scripts/server.sh`): user `iora`, code
-under `/opt/iora`, secrets in `/etc/iora`.
+Run as root on the server. The server layout is the keeper's (`scripts/server.sh`): user `iora`, code under
+`/opt/iora`, secrets in `/etc/iora`.
 
 1. Copy this directory to `/opt/iora/price-bot` (without `node_modules`) and install its dependency:
    `cd /opt/iora/price-bot && (npm ci --omit=dev || npm install --omit=dev) && chown -R root:iora /opt/iora/price-bot`
@@ -59,23 +86,21 @@ under `/opt/iora`, secrets in `/etc/iora`.
    umask 027
    cd /opt/iora/price-bot
    node -e 'import("@stellar/stellar-sdk").then(({Keypair})=>{const k=Keypair.random();console.log("PRICE_BOT_SECRET="+k.secret()+"\nPRICE_BOT_ADDRESS="+k.publicKey())})' > /etc/iora/price-bot.env
-   grep -E '^REF_POOL(_INDEX)?=' price-bot.env.example >> /etc/iora/price-bot.env   # check: equal to testnet/ref-pool.env
    chown root:iora /etc/iora/price-bot.env && chmod 640 /etc/iora/price-bot.env
    grep PRICE_BOT_ADDRESS /etc/iora/price-bot.env
    ```
-3. Fund the account with friendbot, which gives 10,000 XLM:
-   `curl -s "https://friendbot.stellar.org/?addr=<PRICE_BOT_ADDRESS>" > /dev/null`
-4. Add the trustline and check the decision:
+3. Fund the account (testnet): `curl -s "https://friendbot.stellar.org/?addr=<PRICE_BOT_ADDRESS>" > /dev/null`.
+4. Add the trustlines (USDC + the five coins) and look at the decisions:
    `cd /opt/iora/price-bot && set -a && . /etc/iora/price-bot.env && set +a && runuser -p -u iora -- node price-bot.js --setup --dry-run`
-   Without `--dry-run` this adds the trustline. Do that before step 5.
-5. On the development machine (iora-lp's keystore), send the USDC inventory:
-   ```
-   stellar tx new payment --source iora-lp --network testnet --destination <PRICE_BOT_ADDRESS> \
-     --asset USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 --amount 10000000000   # 1000 USDC
-   ```
-   Friendbot's 10,000 XLM already covers the XLM side.
-6. Run the bot once by hand (the same command as step 4 without `--dry-run`), then enable the timer:
+   Then run the same command without `--dry-run`. It adds the trustlines and may already trade with the XLM it has.
+5. On the development machine, fill the inventory:
+   `bash scripts/price-bot/fund-bot.sh <PRICE_BOT_ADDRESS> 500 1500`
+6. Enable the timer:
    `cp iora-price-bot.service iora-price-bot.timer /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now iora-price-bot.timer`
-   Logs: `journalctl -u iora-price-bot -n 50`. Inventory warnings: `journalctl -u iora-price-bot | grep WARN`.
+   - Logs: `journalctl -u iora-price-bot -n 50`
+   - Warnings only: `journalctl -u iora-price-bot | grep WARN`
+
+When a pool is added or moves, run `make-pools.sh`, copy `pools.json` to `/opt/iora/price-bot/`, and then run
+step 4 again for any new trustline.
 
 To stop: `systemctl disable --now iora-price-bot.timer`. The inventory stays in the bot's account.

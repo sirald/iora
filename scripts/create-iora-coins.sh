@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# TESTNET ONLY. Iora's own test coins BTC, ETH, SOL, EURC: classic assets issued by a separate account
-# ("iora-issuer", home domain iorafi.com), priced by Reflector, tradable on Soroswap against Circle USDC and
-# queued as reserves in Iora's own Blend pool.
+# TESTNET ONLY. Iora's own test coins iBTC, iETH, iSOL, iAVAX, iXRP (COIN_SYMBOLS in scripts/blend-rates.sh): classic
+# assets issued by a separate account ("iora-issuer", home domain iorafi.com), priced by Reflector, tradable on
+# Soroswap against Circle USDC and queued as reserves in Iora's own Blend pool.
 #
-# The codes are the Reflector symbols (BTC, ETH, SOL, EURC) so that wallets show them naturally. Other testnet
-# assets use the same codes; on Stellar an asset is code + ISSUER, so there is no clash: only these issued by
-# ISSUER (testnet/iora-coins.env) are Iora's.
+# The Reflector symbol of a coin is its code without the leading "i" (refl_symbol: iBTC -> BTC). The "i" marks them
+# as Iora's. On Stellar an asset is code + ISSUER, so only these issued by ISSUER (testnet/iora-coins.env) are Iora's.
+# (A first set BTC, ETH, SOL, EURC was retired on 2026-11-27: testnet/iora-coins.retired.env.)
 #
 # Steps (each skipped when testnet/iora-coins.env already has its result; safe to run again):
 #   1) issuer account (friendbot) + home domain; 2) SAC of each coin (7 decimals, as every classic asset)
 #   3) "iora-lp" account (friendbot) with trustlines; Circle USDC for it bought on Soroswap with XLM from
 #      friendbot "funder" accounts (chunks, price impact <= 2% each), funders merged into iora-lp afterwards
-#   4) Soroswap USDC/COIN pool per coin, LIQ_USDC (2000) USDC + the coin at Reflector's price; LP tokens stay in iora-lp
-#   5) oracle adapter: set_asset(coin, SYMBOL); 6) factory: set_allowed(coin, true)
+#   4) Soroswap USDC/COIN pool per coin, LIQ_USDC (1500) USDC + the coin at Reflector's price; LP tokens stay in iora-lp
+#   5) oracle adapter: set_asset(coin, Reflector symbol); 6) factory: set_allowed(coin, true)
 #   7) Blend: queue_set_reserve with scripts/blend-rates.sh (CFG_<SYM>); apply a week later: apply-blend-rates.sh
-#   8) testnet/pairs.env PAIRS (AQUA + the coins)
+#   8) testnet/pairs.env PAIRS (the coins)
+# Step 3 also buys EXTRA_USDC (1500) more for the price bot's inventory (scripts/price-bot/), left in iora-lp.
 # Keys: only in the stellar CLI keystore (iora-issuer, iora-lp, iora-cNN). dev signs 5)-7) (oracle admin,
 # factory guardian, pool admin). Writes only addresses to testnet/iora-coins.env.
 # Usage: bash scripts/create-iora-coins.sh        Log: testnet/create-iora-coins.txt (not published)
@@ -30,7 +31,8 @@ source scripts/blend-rates.sh
 SOROFACTORY=CDP3HMUH6SMS3S7NPGNDJLULCOXXEPSHY4JKUKMBNQMATHDHWXRRJTBY
 AQUA=CDNVQW44C3HALYNVQ4SOBXY5EWYTGVYXX6JPESOLQDABJI5FC5LTRRUE
 USDC=$CIRCLE_USDC
-LIQ_USDC=${LIQ_USDC:-2000}
+LIQ_USDC=${LIQ_USDC:-1500}
+EXTRA_USDC=${EXTRA_USDC:-1500}
 HOME_DOMAIN=${HOME_DOMAIN:-iorafi.com}
 U=10000000
 ENVF=testnet/iora-coins.env
@@ -109,6 +111,7 @@ for line in "USDC:$USDC_ISSUER" $(for s in $COIN_SYMBOLS; do echo "$s:$ISSUER"; 
   has_line "$LP" "${line%%:*}" "${line#*:}" || classic change-trust --source iora-lp --line "$line" || die "trustline $line"
 done
 NEED=0; for s in $COIN_SYMBOLS; do v=${s}_PAIR; [ -z "${!v}" ] && NEED=$((NEED + LIQ_USDC*U)); done
+[ "$NEED" -gt 0 ] && NEED=$((NEED + EXTRA_USDC*U))   # the bot's USDC only on a run that builds pools
 HAVE=$(num "$(q "$USDC" balance --id "$LP")")
 i=1
 while [ "$HAVE" -lt "$NEED" ]; do
@@ -128,9 +131,9 @@ echo "== 4) Soroswap USDC/COIN pools at Reflector's price"
 PU=$(refl USDC)
 for s in $COIN_SYMBOLS; do
   v=${s}_PAIR; [ -n "${!v}" ] && { echo "  $s pool ${!v} exists"; continue; }
-  PC=$(refl "$s"); [ -n "$PC" ] && [ -n "$PU" ] || die "no Reflector price for $s"
+  PC=$(refl "$(refl_symbol "$s")"); [ -n "$PC" ] && [ -n "$PU" ] || die "no Reflector price for $s"
   AU=$((LIQ_USDC * U)); AC=$(python3 -c "print($AU * $PU // $PC)")
-  echo "  $s: $LIQ_USDC USDC + $(python3 -c "print($AC/1e7)") $s  (Reflector $s $(python3 -c "print($PC/1e14)") USD, USDC $(python3 -c "print($PU/1e14)") USD)"
+  echo "  $s: $LIQ_USDC USDC + $(python3 -c "print($AC/1e7)") $s  (Reflector $(refl_symbol "$s") $(python3 -c "print($PC/1e14)") USD, USDC $(python3 -c "print($PU/1e14)") USD)"
   bal=$(num "$(q "${!s}" balance --id "$LP")")
   [ "$bal" -lt "$AC" ] && { classic payment --source iora-issuer --destination "$LP" --asset "$s:$ISSUER" --amount $((AC - bal)) || die "mint $s"; }
   run iora-lp "$ROUTER" add_liquidity --token_a "$USDC" --token_b "${!s}" --amount_a_desired $AU --amount_b_desired "$AC" \
@@ -140,7 +143,7 @@ done
 
 echo "== 5) oracle adapter $ORACLE"
 for s in $COIN_SYMBOLS; do
-  [ "$(q "$ORACLE" symbol --token "${!s}")" = "$s" ] || run dev "$ORACLE" set_asset --token "${!s}" --symbol "$s" || die "set_asset $s"
+  [ "$(q "$ORACLE" symbol --token "${!s}")" = "$(refl_symbol "$s")" ] || run dev "$ORACLE" set_asset --token "${!s}" --symbol "$(refl_symbol "$s")" || die "set_asset $s"
   echo "  $s -> $(q "$ORACLE" lastprice --asset "{\"Stellar\":\"${!s}\"}")"
 done
 
@@ -167,13 +170,13 @@ if [ -n "$FIRST" ]; then
 fi
 
 echo "== 8) testnet/pairs.env"
-P="AQUA:$AQUA"; for s in $COIN_SYMBOLS; do P="$P,$s:${!s}"; done
+P=""; for s in $COIN_SYMBOLS; do P="$P${P:+,}$s:${!s}"; done
 echo "PAIRS=$P" > testnet/pairs.env; cat testnet/pairs.env
 
 echo "== prices on Soroswap vs Reflector"
 PU=$(refl USDC)
 for s in $COIN_SYMBOLS; do
-  PC=$(refl "$s"); ref=$(python3 -c "print($PC/$PU)")
+  PC=$(refl "$(refl_symbol "$s")"); ref=$(python3 -c "print($PC/$PU)")
   ten=$((10 * U)); c_in=$(python3 -c "print(int($ten * $PU // $PC))")
   o1=$(q "$ROUTER" router_get_amounts_out --amount_in $ten --path "[\"$USDC\",\"${!s}\"]" | tr -d '[] ' | cut -d, -f2)
   o2=$(q "$ROUTER" router_get_amounts_out --amount_in "$c_in" --path "[\"${!s}\",\"$USDC\"]" | tr -d '[] ' | cut -d, -f2)
