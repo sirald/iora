@@ -7,6 +7,8 @@
 // pool back to the reference (pool too expensive: sells the coin; too cheap: buys it with USDC), within
 // MAX_TRADE_USD and the bot's own inventory. No fresh price: that pool is left alone.
 // One run per call: systemd runs it on a timer (iora-price-bot.timer).
+// At the end of every run, success or failure, it writes a status file for the bots check (status.js,
+// scripts/monitor): $STATE_DIRECTORY/status.json from the unit's StateDirectory=, or STATUS_FILE. Not in a dry run.
 //
 // Usage:  node price-bot.js            one run
 //         node price-bot.js --dry-run  only prints the decisions
@@ -21,6 +23,7 @@ import {
   scValToNative, xdr,
 } from "@stellar/stellar-sdk";
 import { decide, fairEnough, fromReserves, minOut, poolPrice } from "./logic.js";
+import { priceBotStatus, readStatus, statusPath, writeStatus } from "./status.js";
 
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== "" ? process.env[k] : d);
 const num = (k, d) => {
@@ -50,10 +53,23 @@ const DRY = process.argv.includes("--dry-run");
 const SETUP = process.argv.includes("--setup");
 const S7 = 1e7;
 
+// What this run saw, for the status file (only recorded here; nothing below reads it to decide or trade).
+const STATUS_FILE = DRY ? null : statusPath(process.env);
+const run = { startedAt: Date.now(), address: null, checked: false, pools: {}, inventory: {}, warnings: new Set() };
+function saveStatus(ok, error) {
+  if (!STATUS_FILE) return;
+  try {
+    writeStatus(STATUS_FILE, priceBotStatus(readStatus(STATUS_FILE), run, { ok, error }));
+  } catch (e) {
+    console.error(new Date().toISOString(), "WARN", `status file not written: ${e?.message ?? e}`);
+  }
+}
+
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const warn = (...a) => console.log(new Date().toISOString(), "WARN", ...a);
 const fail = (m) => {
   console.error(new Date().toISOString(), "ERROR", m);
+  saveStatus(false, m);
   process.exit(1);
 };
 
@@ -79,10 +95,16 @@ if (!secret) fail("PRICE_BOT_SECRET is not set");
 const kp = Keypair.fromSecret(secret);
 delete process.env.PRICE_BOT_SECRET;
 const ME = kp.publicKey();
+run.address = ME;
 if (cfg.expectAddress && cfg.expectAddress !== ME) fail(`PRICE_BOT_SECRET does not belong to PRICE_BOT_ADDRESS ${cfg.expectAddress}`);
 
 const server = new rpc.Server(cfg.rpcUrl, { allowHttp: cfg.rpcUrl.startsWith("http://") });
-const passphrase = (await server.getNetwork()).passphrase;
+let passphrase;
+try {
+  passphrase = (await server.getNetwork()).passphrase;
+} catch (e) {
+  fail(`RPC ${cfg.rpcUrl} did not answer: ${e?.message ?? e}`);
+}
 if (passphrase !== Networks.TESTNET) fail(`this bot runs on testnet only (RPC says "${passphrase}")`);
 
 const addr = (a) => new Address(a).toScVal();
@@ -176,7 +198,8 @@ const venues = {
 
 const balance = async (token) => Number(await read(token, "balance", addr(ME))) / S7;
 
-async function runPool(p, warnings) {
+// rec: this pool's line in the status file (filled in as the run goes; never read back here).
+async function runPool(p, warnings, rec) {
   const v = venues[p.venue];
   const [pc, pu] = [await oraclePrice(p.token), await oraclePrice(USDC)];
   const ps = await v.state(p);
@@ -190,6 +213,9 @@ async function runPool(p, warnings) {
     walletCoin: await balance(p.token),
   };
   const d = decide(state, { ...cfg, coinReserve: p.native ? cfg.xlmReserve : 0 });
+  const held = { amount: state.walletCoin, usd: state.coinUsd > 0 ? state.walletCoin * state.coinUsd : null };
+  run.inventory[p.name] = held;
+  Object.assign(rec, { dev: d.deviation, poolPrice: d.poolPrice, refPrice: d.refPrice, action: Number.isFinite(d.deviation) ? "none" : "skipped" });
   for (const n of d.notes) log(n);
   for (const w of d.warnings) warnings.add(w);
   if (!d.action) return;
@@ -204,6 +230,7 @@ async function runPool(p, warnings) {
   log(`${p.name}: swap ${a.amountIn.toPrecision(8)} ${nin} -> ~${estOut.toPrecision(8)} ${nout} (${avg.toPrecision(8)} USDC per ${p.name})`);
   if (!fairEnough(a, estOut, d.refPrice, ps.feeBps, cfg.fairTolerance)) {
     warnings.add(`${p.name}: the router's estimate is worse than the reference less the fee (the pool moved or differs from what was read); nothing sent`);
+    rec.action = "refused";
     return;
   }
   if (DRY) return log(`${p.name}: dry run: nothing sent`);
@@ -212,7 +239,11 @@ async function runPool(p, warnings) {
     .setTimeout(60)
     .build();
   const r = await send(await server.prepareTransaction(tx));
+  Object.assign(rec, { action: "swap", tx: r.hash, dev: NaN }); // the deviation is measured again below
+  held.amount = a.sell === "COIN" ? state.walletCoin - a.amountIn : state.walletCoin + estOut; // about, after the swap
+  if (held.usd !== null) held.usd = held.amount * state.coinUsd;
   const after = poolPrice((await v.state(p)).sqrtPriceX96);
+  Object.assign(rec, { dev: after / d.refPrice - 1, poolPrice: after });
   log(
     `${p.name}: swapped, tx ${r.hash} ledger ${r.ledger} | pool ${d.poolPrice.toPrecision(8)} -> ${after.toPrecision(8)} USDC ` +
       `(reference ${d.refPrice.toPrecision(8)}, deviation now ${((after / d.refPrice - 1) * 100).toFixed(3)}%)`,
@@ -222,18 +253,27 @@ async function runPool(p, warnings) {
 async function main() {
   log(`bot ${ME}  pools ${pools.map((p) => p.name).join(", ")}${DRY ? "  (dry run)" : ""}`);
   if (SETUP) await ensureTrustlines();
-  const warnings = new Set();
+  const warnings = run.warnings;
   let failed = 0;
+  const errors = [];
   for (const p of pools) {
+    const rec = (run.pools[p.name] = { action: "error" });
     try {
-      await runPool(p, warnings);
+      await runPool(p, warnings, rec);
     } catch (e) {
       failed++;
       console.error(new Date().toISOString(), "ERROR", `${p.name}: ${e?.message ?? e}`);
+      Object.assign(rec, { action: "error", dev: NaN, error: String(e?.message ?? e) });
+      errors.push(`${p.name}: ${e?.message ?? e}`);
     }
   }
+  run.checked = true;
   for (const w of warnings) warn(w);
-  log(`wallet ${(await balance(USDC)).toFixed(4)} USDC`);
+  const usdc = await balance(USDC);
+  const usdcUsd = priceCache.get(USDC)?.price;
+  run.inventory.USDC = { amount: usdc, usd: usdcUsd > 0 ? usdc * usdcUsd : null };
+  log(`wallet ${usdc.toFixed(4)} USDC`);
+  saveStatus(failed === 0, failed ? `${failed} of ${pools.length} pools failed: ${errors.join("; ")}` : null);
   if (failed) process.exit(1);
 }
 
