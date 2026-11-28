@@ -3,7 +3,7 @@
 #   bash scripts/server.sh setup     first time: installs Node, swap, firewall and the service; copies code and the key
 #   bash scripts/server.sh push      copies the current code and settings and restarts the keeper, with a safety net:
 #                                    the keeper's tests run on the server first (SKIP_TESTS=1 skips them), the running
-#                                    code is backed up, and if the new keeper completes no scan within 120 s the
+#                                    code is backed up, and if the new keeper completes no scan within 180 s the
 #                                    backup is restored and restarted by itself
 #   bash scripts/server.sh test      runs the keeper's tests on the server against the current code; installs nothing
 #   bash scripts/server.sh backup    packs the running keeper code into /opt/iora/backups (the newest 5 are kept)
@@ -96,20 +96,21 @@ REMOTE
   install_and_restart
 }
 
-# Waits up to 120 s for a scan completed by the restarted keeper: status.json must show a new pid and a last_scan
-# after the restart (both saved by install_and_restart). Returns 0 when seen.
+# Waits up to 180 s for a scan completed by the restarted keeper (the first scan lists every vault: about 50 s on
+# testnet): status.json must show a new pid and a last_scan after the restart (both saved by install_and_restart).
+# Returns 0 when seen.
 wait_first_scan() {
   $SSH 'bash -s' <<'REMOTE'
 START=$(cat /run/iora-keeper-restart-at 2>/dev/null || echo 0)
 OLDPID=$(cat /run/iora-keeper-old-pid 2>/dev/null || echo 0)
-for i in $(seq 1 24); do
+for i in $(seq 1 36); do
   sleep 5
   set -- $(node -e 'try { const s = JSON.parse(require("fs").readFileSync("/opt/iora/keeper/status.json", "utf8"));
     const v = s.last_scan, t = typeof v === "number" ? v : Date.parse(v || "");
     console.log((Number.isFinite(t) ? Math.floor(t / 1000) : 0) + " " + (s.pid || 0)); } catch { console.log("0 0"); }')
   if [ "$1" -gt "$START" ] && [ "$2" != "$OLDPID" ]; then echo "first scan $(( $1 - START )) s after the restart (pid $2)"; exit 0; fi
 done
-echo "no completed scan within 120 s of the restart"
+echo "no completed scan within 180 s of the restart"
 exit 1
 REMOTE
 }
@@ -236,7 +237,7 @@ tar czf - --exclude=keeper/node_modules --exclude=keeper/status.json --exclude=k
 cd / && rm -rf "$STAGE"
 REMOTE
   install_and_restart
-  echo "[4/4] Waiting for the first scan of the new keeper (up to 120 s)..."
+  echo "[4/4] Waiting for the first scan of the new keeper (up to 180 s)..."
   if ! wait_first_scan; then
     echo "ROLLING BACK to $BACKUP ..."
     rollback_remote "$BACKUP"
