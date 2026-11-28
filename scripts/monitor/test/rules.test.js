@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { decide as priceDecide } from "../../price-bot/logic.js";
 import { decide as borrowDecide } from "../../blend-borrower/logic.js";
-import { BOTS, DEFAULTS, amount, config, debtSummary, evaluate, inventoryWarning, pct, stateFileOf } from "../rules.js";
+import { BOTS, DEFAULTS, amount, config, debtSummary, evaluate, inventoryWarning, pct, stateFileOf, unwatchedKeys } from "../rules.js";
 
 const NOW = Date.parse("2026-11-28T12:00:00Z");
 const MIN = 60000;
@@ -24,13 +24,14 @@ const borrowerStatus = (o = {}) => ({
   warnings: [], pricesOk: true, hf: 2.05, collateralUsd: 640, liabilitiesUsd: 312,
   usdc: { util: 0.6, debt: 296.4, collateralXlm: 5000 }, ...o,
 });
-/** Everything fine; o: { bots: { NAME: {...} }, faucet, exchange, systemdError } */
+/** Everything fine; o: { bots: { NAME: {...} }, watch, faucet, exchange, systemdError } */
 const input = (o = {}) => ({
   bots: {
     "price-bot": { units: unitsOk(), status: priceStatus(), ...o.bots?.["price-bot"] },
     borrower: { units: unitsOk(), status: borrowerStatus(), ...o.bots?.borrower },
     "borrower-multi": { units: unitsOk(), status: borrowerStatus({ usdc: undefined, hf: null, liabilitiesUsd: 0 }), ...o.bots?.["borrower-multi"] },
   },
+  watch: "watch" in o ? o.watch : { "iora-keeper-heartbeat.timer": unitsOk().timer },
   faucet: "faucet" in o ? o.faucet : { xlm: 1999.99, usdc: 14603.3 },
   exchange: "exchange" in o ? o.exchange : { usdc: 2995.47 },
   systemdError: o.systemdError ?? null,
@@ -68,6 +69,9 @@ test("settings: defaults, a subset of bots, unknown names and bad numbers", () =
   assert.throws(() => cfg({ MIN_HF: "abc" }), /MIN_HF=abc is not a number/);
   assert.throws(() => cfg({ FAILED_RUNS: "0" }), /FAILED_RUNS/);
   assert.equal(cfg({ BOTS: "" }).bots.length, 0);
+  assert.deepEqual(c.watchTimers, ["iora-keeper-heartbeat.timer"]);
+  assert.deepEqual(cfg({ WATCH_TIMERS: "" }).watchTimers, []);
+  assert.deepEqual(cfg({ WATCH_TIMERS: " a.timer, b.timer,,a.timer " }).watchTimers, ["a.timer", "b.timer"]);
 });
 
 test("state file: MONITOR_STATE_FILE, else STATE_DIRECTORY, else the temp dir", () => {
@@ -284,6 +288,40 @@ test("systemd: not read -> timer and service unknown; readable failure -> soft n
   for (const k of ["price-bot:timer", "price-bot:failed", "price-bot:enabled"]) assert.ok(r.unknown.includes(k), k);
   const s = one(run({ systemdError: "Failed to connect to bus" }), "check:systemd");
   assert.equal(s.level, "soft");
+});
+
+test("WATCH_TIMERS: the keeper heartbeat's timer must be active (the heartbeat watches this check in turn)", () => {
+  const hb = "iora-keeper-heartbeat.timer";
+  const t = (o) => ({ [hb]: { ...unitsOk().timer, ...o } });
+  let p = one(run({ watch: t({ ActiveState: "inactive", SubState: "dead" }) }), `watch:${hb}`);
+  assert.equal(p.level, "alarm");
+  assert.equal(p.text, "timer iora-keeper-heartbeat.timer is not active: the keeper heartbeat check does not run");
+  assert.equal(p.title, "timer iora-keeper-heartbeat.timer not active");
+  p = one(run({ watch: t({ LoadState: "not-found", ActiveState: "inactive" }) }), `watch:${hb}`);
+  assert.equal(p.text, "timer iora-keeper-heartbeat.timer is not active (not installed): the keeper heartbeat check does not run");
+  p = one(run({ watch: t({ ActiveState: "failed" }) }), `watch:${hb}`);
+  assert.match(p.text, /is not active \(failed\):/);
+  assert.deepEqual(keys(run({ watch: t({ ActiveState: "reloading" }) })), []);
+  // other units: a generic text, "unit" for anything that is not a timer
+  const r = run(
+    { watch: { "x.timer": { LoadState: "loaded", ActiveState: "inactive" }, "iora-keeper.service": { LoadState: "loaded", ActiveState: "failed" } } },
+    { WATCH_TIMERS: "x.timer,iora-keeper.service" },
+  );
+  assert.deepEqual(r.problems.map((x) => x.text), ["timer x.timer is not active", "unit iora-keeper.service is not active (failed)"]);
+  // empty: off
+  assert.deepEqual(run({ watch: t({ ActiveState: "inactive" }) }, { WATCH_TIMERS: "" }).problems, []);
+  // systemd not read: no alarm, the state is kept; one unit not read: only that one
+  const unread = run({ watch: null });
+  assert.deepEqual(keys(unread), []);
+  assert.ok(unread.unknown.includes("watch:"));
+  const half = run({ watch: {} });
+  assert.deepEqual(keys(half), []);
+  assert.ok(half.unknown.includes(`watch:${hb}`));
+  // a unit taken out of WATCH_TIMERS: its old state is dropped without an OK line
+  const items = { [`watch:${hb}`]: {}, "watch:old.timer": {}, "price-bot:stale": {} };
+  assert.deepEqual(unwatchedKeys(items, cfg()), ["watch:old.timer"]);
+  assert.deepEqual(unwatchedKeys(items, cfg({ WATCH_TIMERS: "" })), [`watch:${hb}`, "watch:old.timer"]);
+  assert.deepEqual(unwatchedKeys(null, cfg()), []);
 });
 
 test("bots left out of BOTS: their old state is dropped, and they are not checked", () => {

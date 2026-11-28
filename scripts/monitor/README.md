@@ -22,6 +22,7 @@ systemd `StateDirectory=`:
 | Rule | Kind | Default (setting) |
 |---|---|---|
 | A bot's timer is not installed or not active | alarm | |
+| A watched unit is not active: by default the keeper heartbeat check's timer (see "Watching each other" below) | alarm | `WATCH_TIMERS=iora-keeper-heartbeat.timer` |
 | A bot's service is in failed state: `FAILED_RUNS` failed runs in a row, or a failure the bot could not record (start-up error, crash, timeout) | alarm | 2 (`FAILED_RUNS`) |
 | No successful run for too long | alarm | price bot 15 min, borrowers 45 min (`PRICE_BOT_MAX_AGE_MIN`, `BORROWER_MAX_AGE_MIN`) |
 | No status file (told only when it stays missing for the age limit, so a fresh install is quiet) | alarm | |
@@ -44,6 +45,12 @@ systemd `StateDirectory=`:
 - **Exit code:** 0 nothing wrong (or only soft notices), 1 an alarm or a stock warning is active (the unit then also
   shows in `systemctl --failed`), 2 the check itself failed (also told on Telegram, at most once an hour).
 - **Without Telegram settings** the messages only go to the journal.
+
+**Watching each other.** This check alarms when `iora-keeper-heartbeat.timer` is not active (`WATCH_TIMERS`), and
+the keeper heartbeat check (`keeper/monitor/check-heartbeat.sh`) alarms when `iora-bots-check.timer` is not active
+(`WATCH_UNITS`). Either one stopping is noticed by the other. Both lists take commas (or spaces); empty turns them
+off.
+If systemd cannot be read, this check says so with its soft notice, not with this alarm.
 
 A message looks like this:
 
@@ -116,6 +123,8 @@ secrets in `/etc/iora`. Testnet only.
    systemctl list-timers 'iora-*' --no-pager
    ```
    `systemctl start` reports a failure when the check found an alarm (exit 1): read the journal lines.
+   Copy the new `keeper/monitor/check-heartbeat.sh` (with `WATCH_UNITS`) after this step: before
+   `iora-bots-check.timer` is enabled, the heartbeat would report "unit iora-bots-check.timer is not active".
 7. Optional, to see a message arrive: add `FAUCET_MIN_USDC=1000000` to `/etc/iora/monitor.env` and run
    `systemctl start iora-bots-check.service` (a `LOW faucet` message). Remove the line and run it again (an
    `OK (was: faucet: Circle USDC low)` message).

@@ -348,6 +348,41 @@ test("main: without systemctl the unit checks are skipped; without Telegram the 
   }
 });
 
+test("main: WATCH_TIMERS: the keeper heartbeat's timer stopped -> ALARM, hourly, OK when back; systemd errors stay soft", async () => {
+  const w = world();
+  const hb = "iora-keeper-heartbeat.timer";
+  const at = (t, env) => {
+    healthy(w, t);
+    return w.check(t, env);
+  };
+  try {
+    w.units[hb] = { LoadState: "loaded", ActiveState: "inactive", SubState: "dead", Result: "success", UnitFileState: "enabled" };
+    assert.equal(await at(NOW), 1);
+    assert.equal(w.texts()[0], "[Iora bots] ALARM on test-host\nALARM timer iora-keeper-heartbeat.timer is not active: the keeper heartbeat check does not run");
+    assert.equal(await at(NOW + 5 * MIN), 1);
+    assert.equal(w.sent.length, 1);
+    assert.equal(await at(NOW + 61 * MIN), 1);
+    assert.equal(w.sent.length, 2);
+    delete w.units[hb]; // active again
+    assert.equal(await at(NOW + 66 * MIN), 0);
+    assert.equal(w.texts()[2], "[Iora bots] recovered on test-host\nOK (was: timer iora-keeper-heartbeat.timer not active)");
+    // stopped again, then taken out of WATCH_TIMERS: dropped without an OK line
+    w.units[hb] = { LoadState: "loaded", ActiveState: "inactive" };
+    assert.equal(await at(NOW + 70 * MIN), 1);
+    assert.equal(w.sent.length, 4);
+    assert.equal(await at(NOW + 75 * MIN, { WATCH_TIMERS: "" }), 0);
+    assert.equal(w.sent.length, 4);
+    assert.deepEqual(Object.keys(w.state().items), []);
+    // systemd cannot be read for that unit: not this alarm, the soft notice after SOFT_DELAY_MIN
+    w.units[hb] = Object.assign(new Error("Failed to connect to bus: No such file or directory"), { code: 1 });
+    assert.equal(await at(NOW + 80 * MIN), 0);
+    assert.equal(await at(NOW + 90 * MIN), 0);
+    assert.equal(w.texts()[4], "[Iora bots] WARNING on test-host\nNOTE the check cannot read systemd (Failed to connect to bus: No such file or directory): timers and services are not checked");
+  } finally {
+    w.clean();
+  }
+});
+
 test("main: a run that finishes while systemd is read does not give a false 'failed' alarm", async () => {
   const w = world();
   try {

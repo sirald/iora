@@ -7,7 +7,7 @@ import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, w
 import { hostname } from "node:os";
 import { promisify } from "node:util";
 import { message, step, summary } from "./alerts.js";
-import { config, evaluate, stateFileOf } from "./rules.js";
+import { config, evaluate, stateFileOf, unwatchedKeys } from "./rules.js";
 
 const execFileP = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -132,7 +132,7 @@ export async function telegram(text, env, fetchImpl = globalThis.fetch, err = co
 
 /** Everything the rules need, read from systemd, the status files, Horizon and the RPC. */
 export async function gather(cfg, d) {
-  const input = { bots: {}, faucet: null, exchange: null, systemdError: null, notes: [] };
+  const input = { bots: {}, watch: null, faucet: null, exchange: null, systemdError: null, notes: [] };
   let systemd = cfg.systemd !== "off";
   if (!systemd) input.notes.push("SYSTEMD=off: timers and services are not checked");
   const readStatus = (file) => {
@@ -161,6 +161,22 @@ export async function gather(cfg, d) {
     }
     const after = units ? readStatus(bot.status) : before;
     input.bots[bot.name] = { units, ...after, raced: (before.status?.at ?? null) !== (after.status?.at ?? null) };
+  }
+  // WATCH_TIMERS (the keeper heartbeat's timer by default): a unit that cannot be read is left out (unknown)
+  if (systemd && cfg.watchTimers.length > 0) {
+    input.watch = {};
+    for (const unit of cfg.watchTimers) {
+      try {
+        input.watch[unit] = await unitState(unit, d.run);
+      } catch (e) {
+        if (e?.code === "ENOENT") {
+          input.watch = null;
+          input.notes.push("systemctl not found: timers and services are not checked");
+          break;
+        }
+        input.systemdError ??= oneLine(e?.stderr || e?.message || e);
+      }
+    }
   }
   if (cfg.faucet) input.faucet = await faucetBalances(cfg, d.fetch, d.sleep);
   if (cfg.exchange) input.exchange = await d.exchange(cfg);
@@ -217,7 +233,9 @@ export async function main({ env = process.env, now = Date.now(), deps = {} } = 
   const cfg = config(env);
   const input = await gather(cfg, d);
   const found = evaluate(input, cfg, now);
-  const plan = step(readJson(cfg.stateFile, d), found.problems, found, now, cfg);
+  const prev = readJson(cfg.stateFile, d);
+  found.ignore.push(...unwatchedKeys(prev?.items, cfg));
+  const plan = step(prev, found.problems, found, now, cfg);
   for (const n of input.notes) d.out(`note: ${n}`);
   d.out(summary(plan));
   const text = message(plan, d.host);

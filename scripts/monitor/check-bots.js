@@ -7,6 +7,8 @@
 //     bot's inventory warnings, a pool off the Reflector price for several runs in a row, a borrower's health
 //     factor below MIN_HF. It reads each bot's status file (written at the end of every run by the bot's status.js)
 //     and `systemctl show`.
+//   - other units that must be active (WATCH_TIMERS): by default the keeper heartbeat check's timer, which in turn
+//     watches this check's timer (WATCH_UNITS in keeper/monitor/check-heartbeat.sh).
 //   - the site's faucet account (Horizon, read only): Circle USDC and XLM left.
 //   - the USDC exchange contract: its Circle USDC balance, read with a simulation (nothing is signed or sent).
 //

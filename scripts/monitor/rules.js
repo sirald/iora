@@ -36,6 +36,17 @@ export const BOTS = {
   },
 };
 
+/**
+ * Other units the check watches (WATCH_TIMERS): each must be active. The keeper heartbeat check watches this
+ * check's timer in turn (keeper/monitor/check-heartbeat.sh, WATCH_UNITS), so either one stopping is noticed.
+ * What each known one does, for the alarm text:
+ */
+export const WATCHED = {
+  "iora-keeper-heartbeat.timer": "the keeper heartbeat check does not run",
+};
+/** ActiveState values that `systemctl is-active` also counts as running. */
+const RUNNING = new Set(["active", "reloading", "refreshing"]);
+
 /** Public testnet addresses (testnet/addr.env, testnet/mover.env) and endpoints. */
 export const DEFAULTS = {
   faucet: "GDWNSKKAMSQZRLV4EGXFMY7QSUQ5EOOXJGUNMLH6H3KFU4B2ZZESSY47", // the site's faucet (web/api/faucet.js)
@@ -73,6 +84,7 @@ export function config(env) {
   });
   return {
     bots,
+    watchTimers: [...new Set(str("WATCH_TIMERS", Object.keys(WATCHED).join(",")).split(/[\s,]+/).filter(Boolean))],
     systemd: str("SYSTEMD", "auto").toLowerCase() === "off" ? "off" : "auto",
     failedRuns: Math.round(num("FAILED_RUNS", 2, 1)),
     maxPoolDev: num("MAX_POOL_DEV", 0.01, 0),
@@ -120,6 +132,8 @@ const ago = (min) => (min < 120 ? `${Math.round(min)} min` : min < 48 * 60 ? `${
  *         units' values are `systemctl show` properties: { LoadState, ActiveState, SubState, Result, UnitFileState };
  *         raced: the status file changed while systemd was read
  *   systemdError: string | null      systemctl exists but could not be read
+ *   watch: { UNIT: systemctl show properties } | null (systemd not read)   the WATCH_TIMERS units; a unit
+ *         missing from it could not be read
  *   faucet: { xlm, usdc (null = no trustline) } | { notFound: true } | { error } | null (check off)
  *   exchange: { usdc } | { error, sdkMissing? } | null (check off)
  * }
@@ -136,9 +150,39 @@ export function evaluate(input, cfg, now) {
     });
   }
   for (const bot of cfg.bots) botRules(bot, input.bots?.[bot.name] ?? {}, cfg, now, out);
+  watchRules(input.watch ?? null, cfg, out);
   faucetRules(input.faucet, cfg, out);
   exchangeRules(input.exchange, cfg, out);
   return out;
+}
+
+/** WATCH_TIMERS: each listed unit must be active. systemd not read: unknown (the soft notice says why). */
+function watchRules(watch, cfg, out) {
+  if (cfg.watchTimers.length === 0) return;
+  if (!watch) {
+    out.unknown.push("watch:");
+    return;
+  }
+  for (const unit of cfg.watchTimers) {
+    const u = watch[unit];
+    if (!u) {
+      out.unknown.push(`watch:${unit}`);
+      continue;
+    }
+    if (RUNNING.has(u.ActiveState)) continue;
+    const kind = unit.endsWith(".timer") ? "timer" : "unit";
+    const state = u.LoadState === "not-found" ? " (not installed)" : u.ActiveState && u.ActiveState !== "inactive" ? ` (${u.ActiveState})` : "";
+    out.problems.push({
+      key: `watch:${unit}`, level: "alarm", title: `${kind} ${unit} not active`,
+      text: `${kind} ${unit} is not active${state}${WATCHED[unit] ? `: ${WATCHED[unit]}` : ""}`,
+    });
+  }
+}
+
+/** State keys of units taken out of WATCH_TIMERS: dropped without an "OK" line (like a bot taken out of BOTS). */
+export function unwatchedKeys(items, cfg) {
+  const keep = new Set(cfg.watchTimers.map((u) => `watch:${u}`));
+  return Object.keys(items && typeof items === "object" ? items : {}).filter((k) => k.startsWith("watch:") && !keep.has(k));
 }
 
 function botRules(bot, got, cfg, now, out) {
