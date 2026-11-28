@@ -72,14 +72,20 @@ export function targetUtil(c, irMod, target, bstopRate, overshoot) {
  * }
  * targets: { NAME: { supplyApr, maxBorrowApr, maxDebtUsd, supplyUsd, band } }
  * cfg: { minHf, targetHf, minActionUsd, overshoot, collateral: { coin, targetUsd }, reserve: { NAME: units kept } }
- * Returns { requests: [{ coin, kind: "supply" | "collateral" | "borrow" | "repay", amount }], notes }.
+ * Returns { requests: [{ coin, kind: "supply" | "collateral" | "borrow" | "repay", amount }], notes, warnings }.
+ * warnings: the notes that ask for a top-up (they are in notes too); the status file carries them to the bots check.
  */
 export function decideMulti(state, targets, cfg) {
   const requests = [];
   const notes = [];
+  const warnings = [];
+  const warn = (w) => {
+    notes.push(w);
+    warnings.push(w);
+  };
   if (!state.pricesOk) {
     notes.push("multi: an oracle price of a coin the bot holds a position in is missing or stale: nothing done");
-    return { requests, notes };
+    return { requests, notes, warnings };
   }
   let effCol = state.effCollateral;
   let effLiab = state.effLiabilities;
@@ -97,7 +103,7 @@ export function decideMulti(state, targets, cfg) {
       wallet[cc] -= add;
       effCol += usd(cc, add) * cs.curve.c_factor;
     } else if (missing > 0 && usd(cc, missing) >= cfg.minActionUsd) {
-      notes.push(`multi: collateral ${cc} short by ${missing.toPrecision(6)} and the wallet has ${wallet[cc].toPrecision(6)}: mint more (fund-bot.sh)`);
+      warn(`multi: collateral ${cc} short by ${missing.toPrecision(6)} and the wallet has ${wallet[cc].toPrecision(6)}: mint more (fund-multi.sh)`);
     }
   } else if (cc) {
     notes.push(`multi: collateral coin ${cc} is not an active reserve with a price yet: no new collateral`);
@@ -121,8 +127,8 @@ export function decideMulti(state, targets, cfg) {
         effLiab -= (usd(k, amount)) / s.curve.l_factor;
       }
     }
-    if (effLiab > effCol / cfg.targetHf) notes.push("multi: wallet balances are not enough to restore the target health factor: add collateral (fund-bot.sh)");
-    return { requests, notes };
+    if (effLiab > effCol / cfg.targetHf) warn("multi: wallet balances are not enough to restore the target health factor: add collateral (fund-multi.sh)");
+    return { requests, notes, warnings };
   }
 
   // 3) Each coin: lender supply, then borrow / repay towards the utilisation that pays the target supply APR.
@@ -183,5 +189,5 @@ export function decideMulti(state, targets, cfg) {
       } else if (s.ownDebt > 0) notes.push(`multi: ${k}: above the target, but nothing (enough) of the bot's own debt or wallet to repay`);
     }
   }
-  return { requests, notes };
+  return { requests, notes, warnings };
 }

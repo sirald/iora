@@ -1,0 +1,14 @@
+{
+  "name": "iora-bots-check",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Iora testnet: Telegram alarms for the price bot, the Blend borrower bots, the site faucet and the USDC exchange",
+  "main": "check-bots.js",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

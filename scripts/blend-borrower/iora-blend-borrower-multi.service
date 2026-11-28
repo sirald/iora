@@ -16,3 +16,6 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/opt/iora/blend-borrower
+# The status file for the bots check (scripts/monitor): its own directory, so the two accounts never share a file.
+# systemd creates /var/lib/iora/borrower-multi (owner iora) and passes it as STATE_DIRECTORY.
+StateDirectory=iora/borrower-multi

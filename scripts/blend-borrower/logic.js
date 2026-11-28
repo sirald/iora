@@ -21,11 +21,13 @@ export function healthFactor(effCollateral, effLiabilities) {
  *   walletUsdc, walletColl       what the bot's account holds
  * }
  * cfg: { utilTarget, utilBand, minHf, targetHf, maxDebt, collateralTarget, collReserve, minAction }
- * Returns { actions: [{ kind: "collateral" | "repay" | "borrow", amount }], notes: [string] }.
+ * Returns { actions: [{ kind: "collateral" | "repay" | "borrow", amount }], notes: [string], warnings: [string] }.
+ * warnings: the notes that ask for a top-up (they are in notes too); the status file carries them to the bots check.
  */
 export function decide(state, cfg) {
   const actions = [];
   const notes = [];
+  const warnings = [];
   const low = cfg.utilTarget - cfg.utilBand;
   const high = cfg.utilTarget + cfg.utilBand;
   const util = state.supplied > 0 ? state.borrowed / state.supplied : 0;
@@ -33,7 +35,7 @@ export function decide(state, cfg) {
 
   if (!state.pricesOk) {
     notes.push("oracle price missing or stale: nothing done (borrowing would fail, and the health factor is unknown)");
-    return { actions, notes };
+    return { actions, notes, warnings };
   }
 
   let effCol = state.effCollateral;
@@ -61,9 +63,13 @@ export function decide(state, cfg) {
     const repayUsd = (effLiab - allowedEffLiab) * state.usdcLFactor;
     const want = Math.min(debt, repayUsd / state.usdcPrice);
     const amount = Math.min(want, wallet);
-    if (amount < want) notes.push(`wallet holds only ${wallet.toFixed(4)} USDC of ${want.toFixed(4)} needed: add XLM or USDC to the bot`);
+    if (amount < want) {
+      const w = `wallet holds only ${wallet.toFixed(4)} USDC of ${want.toFixed(4)} needed: add XLM or USDC to the bot`;
+      notes.push(w);
+      warnings.push(w);
+    }
     if (amount >= cfg.minAction) actions.push({ kind: "repay", amount });
-    return { actions, notes };
+    return { actions, notes, warnings };
   }
 
   // 3) Utilisation above the band: repay towards the target.
@@ -72,14 +78,14 @@ export function decide(state, cfg) {
     const amount = Math.min(want, wallet);
     if (amount >= cfg.minAction) actions.push({ kind: "repay", amount });
     else notes.push("above the band, but nothing (enough) to repay");
-    return { actions, notes };
+    return { actions, notes, warnings };
   }
 
   // 4) Utilisation below the band: borrow towards the target, limited by the health factor and maxDebt.
   if (util < low) {
     if (!state.poolActive) {
       notes.push("pool not Active: no borrowing");
-      return { actions, notes };
+      return { actions, notes, warnings };
     }
     const want = cfg.utilTarget * state.supplied - state.borrowed;
     const byHf = Math.max(0, ((effCol / cfg.targetHf - effLiab) * state.usdcLFactor) / state.usdcPrice);
@@ -87,9 +93,9 @@ export function decide(state, cfg) {
     const amount = Math.min(want, byHf, byCap);
     if (amount < want) notes.push(`borrow limited to ${amount.toFixed(4)} USDC (health factor or MAX_DEBT)`);
     if (amount >= cfg.minAction) actions.push({ kind: "borrow", amount });
-    return { actions, notes };
+    return { actions, notes, warnings };
   }
 
   notes.push("inside the band: nothing to do");
-  return { actions, notes };
+  return { actions, notes, warnings };
 }

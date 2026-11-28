@@ -15,6 +15,23 @@ network passphrase).
 - `logic.js`: the decision, no network. Tests: `npm test`.
 - `iora-blend-borrower.service` / `.timer`: oneshot service every 10 minutes.
 - `borrower.env.example`: settings; the real file is `/etc/iora/borrower.env`.
+- `status.js`: the status file (below). Tests: `npm test`.
+
+## Status file and alarms
+
+At the end of every run, success or failure, the bot writes a status file into its unit's `StateDirectory=` (passed
+as `STATE_DIRECTORY`; `STATUS_FILE` overrides it): `/var/lib/iora/borrower/status.json` for the USDC bot,
+`/var/lib/iora/borrower-multi/status.json` for the second account. A dry run and a run by hand without either write
+nothing. Writing it never fails a run and never changes what the bot borrows or repays.
+
+It holds `at`, `ok`, `error` (when it failed), `lastOkAt`, `failsInRow`, the top-up `warnings`, the health factor
+`hf` after the run (estimated from what was read when it sent something; `null` without debt or with a missing
+price), the effective collateral and liabilities in USD, the USDC step's utilisation, debt and collateral (`usdc`),
+and per other coin its utilisation, target, supply APR, debt, supply and collateral (`coins`).
+
+The bots check (`scripts/monitor`, Telegram) reads it: no successful run for 45 minutes, failed runs, top-up warnings,
+and a health factor below 1.3 are told on Telegram. Nothing liquidates positions in Iora's own pool, so the health
+factor alarm is the early warning. Install it with `scripts/monitor/README.md`.
 
 ## Install on the server (done by the operator)
 
@@ -39,7 +56,9 @@ Run as root on the server. The server layout is the keeper's (`scripts/server.sh
    then the same without `--dry-run`.
 5. Timer:
    `cp iora-blend-borrower.service iora-blend-borrower.timer /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now iora-blend-borrower.timer`
-   Logs: `journalctl -u iora-blend-borrower -n 50`.
+   Logs: `journalctl -u iora-blend-borrower -n 50`. The last run: `cat /var/lib/iora/borrower/status.json`.
+6. Alarms: install the bots check (`scripts/monitor/README.md`). An older unit without `StateDirectory=` writes no
+   status file: copy the unit again and run `systemctl daemon-reload`.
 
 To stop: `systemctl disable --now iora-blend-borrower.timer`. The open position stays; repay it by hand or set
 `UTIL_TARGET` low and let the bot repay.

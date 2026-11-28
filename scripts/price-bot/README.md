@@ -49,6 +49,21 @@ The bot is separate from the keeper: its own directory, account, key and systemd
 - `fund-bot.sh`: fills the inventory (see below).
 - `iora-price-bot.service` / `.timer`: a oneshot service every 2 minutes.
 - `price-bot.env.example`: the settings. The real file is `/etc/iora/price-bot.env`.
+- `status.js`: the status file (below). Tests: `npm test`.
+
+## Status file and alarms
+
+At the end of every run, success or failure, the bot writes `/var/lib/iora/price-bot/status.json` (the unit's
+`StateDirectory=`, passed as `STATE_DIRECTORY`; `STATUS_FILE` overrides it). A dry run and a run by hand without
+either write nothing. Writing it never fails a run and never changes a trade.
+
+It holds `at`, `ok`, `error` (when it failed), `lastOkAt`, `failsInRow`, the run's `warnings`, per pool the
+deviation from the Reflector price after the run and what the bot did (`none`, `swap`, `refused`, `skipped`,
+`error`), the inventory per coin and in USD, and the deviations of the last 10 runs (`history`).
+
+The bots check (`scripts/monitor`, Telegram) reads it: no successful run for 15 minutes, failed runs, inventory
+warnings, and a pool more than 1% off the Reflector price for 3 runs in a row are told on Telegram. Install it with
+`scripts/monitor/README.md`.
 
 ## Inventory
 
@@ -67,8 +82,8 @@ Suggested start: **500 USD of each coin + 1500 USDC + friendbot's 10,000 XLM**. 
 - A 2% correction on a 1500 USDC pair is about 15 USD.
 - A 2% correction on the 3000 USDC XLM pool is about 30 USD.
 
-Top up with `fund-bot.sh` when the WARN lines appear. The script only tops up to the given amounts, so running it
-again is safe.
+Top up with `fund-bot.sh` when the WARN lines appear (the bots check, `scripts/monitor`, also tells them on Telegram,
+at most every 12 hours). The script only tops up to the given amounts, so running it again is safe.
 
 **Arbitrage:** anyone can buy XLM in the reference pool at ~0.127 and sell it in the far-off Soroswap XLM pool
 (~0.60). The bot then sells XLM back into its pool, so that arbitrage drains its XLM. Each run is capped by
@@ -99,6 +114,9 @@ Run as root on the server. The server layout is the keeper's (`scripts/server.sh
    `cp iora-price-bot.service iora-price-bot.timer /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now iora-price-bot.timer`
    - Logs: `journalctl -u iora-price-bot -n 50`
    - Warnings only: `journalctl -u iora-price-bot | grep WARN`
+   - The last run: `cat /var/lib/iora/price-bot/status.json`
+7. Alarms: install the bots check (`scripts/monitor/README.md`). An older unit without `StateDirectory=` writes no
+   status file: copy the unit again and run `systemctl daemon-reload`.
 
 When a pool is added or moves, run `make-pools.sh`, copy `pools.json` to `/opt/iora/price-bot/`, and then run
 step 4 again for any new trustline.

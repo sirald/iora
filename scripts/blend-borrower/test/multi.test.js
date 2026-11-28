@@ -132,3 +132,19 @@ test("XLM keeps its fee reserve", () => {
   const r = decideMulti(st, { XLM: targets.XLM }, cfg);
   near(r.requests.find((q) => q.kind === "repay").amount, 10); // 60 - 50 reserve
 });
+
+test("top-up warnings for the bots check: collateral short, wallets that cannot restore the health factor", () => {
+  assert.deepEqual(decideMulti(base(), targets, cfg).warnings, []);
+  const st = base();
+  st.coins.iBTC.wallet = 0; // the collateral target wants 0.2 iBTC, nothing to post
+  let r = decideMulti(st, targets, cfg);
+  assert.deepEqual(r.warnings, ["multi: collateral iBTC short by 0.200000 and the wallet has 0.00000: mint more (fund-multi.sh)"]);
+  assert.ok(r.notes.includes(r.warnings[0]));
+  const low = base();
+  low.coins.iSOL = coin({ price: 72, curve: SOL, supplied: 100, borrowed: 20, ownDebt: 20, wallet: 1 });
+  low.coins.iBTC.wallet = 0;
+  low.effCollateral = 1300;
+  low.effLiabilities = 1000; // HF 1.3, the wallet repays only 1 iSOL
+  r = decideMulti(low, targets, { ...cfg, collateral: { coin: "iBTC", targetUsd: 0 } });
+  assert.deepEqual(r.warnings, ["multi: wallet balances are not enough to restore the target health factor: add collateral (fund-multi.sh)"]);
+});

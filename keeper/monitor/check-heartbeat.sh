@@ -11,6 +11,10 @@
 #   MAX_STALL_SEC      the main loop has not moved for this long (loop_progress_age_sec) = alarm, even while the
 #                      heartbeat is fresh (default 180; stage and stage_sec in status.json say where it is)
 #   SERVICE            systemd unit to check (default iora-keeper.service; empty = skip the check)
+#   WATCH_UNITS        other systemd units that must be active, space- or comma-separated (default
+#                      iora-bots-check.timer: the bots check, scripts/monitor, which watches this check's timer in turn
+#                      with WATCH_TIMERS, so either one stopping is noticed; empty = skip the check). Like SERVICE,
+#                      checked only where systemctl exists.
 #   MAX_RPC_ERRORS     rpc_consecutive_errors at or above this = alarm (default 20)
 #   MAX_FAILED_SCANS   failed_scans_in_row at or above this = alarm (default 10)
 #   MAX_TTL_AGE_H      last full TTL round older than this (hours) = alarm (default 48; the keeper runs one a day)
@@ -24,6 +28,7 @@ STATUS="${1:-$(dirname "$0")/../status.json}"
 MAX_AGE_SEC="${MAX_AGE_SEC:-120}"
 MAX_STALL_SEC="${MAX_STALL_SEC:-180}"
 SERVICE="${SERVICE-iora-keeper.service}"
+WATCH_UNITS="${WATCH_UNITS-iora-bots-check.timer}"
 MAX_RPC_ERRORS="${MAX_RPC_ERRORS:-20}"
 MAX_FAILED_SCANS="${MAX_FAILED_SCANS:-10}"
 MAX_TTL_AGE_H="${MAX_TTL_AGE_H:-48}"
@@ -34,6 +39,15 @@ problems=()
 
 if [ -n "$SERVICE" ] && command -v systemctl > /dev/null; then
   systemctl is-active --quiet "$SERVICE" || problems+=("service $SERVICE is not active")
+fi
+
+# The other checks that must be running (by default the bots check's timer, which watches this one in turn).
+if [ -n "$WATCH_UNITS" ] && command -v systemctl > /dev/null; then
+  IFS=', ' read -r -a watch_units <<< "$WATCH_UNITS"
+  for u in ${watch_units[@]+"${watch_units[@]}"}; do
+    [ -z "$u" ] && continue
+    systemctl is-active --quiet "$u" || problems+=("unit $u is not active")
+  done
 fi
 
 if [ ! -f "$STATUS" ]; then

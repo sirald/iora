@@ -1,0 +1,23 @@
+[Unit]
+Description=Iora bots check (testnet): Telegram alarms for the price bot, the Blend borrowers, the faucet and the USDC exchange
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=iora
+WorkingDirectory=/opt/iora/monitor
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID: the keeper heartbeat's file (root-only is fine: systemd reads it as root).
+EnvironmentFile=-/etc/iora/heartbeat.env
+# Optional limits and switches (see monitor.env.example); it is read after heartbeat.env.
+EnvironmentFile=-/etc/iora/monitor.env
+ExecStart=/usr/bin/node check-bots.js
+TimeoutStartSec=150
+# What was told and when (the once-an-hour / 12 h repeats and the "OK" lines): /var/lib/iora/monitor/state.json
+StateDirectory=iora/monitor
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/iora/monitor
+# An alarm exits 1, so the unit also shows as failed in `systemctl --failed` (a second, visible signal).

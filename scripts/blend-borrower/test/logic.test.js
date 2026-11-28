@@ -70,3 +70,13 @@ test("stale prices or inactive pool: no borrowing", () => {
   assert.equal(decide({ ...base, pricesOk: false }, cfg).actions.length, 0);
   assert.equal(decide({ ...base, poolActive: false }, cfg).actions.length, 0);
 });
+
+test("a repay the wallet cannot cover is a warning for the bots check (and still a note)", () => {
+  // HF 1.37 < 1.5, wants ~40.9 USDC back, the wallet holds 10
+  const r = decide({ ...base, borrowed: 60, debt: 130, effLiabilities: 130 / 0.95, walletUsdc: 10 }, cfg);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /^wallet holds only 10\.0000 USDC of 40\.9375 needed: add XLM or USDC to the bot$/);
+  assert.ok(r.notes.includes(r.warnings[0]));
+  assert.deepEqual(r.actions.map((a) => a.kind), ["repay"]);
+  assert.deepEqual(decide(base, cfg).warnings, []);
+});
