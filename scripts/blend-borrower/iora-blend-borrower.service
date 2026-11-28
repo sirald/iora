@@ -16,3 +16,6 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/opt/iora/blend-borrower
+# The status file for the bots check (scripts/monitor): systemd creates /var/lib/iora/borrower (owner iora),
+# keeps it writable under ProtectSystem=strict and passes it as STATE_DIRECTORY; the bot writes status.json there.
+StateDirectory=iora/borrower

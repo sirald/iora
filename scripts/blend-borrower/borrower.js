@@ -12,6 +12,8 @@
 // USDC or XLM supply), and borrows / repays towards the utilisation that pays the target at the current ir_mod.
 // A coin that is not an active reserve yet (Iora's coins before 2026-12-04T19:58Z) is skipped.
 // MULTI=off, or no targets file, keeps the bot USDC-only exactly as before.
+// At the end of every run, success or failure, it writes a status file for the bots check (status.js,
+// scripts/monitor): $STATE_DIRECTORY/status.json from the unit's StateDirectory=, or STATUS_FILE. Not in a dry run.
 //
 // Usage:  node borrower.js            one run (does what logic.js and multi.js decide)
 //         node borrower.js --dry-run  only prints the decisions
@@ -27,6 +29,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { decide } from "./logic.js";
 import { curveOf, decideMulti } from "./multi.js";
+import { borrowerStatus, multiAfter, multiRecord, readStatus, statusPath, usdcAfter, usdcRecord, writeStatus } from "./status.js";
 
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== "" ? process.env[k] : d);
 const num = (k, d) => {
@@ -58,6 +61,36 @@ const cfg = {
   multiTargetHf: num("MULTI_TARGET_HF", env("TARGET_HF", 2.0)),
   overshoot: num("UTIL_OVERSHOOT", 0.02), // how far above a curve's util the bot may go to raise a low ir_mod
 };
+const DRY = process.argv.includes("--dry-run");
+const SETUP = process.argv.includes("--setup");
+
+// What this run saw, for the status file (only recorded here; nothing below reads it to decide or send).
+const STATUS_FILE = DRY ? null : statusPath(process.env);
+const run = { startedAt: Date.now(), address: null, pool: cfg.pool ?? null, steps: { usdc: cfg.usdcStep, multi: false }, warnings: [], submitted: [] };
+function saveStatus(ok, error) {
+  if (!STATUS_FILE) return;
+  try {
+    writeStatus(STATUS_FILE, borrowerStatus(readStatus(STATUS_FILE), run, { ok, error }));
+  } catch (e) {
+    console.error(new Date().toISOString(), "WARN", `status file not written: ${e?.message ?? e}`);
+  }
+}
+/** Adds the numbers f() returns to the run's record; an error there only costs the status those numbers. */
+function record(f) {
+  try {
+    Object.assign(run, f());
+  } catch (e) {
+    console.error(new Date().toISOString(), "WARN", `status numbers not recorded: ${e?.message ?? e}`);
+  }
+}
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+const fail = (m) => {
+  console.error(new Date().toISOString(), "ERROR", m);
+  saveStatus(false, m);
+  process.exit(1);
+};
+
 // targets.json: { "collateral": { "coin", "targetUsd" }, "coins": { NAME: { token, code?, issuer?, supplyApr,
 // maxBorrowApr?, maxDebtUsd, supplyUsd?, band? } } }
 let targets = null;
@@ -65,30 +98,17 @@ if (cfg.multi && existsSync(cfg.targetsFile)) {
   try {
     targets = JSON.parse(readFileSync(cfg.targetsFile, "utf8"));
   } catch (e) {
-    console.error(new Date().toISOString(), "ERROR", `cannot read ${cfg.targetsFile}: ${e.message}`);
-    process.exit(1);
+    fail(`cannot read ${cfg.targetsFile}: ${e.message}`);
   }
   for (const [k, t] of Object.entries(targets.coins ?? {})) {
-    if (!t.token || !(t.supplyApr >= 0) || !(t.maxDebtUsd >= 0)) {
-      console.error(new Date().toISOString(), "ERROR", `targets.json: ${k} needs token, supplyApr and maxDebtUsd`);
-      process.exit(1);
-    }
-    if (t.token === (process.env.USDC || "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA")) {
-      console.error(new Date().toISOString(), "ERROR", "targets.json: USDC is handled by the USDC step (UTIL_TARGET), not by targets.json");
-      process.exit(1);
-    }
+    if (!t.token || !(t.supplyApr >= 0) || !(t.maxDebtUsd >= 0)) fail(`targets.json: ${k} needs token, supplyApr and maxDebtUsd`);
+    if (t.token === (process.env.USDC || "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"))
+      fail("targets.json: USDC is handled by the USDC step (UTIL_TARGET), not by targets.json");
   }
+  run.steps.multi = true;
 }
-const DRY = process.argv.includes("--dry-run");
-const SETUP = process.argv.includes("--setup");
 const SCALAR7 = 1e7;
 const SCALAR12 = 1e12;
-
-const log = (...a) => console.log(new Date().toISOString(), ...a);
-const fail = (m) => {
-  console.error(new Date().toISOString(), "ERROR", m);
-  process.exit(1);
-};
 
 if (!cfg.pool) fail("BLEND_POOL is not set");
 if (!(cfg.utilBand > 0 && cfg.utilTarget - cfg.utilBand > 0 && cfg.utilTarget + cfg.utilBand < 0.95))
@@ -100,10 +120,16 @@ if (!secret) fail("BORROWER_SECRET is not set");
 const kp = Keypair.fromSecret(secret);
 delete process.env.BORROWER_SECRET;
 const ME = kp.publicKey();
+run.address = ME;
 if (cfg.expectAddress && cfg.expectAddress !== ME) fail(`BORROWER_SECRET does not belong to BORROWER_ADDRESS ${cfg.expectAddress}`);
 
 const server = new rpc.Server(cfg.rpcUrl, { allowHttp: cfg.rpcUrl.startsWith("http://") });
-const passphrase = (await server.getNetwork()).passphrase;
+let passphrase;
+try {
+  passphrase = (await server.getNetwork()).passphrase;
+} catch (e) {
+  fail(`RPC ${cfg.rpcUrl} did not answer: ${e?.message ?? e}`);
+}
 if (passphrase !== Networks.TESTNET) fail(`this bot runs on testnet only (RPC says "${passphrase}")`);
 
 async function account() {
@@ -169,6 +195,7 @@ async function main() {
   if (cfg.usdcStep) await usdcStep();
   if (targets) await multiStep();
   else if (!cfg.usdcStep) log(`USDC_STEP=off and no targets (${cfg.multi ? `${cfg.targetsFile} missing` : "MULTI=off"}): nothing to do`);
+  saveStatus(true);
 }
 
 // Blend request types: 0 supply, 2 supply collateral, 4 borrow, 5 repay.
@@ -251,7 +278,7 @@ async function multiStep() {
   };
   const reserve = {};
   for (const k of names) if (tokenOf[k] === cfg.coll) reserve[k] = cfg.collReserve; // XLM kept for fees
-  const { requests, notes } = decideMulti(state, targets.coins, {
+  const { requests, notes, warnings } = decideMulti(state, targets.coins, {
     minHf: cfg.multiMinHf,
     targetHf: cfg.multiTargetHf,
     minActionUsd: cfg.minAction,
@@ -259,6 +286,8 @@ async function multiStep() {
     collateral: targets.collateral ?? null,
     reserve,
   });
+  record(() => multiRecord(state, targets.coins, requests, cfg));
+  run.warnings.push(...warnings);
   for (const n of notes) log(n);
   if (requests.length === 0) return log("multi: no action");
   log("multi actions:", requests.map((q) => `${q.kind} ${q.amount.toPrecision(8)} ${q.coin}`).join(", "));
@@ -269,7 +298,10 @@ async function multiStep() {
     amount: BigInt(Math.floor(q.amount * 10 ** (coins[q.coin].decimals ?? 7))),
     request_type: MULTI_TYPE[q.kind],
   }));
-  log("multi submitted:", await submitRequests(req));
+  const hash = await submitRequests(req);
+  log("multi submitted:", hash);
+  run.submitted.push(hash);
+  record(() => multiAfter(state, requests));
 }
 
 async function usdcStep() {
@@ -335,7 +367,9 @@ async function usdcStep() {
       `prices USDC ${state.usdcPrice} XLM ${state.collPrice} | pool status ${poolCfg.status}`,
   );
 
-  const { actions, notes } = decide(state, cfg);
+  const { actions, notes, warnings } = decide(state, cfg);
+  record(() => usdcRecord(state, actions, cfg));
+  run.warnings.push(...warnings);
   for (const n of notes) log(n);
   if (actions.length === 0) return log("no action");
   // Blend request types: 2 supply collateral, 4 borrow, 5 repay.
@@ -349,7 +383,10 @@ async function usdcStep() {
   }));
   log("actions:", actions.map((a) => `${a.kind} ${a.amount.toFixed(4)}`).join(", "));
   if (DRY) return log("dry run: nothing sent");
-  log("submitted:", await submitRequests(requests));
+  const hash = await submitRequests(requests);
+  log("submitted:", hash);
+  run.submitted.push(hash);
+  record(() => usdcAfter(state, actions));
 }
 
 main().catch((e) => fail(String(e?.message ?? e).replace(/S[A-Z2-7]{55}/g, "S***")));
