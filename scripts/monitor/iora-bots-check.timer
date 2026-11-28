@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Iora bots check every 5 minutes
+
+[Timer]
+# After a reboot the bots run first (their timers start 1-5 minutes after boot), then the check.
+OnBootSec=15min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
