@@ -2,10 +2,13 @@ import "./landing.css";
 import "./docs.css";
 import "./skin.css";
 
-// Replace the factory address with the real value from build time.
+// Replace the factory and pool addresses with the real values from build time.
 const f = import.meta.env?.VITE_FACTORY;
 const el = document.getElementById("addr-factory");
 if (f && el) el.textContent = f;
+const pool = import.meta.env?.VITE_POOL;
+const poolEl = document.getElementById("addr-pool");
+if (pool && poolEl) poolEl.textContent = pool;
 
 // Copy button next to the addresses
 for (const code of document.querySelectorAll(".addr code")) {

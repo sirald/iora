@@ -116,6 +116,9 @@ code {
 .risk-list { margin: 0; }
 .risk-list dt { font-weight: 500; color: var(--text); margin-top: 18px; padding-left: 14px; border-left: 2px solid color-mix(in srgb, var(--signal) 60%, transparent); }
 .risk-list dd { margin: 6px 0 0; padding-left: 16px; }
+.risk-list dd p { margin: 0 0 8px; }
+.risk-list dd ul { margin: 0 0 8px; }
+.risk-list dd li { margin-bottom: 4px; }
 
 details { border-bottom: 1px solid var(--line); padding: 14px 0; }
 details summary { cursor: pointer; font-weight: 500; font-size: 16px; color: var(--text); }

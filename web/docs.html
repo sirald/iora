@@ -369,15 +369,36 @@
           <h2>Risks</h2>
           <p>Using Iora means trusting its contracts and the protocols it is built on. Please read these before depositing.</p>
           <dl class="risk-list">
-            <dt>Blend pool risk</dt>
+            <dt>Lending pool risk</dt>
             <dd>
-              For now, your deposit sits in a Blend lending pool that Iora does not run. The pool, its price oracle and its
-              backstop are run by Blend and the pool's operators. Iora does not control them and cannot make up a loss that
-              happens there. Once there is enough liquidity, we plan to open Iora's own lending pools; that would give Iora the pool's risk
-              to manage, not remove it. Until then every vault uses this Blend pool.
-              All vaults supply to the same Blend pool. If a borrower's debt exceeds their collateral, for example after an oracle
-              failure, the loss is covered first by Blend's backstop. If the backstop cannot cover it, the remaining bad debt is
-              spread across lenders, which lowers the value of every deposit in that pool, including your vault's.
+              <p>
+                Your deposit is supplied to a lending pool built on Blend's contracts. On testnet this is Iora's own pool:
+                Iora deployed it and holds its admin role, so you trust Iora as the pool's operator as well as Blend's code.
+                The pool admin can:
+              </p>
+              <ul>
+                <li>Change a coin's lending settings (how much can be borrowed against it, its interest rate curve, its caps) or
+                  add a new coin. Each such change is queued and can only take effect a week later, so it is public on-chain
+                  before it applies.</li>
+                <li>Change some pool-wide settings at once, such as the share of interest that goes to the backstop.</li>
+                <li>Put the pool on ice or freeze it. That stops new borrowing (and, when frozen, new deposits); repaying and
+                  withdrawing keep working.</li>
+                <li>Change where the pool gets its prices. The pool reads prices through Iora's oracle adapter, which takes them
+                  from the Reflector oracle. The adapter's admin, also Iora, can change which price feed a coin uses or point
+                  the adapter at another source, and that takes effect at once. A wrong price could let a borrower take out
+                  more than their collateral is worth.</li>
+              </ul>
+              <p>
+                On testnet all of these roles are held by a single Iora key. Most of the borrowing in the pool comes from
+                Iora's own test bots, which keep utilization and interest rates close to real markets.
+              </p>
+              <p>
+                All vaults supply to the same pool. If a borrower's debt exceeds their collateral, for example after an oracle
+                failure, the loss is covered first by the pool's backstop. On testnet the backstop holds only Iora's own
+                deposit, made with a backstop token that Iora issues, so it can cover very little. Whatever the backstop
+                cannot cover is spread across lenders as bad debt, which lowers the value of every deposit in the pool,
+                including your vault's.
+              </p>
             </dd>
             <dt>Liquidity risk</dt>
             <dd>When most of the pool is borrowed, there may not be enough cash to withdraw or fill right away. High utilization pushes rates up, which usually brings cash back quickly.</dd>
@@ -386,7 +407,7 @@
             <dt>Swap and price risk</dt>
             <dd>Fills go through a trading venue's pool for the two tokens of the order (whichever venue pays the most at that moment), so a bug in a venue is also a risk; the most a single fill exposes is the amount being filled. Your limit protects the price you pay, but a thin or manipulated pool can delay fills, and whoever fills your order can keep any price improvement beyond your limit (see <a href="#price-improvement">Price improvement</a>).</dd>
             <dt>Oracle risk (stop loss)</dt>
-            <dd>Stop loss orders rely on the price oracle of the Blend pool. If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
+            <dd>Stop loss orders rely on the lending pool's price oracle (on testnet, Iora's adapter over Reflector; see Lending pool risk). If the oracle stops updating or reports a wrong price, a stop can fail to trigger, trigger late, or wait while the price falls quickly. A stop loss limits losses in normal markets; it is not a guarantee.</dd>
             <dt>Keeper risk</dt>
             <dd>If no keeper is running, orders do not fill, and you can miss a price that came and went. Today Iora runs a single keeper, so it can be offline for hours. This never puts funds at risk: cancelling and withdrawing do not need the keeper.</dd>
             <dt>Coins that can be traded</dt>
@@ -416,7 +437,13 @@
             is complete, and the report will be published here.
           </p>
           <p class="addr">
-            The contracts are public on Stellar testnet. Vault factory: <code id="addr-factory">CAFI6QIQUCMDB72YZ3BLSIA2PPFPGLWASMCRG72OE4JOQUR6JPBGBKIZ</code>
+            The contracts are public on Stellar testnet. Vault factory: <code id="addr-factory">CBGQQWKM4TM5QFRCEJPBLSMXGRWOXUBJQUQ2FKDRBEJZYGV37MM4SB5L</code>
+          </p>
+          <p class="addr">
+            Lending pool (Blend v2, run by Iora): <code id="addr-pool">CANUGJL73FGXXDE7BVVUCIPM2ETOO2UARG4B3Q2TJKI4FADWJAMLIKXV</code>
+          </p>
+          <p class="addr">
+            Pool's price oracle (Iora's adapter over Reflector): <code>CCSZNMAXTNMIZNGDBLIZYKLOZG3LYKSIXCYC7GKWLOBLSMUPX7MKPHDF</code>
           </p>
           <p>
             Found a vulnerability? Please report it privately to <a href="mailto:hello@iorafi.com?subject=Security">hello@iorafi.com</a>
@@ -429,19 +456,19 @@
           <h2>FAQ</h2>
           <details><summary>Can I sell coins too, not just buy?</summary><p>Yes. The same vault holds all of your assets. Pick a pair, and on the Sell side of the Trade page set the price at which your coin is sold for USDC; it keeps earning on Blend until then. More pairs will follow.</p></details>
           <details><summary>I got test USDC from another faucet. Why can't I use it?</summary><p>On Stellar a token is identified by its name and its issuer. On testnet Iora uses Circle's test USDC (issuer <code>GBBD47IF…FLA5</code>), so USDC from Circle's faucet works here. Test USDC from other sources, such as older Blend or Soroswap test tokens, has the same name but a different issuer, so it is a different token and will not show up here. Get the right one on the <i>Test funds</i> page. On mainnet there is only one USDC.</p></details>
-          <details><summary>Does Iora hold my funds?</summary><p>No. Your funds are in your own vault contract and, through it, on Blend. Neither Iora nor the keeper can withdraw them.</p></details>
+          <details><summary>Does Iora hold my funds?</summary><p>No. Your funds are in your own vault contract and, through it, in the lending pool. Neither Iora nor the keeper can withdraw them. On testnet Iora does run that lending pool; see <a href="#risks">Risks</a> for what its admin can change.</p></details>
           <details><summary>Why not use Stellar's built-in order book?</summary><p>An order on the Stellar order book keeps your funds idle until it fills. With Iora, the amount waiting for your price earns interest on Blend.</p></details>
           <details><summary>Why hasn't my order filled?</summary><p>The price may not have passed your limit by enough to cover the fill fee, the lending pool may be short of cash at that moment, or the pool the fill trades in may be too thin for your price impact limit. The orders list on the <i>Trade</i> page shows the status.</p></details>
-          <details><summary>Can I lose money?</summary><p>Yes. Blend bad debt, a contract bug or a phishing site could cause losses. See <a href="#risks">Risks</a>. On testnet only test funds are used.</p></details>
-          <details><summary>How much interest will I earn?</summary><p>It depends on how much of the Blend pool is borrowed, and changes constantly. The <i>Portfolio</i> page shows what you have earned.</p></details>
+          <details><summary>Can I lose money?</summary><p>Yes. Bad debt in the lending pool, a contract bug or a phishing site could cause losses. See <a href="#risks">Risks</a>. On testnet only test funds are used.</p></details>
+          <details><summary>How much interest will I earn?</summary><p>It depends on how much of the lending pool is borrowed, and changes constantly. On testnet most of the borrowing comes from Iora's own test bots, which aim for rates close to real markets. The <i>Portfolio</i> page shows what you have earned.</p></details>
           <details><summary>When will Iora launch on mainnet?</summary><p>Not before an independent security audit is complete.</p></details>
         </section>
 
         <section id="glossary">
           <h2>Glossary</h2>
           <dl class="terms">
-            <dt>Blend</dt><dd>A lending protocol on Stellar. Your vault supplies your assets to it to earn interest.</dd>
-            <dt>Backstop</dt><dd>Blend's insurance layer that absorbs bad debt before lenders do.</dd>
+            <dt>Blend</dt><dd>A lending protocol on Stellar on which anyone can open a lending pool. Your vault supplies your assets to a Blend pool to earn interest; on testnet that is Iora's own pool.</dd>
+            <dt>Backstop</dt><dd>A Blend pool's insurance layer: deposits that absorb bad debt before lenders do.</dd>
             <dt>Fill</dt><dd>Spending part or all of an order's amount: USDC to buy a coin, or a coin sold for USDC.</dd>
             <dt>Friendbot</dt><dd>A testnet service that sends free test XLM.</dd>
             <dt>Guardian</dt><dd>The address that can pause new vaults and orders and edit the list of tradable coins. It cannot move funds.</dd>
@@ -449,6 +476,8 @@
             <dt>Vault</dt><dd>Your own contract. It holds your assets, supplies them to Blend, and places buy and sell orders from them.</dd>
             <dt>Limit price</dt><dd>For a buy order, the most USDC you will pay for 1 unit of a coin; for a sell order, the least USDC you accept for 1 unit.</dd>
             <dt>Buy vault, sell vault</dt><dd>The two separate vaults used by earlier versions. They still work for the people who opened them.</dd>
+            <dt>Oracle</dt><dd>The contract a lending pool asks for prices. Iora's testnet pool uses Iora's adapter, which reads the Reflector oracle.</dd>
+            <dt>Pool admin</dt><dd>The address that manages a lending pool's settings. For Iora's testnet pool it is an Iora key; see <a href="#risks">Risks</a>.</dd>
             <dt>Price impact</dt><dd>How much a trade moves a pool's price; larger trades in smaller pools move it more.</dd>
             <dt>Trading venues</dt><dd>The decentralized exchanges on Stellar where the swaps happen (for example Aquarius and Soroswap). Iora picks the route that pays the most for each fill.</dd>
             <dt>Trustline</dt><dd>A one-time Stellar setting that lets your account hold an asset such as USDC.</dd>
@@ -466,7 +495,7 @@
             <li><b>Mainnet</b><span>Only after the audit is complete.</span></li>
             <li class="goal"><b>Cross-chain</b><span>Keep your money on Stellar and place orders to buy coins on other networks.</span></li>
             <li><b>Tokenized stocks</b><span>Limit orders for tokenized shares. The cash behind a buy order earns while it waits; a share itself earns only if a lending pool lists it.</span></li>
-            <li><b>Planned</b><span>Iora's own lending pools once liquidity allows, more pairs, more wallets, wallet and DAO integrations.</span></li>
+            <li><b>Planned</b><span>Iora's own lending pools on mainnet once liquidity allows (on testnet Iora already runs one), more pairs, more wallets, wallet and DAO integrations.</span></li>
           </ol>
         </section>
 
